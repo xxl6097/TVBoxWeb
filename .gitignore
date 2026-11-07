@@ -1,0 +1,20 @@
+# 数据文件（含用户配置/历史/收藏，勿入库）
+server/data/
+server/tvbox
+
+# 发布产物（由 build.sh 生成）
+release/
+
+# 裸二进制
+fanren-*
+yezhen-*
+
+# 前端构建产物（由 npm run build 生成）
+server/dist/
+
+# Node
+web/node_modules/
+web/dist/
+
+# 系统
+.DS_Store

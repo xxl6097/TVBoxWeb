@@ -1,0 +1,610 @@
+// Package store 实现配置与本地数据持久化（JSON 文件），与鸿蒙影视 Store.ets 对应。
+package store
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"tvbox/internal/model"
+)
+
+// Data 是落盘结构，字段名与鸿蒙 preferences 键一一对应。
+type Data struct {
+	CfgText      string               `json:"cfgText"`
+	CfgURL       string               `json:"cfgUrl"`
+	CfgCustom    string               `json:"cfgCustom"`
+	SubName      string               `json:"subName"`
+	Enabled      []string             `json:"enabled"`
+	Hist         []HistItem           `json:"hist"`
+	Fav          []FavItem            `json:"fav"`
+	KwHist       string               `json:"kwHist"`
+	LiveURL      string               `json:"liveUrl"`
+	SubLives     []model.RawLive      `json:"subLives"`
+	QPref        int                  `json:"qPref"`
+	IntroSkip    int                  `json:"introSkip"`
+	OutroSkip    int                  `json:"outroSkip"`
+	TapSound     int                  `json:"tapSound"`
+	TapVibrate   int                  `json:"tapVibrate"`
+	Feed         []model.Vod          `json:"feed"`
+	CrawlAt      int64                `json:"crawlAt"`
+	CrawlSummary string               `json:"crawlSummary"`
+	DeadKeys     []string             `json:"deadKeys"`
+	PrivacyAgreed bool                `json:"privacyAgreed"`
+	GuideDone    bool                 `json:"guideDone"`
+	DirectList   []string             `json:"directList"`
+	WebdavList   []model.WebdavSource `json:"webdavList"`
+	WebdavScan   map[string][]model.WebdavVod `json:"webdavScan"`
+	WdHist       []model.WdHistory    `json:"wdHist"`
+}
+
+type HistItem struct {
+	SiteKey  string `json:"siteKey"`
+	SiteName string `json:"siteName"`
+	VodID    string `json:"vodId"`
+	Name     string `json:"name"`
+	Pic      string `json:"pic"`
+	EpName   string `json:"epName"`
+	EpIndex  int    `json:"epIndex"`
+	From     string `json:"from"`
+	Pos      int64  `json:"pos"`
+	Dur      int64  `json:"dur"`
+	Time     int64  `json:"time"`
+}
+
+type FavItem struct {
+	SiteKey  string `json:"siteKey"`
+	SiteName string `json:"siteName"`
+	VodID    string `json:"vodId"`
+	Name     string `json:"name"`
+	Pic      string `json:"pic"`
+}
+
+type SubResult struct {
+	Name  string `json:"name"`
+	Sites int    `json:"sites"`
+	Lives int    `json:"lives"`
+}
+
+var (
+	mu      sync.Mutex
+	path    string
+	data    = &Data{WebdavScan: map[string][]model.WebdavVod{}}
+	siteList []model.Site
+	parseList []model.ParseRule
+	rawSites int
+)
+
+// Init 指定数据文件路径并加载。
+func Init(p string) error {
+	mu.Lock()
+	defer mu.Unlock()
+	path = p
+	if p == "" {
+		return nil
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if len(b) == 0 {
+		return nil
+	}
+	d := &Data{}
+	if err := json.Unmarshal(b, &d); err != nil {
+		return err
+	}
+	if d.WebdavScan == nil {
+		d.WebdavScan = map[string][]model.WebdavVod{}
+	}
+	data = d
+	return nil
+}
+
+func save() {
+	if path == "" {
+		return
+	}
+	os.MkdirAll(filepath.Dir(path), 0o755)
+	b, _ := json.MarshalIndent(data, "", "  ")
+	_ = os.WriteFile(path, b, 0o600)
+}
+
+func flush() { save() }
+
+// ---------- 配置 ----------
+
+func IsCustom() bool { return data.CfgCustom == "1" }
+func GetConfigURL() string { return data.CfgURL }
+func SubName() string { return data.SubName }
+func CachedText() string { return data.CfgText }
+
+// SetCfg 保存配置原文与来源地址。
+func SetCfg(text, source string) {
+	mu.Lock()
+	data.CfgText = text
+	if strings.HasPrefix(source, "http") {
+		data.CfgURL = source
+		data.CfgCustom = "1"
+	}
+	mu.Unlock()
+	flush()
+}
+
+func SetSubName(name string) {
+	if name == "" {
+		return
+	}
+	mu.Lock()
+	data.SubName = name
+	mu.Unlock()
+	flush()
+}
+
+// ResetCrawlAt 站源列表变了，重置抓取时钟。
+func ResetCrawlAt() {
+	mu.Lock()
+	data.CrawlAt = 0
+	mu.Unlock()
+	flush()
+}
+
+func BuildSites(cfg model.RawConfig) {
+	mu.Lock()
+	defer mu.Unlock()
+	var out []model.Site
+	for i, r := range cfg.Sites {
+		s := model.Site{
+			Key: r.Key, Name: r.Name, Type: r.Type, API: r.API,
+			Searchable:  r.Searchable == 1,
+			QuickSearch: r.QuickSearch == 1,
+		}
+		if s.Key == "" {
+			s.Key = "site_" + itoa(i)
+		}
+		if s.Name == "" {
+			s.Name = "站源 " + itoa(i+1)
+		}
+		if s.Type == 0 {
+			s.Type = 1
+		}
+		switch e := r.Ext.(type) {
+		case string:
+			s.Ext = e
+		case nil:
+			s.Ext = ""
+		default:
+			b, _ := json.Marshal(e)
+			s.Ext = string(b)
+		}
+		switch {
+		case s.Type == 3:
+			s.Usable = false
+			s.Reason = "需爬虫运行时（Java/JS），Web 无法执行"
+		case s.Type == 0 || s.Type == 1 || s.Type == 4:
+			if hasPrefix(s.API) {
+				s.Usable = true
+			} else {
+				s.Reason = "接口地址不是 HTTP"
+			}
+		default:
+			s.Reason = "暂不支持的类型 type=" + itoa(s.Type)
+		}
+		out = append(out, s)
+	}
+	rawSites = len(out)
+	siteList = out
+}
+
+func BuildParses(cfg model.RawConfig) {
+	mu.Lock()
+	defer mu.Unlock()
+	var out []model.ParseRule
+	for i, p := range cfg.Parses {
+		if p.Type == 1 && hasPrefix(p.URL) {
+			name := p.Name
+			if name == "" {
+				name = "解析" + itoa(i)
+			}
+			out = append(out, model.ParseRule{Name: name, URL: p.URL})
+		}
+	}
+	parseList = out
+}
+
+func Sites() []model.Site { return siteList }
+func TotalSites() int     { return rawSites }
+func Parses() []model.ParseRule { return parseList }
+
+func Site(key string) *model.Site {
+	for i := range siteList {
+		if siteList[i].Key == key {
+			return &siteList[i]
+		}
+	}
+	return nil
+}
+
+func UsableSites() []model.Site {
+	var out []model.Site
+	for _, s := range siteList {
+		if s.Usable {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// ActiveSites 默认只启用协议型站点。
+func ActiveSites() []model.Site {
+	keys := data.Enabled
+	if len(keys) == 0 {
+		return UsableSites()
+	}
+	set := map[string]bool{}
+	for _, k := range keys {
+		set[k] = true
+	}
+	var out []model.Site
+	for _, s := range siteList {
+		if s.Usable && set[s.Key] {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func EnabledKeys() []string { return data.Enabled }
+func SetEnabledKeys(keys []string) {
+	mu.Lock()
+	data.Enabled = keys
+	mu.Unlock()
+	flush()
+}
+
+// ---------- 历史 ----------
+
+func History() []HistItem { return data.Hist }
+
+func PushHistory(h HistItem) {
+	mu.Lock()
+	var out []HistItem
+	out = append(out, h)
+	key := h.SiteKey + "|" + h.VodID
+	for _, it := range data.Hist {
+		if it.SiteKey+"|"+it.VodID != key {
+			out = append(out, it)
+		}
+		if len(out) >= 40 {
+			break
+		}
+	}
+	data.Hist = out
+	mu.Unlock()
+	flush()
+}
+
+func UpdateHistoryPos(h HistItem) {
+	mu.Lock()
+	found := false
+	for i := range data.Hist {
+		it := &data.Hist[i]
+		if it.SiteKey == h.SiteKey && it.VodID == h.VodID {
+			it.Pos, it.Dur, it.EpName, it.EpIndex, it.From, it.Time = h.Pos, h.Dur, h.EpName, h.EpIndex, h.From, time.Now().UnixMilli()
+			found = true
+		}
+	}
+	if !found {
+		data.Hist = append([]HistItem{h}, data.Hist...)
+	}
+	mu.Unlock()
+	flush()
+}
+
+func RemoveHistory(h HistItem) {
+	mu.Lock()
+	var out []HistItem
+	for _, it := range data.Hist {
+		if !(it.SiteKey == h.SiteKey && it.VodID == h.VodID) {
+			out = append(out, it)
+		}
+	}
+	data.Hist = out
+	mu.Unlock()
+	flush()
+}
+
+func ClearHistory() { mu.Lock(); data.Hist = nil; mu.Unlock(); flush() }
+
+// ---------- 收藏 ----------
+
+func Favorites() []FavItem { return data.Fav }
+
+func IsFavorite(siteKey, vodID string) bool {
+	for _, f := range data.Fav {
+		if f.SiteKey == siteKey && f.VodID == vodID {
+			return true
+		}
+	}
+	return false
+}
+
+func ToggleFavorite(f FavItem) bool {
+	mu.Lock()
+	removed := false
+	var out []FavItem
+	for _, it := range data.Fav {
+		if it.SiteKey == f.SiteKey && it.VodID == f.VodID {
+			removed = true
+		} else {
+			out = append(out, it)
+		}
+	}
+	if !removed {
+		out = append([]FavItem{f}, out...)
+	}
+	data.Fav = out
+	mu.Unlock()
+	flush()
+	return !removed
+}
+
+// ---------- 搜索历史 ----------
+
+func Keywords() []string {
+	var out []string
+	for _, p := range splitLines(data.KwHist) {
+		p = trim(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func PushKeyword(kw string) []string {
+	k := trim(kw)
+	if k == "" {
+		return Keywords()
+	}
+	old := Keywords()
+	out := []string{k}
+	for _, o := range old {
+		if o != k && len(out) < 8 {
+			out = append(out, o)
+		}
+	}
+	mu.Lock()
+	data.KwHist = joinLines(out)
+	mu.Unlock()
+	flush()
+	return out
+}
+
+func ClearKeywords() { mu.Lock(); data.KwHist = ""; mu.Unlock(); flush() }
+
+// ---------- 直播源 ----------
+
+func LiveURL() string       { return data.LiveURL }
+func SetLiveURL(u string)   { mu.Lock(); data.LiveURL = u; mu.Unlock(); flush() }
+func SubLives() []model.RawLive { return data.SubLives }
+func SetSubLives(list []model.RawLive) { mu.Lock(); data.SubLives = list; mu.Unlock(); flush() }
+
+// ---------- 画质 / 跳过 / 反馈 ----------
+
+func QPref() int            { return data.QPref }
+func SetQPref(v int)        { mu.Lock(); data.QPref = v; mu.Unlock(); flush() }
+func IntroSkipSec() int     { return data.IntroSkip }
+func SetIntroSkipSec(v int) { mu.Lock(); data.IntroSkip = v; mu.Unlock(); flush() }
+func OutroSkipSec() int     { return data.OutroSkip }
+func SetOutroSkipSec(v int) { mu.Lock(); data.OutroSkip = v; mu.Unlock(); flush() }
+func TapSound() int         { if data.TapSound == 0 { return 1 }; return data.TapSound }
+func SetTapSound(v int)     { mu.Lock(); data.TapSound = v; mu.Unlock(); flush() }
+func TapVibrate() int       { if data.TapVibrate == 0 { return 1 }; return data.TapVibrate }
+func SetTapVibrate(v int)   { mu.Lock(); data.TapVibrate = v; mu.Unlock(); flush() }
+
+// ---------- 定时抓取 ----------
+
+func Feed() []model.Vod        { return data.Feed }
+func SaveFeed(list []model.Vod) { mu.Lock(); data.Feed = list; mu.Unlock(); flush() }
+func LastCrawlAt() int64       { return data.CrawlAt }
+func SetLastCrawlAt(t int64)   { mu.Lock(); data.CrawlAt = t; mu.Unlock(); flush() }
+func CrawlSummary() string     { return data.CrawlSummary }
+func SaveCrawlSummary(s string) { mu.Lock(); data.CrawlSummary = s; mu.Unlock(); flush() }
+func DeadKeys() []string       { return data.DeadKeys }
+func SaveDeadKeys(keys []string) { mu.Lock(); data.DeadKeys = keys; mu.Unlock(); flush() }
+
+// ---------- 首启同意与引导 ----------
+
+func PrivacyAgreed() bool       { return data.PrivacyAgreed }
+func SetPrivacyAgreed()         { mu.Lock(); data.PrivacyAgreed = true; mu.Unlock(); flush() }
+func GuideDone() bool           { return data.GuideDone }
+func SetGuideDone()             { mu.Lock(); data.GuideDone = true; mu.Unlock(); flush() }
+
+// ---------- 直连播放 ----------
+
+func DirectList() []string      { return data.DirectList }
+func PushDirect(url string) {
+	mu.Lock()
+	out := []string{url}
+	for _, o := range data.DirectList {
+		if o != url && len(out) < 12 {
+			out = append(out, o)
+		}
+	}
+	data.DirectList = out
+	mu.Unlock()
+	flush()
+}
+
+// ---------- WebDAV ----------
+
+func WebdavSources() []model.WebdavSource { return data.WebdavList }
+
+func SaveWebdavSource(src model.WebdavSource) {
+	mu.Lock()
+	if src.ID == "" {
+		src.ID = "wd_" + itoa(int(time.Now().UnixMilli()))
+	}
+	replaced := false
+	for i := range data.WebdavList {
+		if data.WebdavList[i].ID == src.ID {
+			data.WebdavList[i] = src
+			replaced = true
+		}
+	}
+	if !replaced {
+		data.WebdavList = append([]model.WebdavSource{src}, data.WebdavList...)
+	}
+	mu.Unlock()
+	flush()
+}
+
+func RemoveWebdavSource(id string) {
+	mu.Lock()
+	var out []model.WebdavSource
+	for _, s := range data.WebdavList {
+		if s.ID != id {
+			out = append(out, s)
+		}
+	}
+	data.WebdavList = out
+	delete(data.WebdavScan, id)
+	mu.Unlock()
+	flush()
+}
+
+func WebdavSource(id string) *model.WebdavSource {
+	for i := range data.WebdavList {
+		if data.WebdavList[i].ID == id {
+			return &data.WebdavList[i]
+		}
+	}
+	return nil
+}
+
+func WebdavScanCache(srcID string) []model.WebdavVod { return data.WebdavScan[srcID] }
+func SaveWebdavScan(srcID string, vods []model.WebdavVod) {
+	mu.Lock()
+	data.WebdavScan[srcID] = vods
+	mu.Unlock()
+	flush()
+}
+
+func WdHistory() []model.WdHistory {
+	list := append([]model.WdHistory(nil), data.WdHist...)
+	sort.SliceStable(list, func(i, j int) bool { return list[i].Time > list[j].Time })
+	return list
+}
+
+func UpdateWdHistory(h model.WdHistory) {
+	mu.Lock()
+	found := false
+	for i := range data.WdHist {
+		it := &data.WdHist[i]
+		if it.SrcID == h.SrcID && it.VodName == h.VodName {
+			*it = h
+			found = true
+		}
+	}
+	if !found {
+		data.WdHist = append([]model.WdHistory{h}, data.WdHist...)
+	}
+	mu.Unlock()
+	flush()
+}
+
+func RemoveWdHistory(h model.WdHistory) {
+	mu.Lock()
+	var out []model.WdHistory
+	for _, it := range data.WdHist {
+		if !(it.SrcID == h.SrcID && it.VodName == h.VodName) {
+			out = append(out, it)
+		}
+	}
+	data.WdHist = out
+	mu.Unlock()
+	flush()
+}
+
+func ClearWdHistory() { mu.Lock(); data.WdHist = nil; mu.Unlock(); flush() }
+
+// ---------- 小工具 ----------
+
+func hasPrefix(s string) bool {
+	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	var b []byte
+	for n > 0 {
+		b = append([]byte{byte('0' + n%10)}, b...)
+		n /= 10
+	}
+	if neg {
+		return "-" + string(b)
+	}
+	return string(b)
+}
+
+func splitLines(s string) []string {
+	if s == "" {
+		return nil
+	}
+	var out []string
+	cur := ""
+	for _, c := range s {
+		if c == '\n' {
+			out = append(out, cur)
+			cur = ""
+		} else {
+			cur += string(c)
+		}
+	}
+	out = append(out, cur)
+	return out
+}
+
+func joinLines(list []string) string {
+	out := ""
+	for i, s := range list {
+		if i > 0 {
+			out += "\n"
+		}
+		out += s
+	}
+	return out
+}
+
+func trim(s string) string {
+	return stringTrim(s)
+}
+
+func stringTrim(s string) string {
+	start, end := 0, len(s)
+	for start < end && isSpace(s[start]) {
+		start++
+	}
+	for end > start && isSpace(s[end-1]) {
+		end--
+	}
+	return s[start:end]
+}
+
+func isSpace(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\n' || b == '\r'
+}

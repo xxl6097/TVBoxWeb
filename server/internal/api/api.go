@@ -1,0 +1,1018 @@
+// Package api 实现 REST API 与视频流代理。
+package api
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"reflect"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"tvbox/internal/cms"
+	"tvbox/internal/crawler"
+	"tvbox/internal/httpc"
+	"tvbox/internal/live"
+	"tvbox/internal/liveprobe"
+	"tvbox/internal/model"
+	"tvbox/internal/pinyin"
+	"tvbox/internal/quality"
+	"tvbox/internal/resolve"
+	"tvbox/internal/store"
+	"tvbox/internal/webdav"
+)
+
+// Handler 返回根路由。
+func Handler() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/status", hStatus)
+	mux.HandleFunc("/api/sites", hSites)
+	mux.HandleFunc("/api/sites/enabled", hSitesEnabled)
+	mux.HandleFunc("/api/sites/speed", hSitesSpeed)
+	mux.HandleFunc("/api/config", hConfig)
+	mux.HandleFunc("/api/subscription", hSubscription)
+	mux.HandleFunc("/api/categories", hCategories)
+	mux.HandleFunc("/api/vod", hVod)
+	mux.HandleFunc("/api/vod/detail", hVodDetail)
+	mux.HandleFunc("/api/search", hSearch)
+	mux.HandleFunc("/api/suggest", hSuggest)
+	mux.HandleFunc("/api/resolve", hResolve)
+	mux.HandleFunc("/api/pinyin/abbr", hPinyinAbbr)
+
+	mux.HandleFunc("/api/history", hHistory)
+	mux.HandleFunc("/api/history/pos", hHistoryPos)
+	mux.HandleFunc("/api/history/remove", hHistoryRemove)
+	mux.HandleFunc("/api/history/clear", hHistoryClear)
+	mux.HandleFunc("/api/favorites", hFavorites)
+	mux.HandleFunc("/api/favorites/toggle", hFavToggle)
+	mux.HandleFunc("/api/keywords", hKeywords)
+
+	mux.HandleFunc("/api/live/url", hLiveURL)
+	mux.HandleFunc("/api/live/sources", hLiveSources)
+	mux.HandleFunc("/api/live/channels", hLiveChannels)
+	mux.HandleFunc("/api/live/rank/one", hLiveRankOne)
+	mux.HandleFunc("/api/live/rank", hLiveRank)
+	mux.HandleFunc("/api/live/probe/channels", hLiveProbeChannels)
+	mux.HandleFunc("/api/peek", hPeek)
+
+	mux.HandleFunc("/api/crawl", hCrawl)
+	mux.HandleFunc("/api/feed", hFeed)
+	mux.HandleFunc("/api/quality/master", hQualityMaster)
+	mux.HandleFunc("/api/prefs", hPrefs)
+
+	mux.HandleFunc("/api/webdav/sources", hWdSources)
+	mux.HandleFunc("/api/webdav/probe", hWdProbe)
+	mux.HandleFunc("/api/webdav/list", hWdList)
+	mux.HandleFunc("/api/webdav/scan", hWdScan)
+	mux.HandleFunc("/api/webdav/vods", hWdVods)
+	mux.HandleFunc("/api/webdav/history", hWdHistory)
+	mux.HandleFunc("/api/webdav/history/update", hWdHistoryUpdate)
+	mux.HandleFunc("/api/webdav/history/remove", hWdHistoryRemove)
+	mux.HandleFunc("/api/webdav/history/clear", hWdHistoryClear)
+
+	mux.HandleFunc("/api/direct", hDirect)
+	mux.HandleFunc("/api/privacy", hPrivacy)
+
+	mux.HandleFunc("/api/proxy", hProxy)
+	return mux
+}
+
+// ---------- 工具 ----------
+
+func writeJSON(w http.ResponseWriter, code int, v any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(normalize(v))
+}
+
+// normalize 递归把 nil slice/map 转成空 slice/map，避免前端收到 null
+// （前端模板普遍直接读 arr.length，null 会抛 TypeError 导致白屏）。
+func normalize(v any) any {
+	rv := reflect.ValueOf(v)
+	if !rv.IsValid() {
+		return v
+	}
+	switch rv.Kind() {
+	case reflect.Ptr, reflect.Interface:
+		if rv.IsNil() {
+			return nil
+		}
+		return normalize(rv.Elem().Interface())
+	case reflect.Slice:
+		if rv.IsNil() {
+			return reflect.MakeSlice(rv.Type(), 0, 0).Interface()
+		}
+		out := reflect.MakeSlice(rv.Type(), rv.Len(), rv.Len())
+		for i := 0; i < rv.Len(); i++ {
+			out.Index(i).Set(reflect.ValueOf(normalize(rv.Index(i).Interface())))
+		}
+		return out.Interface()
+	case reflect.Map:
+		if rv.IsNil() {
+			return reflect.MakeMap(rv.Type()).Interface()
+		}
+		out := reflect.MakeMap(rv.Type())
+		iter := rv.MapRange()
+		for iter.Next() {
+			out.SetMapIndex(iter.Key(), reflect.ValueOf(normalize(iter.Value().Interface())))
+		}
+		return out.Interface()
+	case reflect.Struct:
+		out := reflect.New(rv.Type()).Elem()
+		for i := 0; i < rv.NumField(); i++ {
+			f := rv.Field(i)
+			if f.CanInterface() {
+				out.Field(i).Set(reflect.ValueOf(normalize(f.Interface())))
+			}
+		}
+		return out.Interface()
+	default:
+		return v
+	}
+}
+
+func ok(w http.ResponseWriter, v any) { writeJSON(w, 200, v) }
+
+func fail(w http.ResponseWriter, code int, msg string) {
+	writeJSON(w, code, map[string]string{"error": msg})
+}
+
+// CORS 跨域中间件（开发时前后端分离用），并兜底 panic 防止单站异常拖垮服务。
+func CORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				writeJSON(w, 500, map[string]string{"error": "内部错误"})
+			}
+		}()
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Range")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(204)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func body(r *http.Request, v any) error {
+	defer r.Body.Close()
+	return json.NewDecoder(r.Body).Decode(v)
+}
+
+func q(r *http.Request, k string) string { return r.URL.Query().Get(k) }
+
+// ---------- 状态 / 站点 ----------
+
+func hStatus(w http.ResponseWriter, r *http.Request) {
+	ok(w, map[string]any{
+		"isCustom":     store.IsCustom(),
+		"subName":      store.SubName(),
+		"configUrl":    store.GetConfigURL(),
+		"totalSites":   store.TotalSites(),
+		"activeSites":  len(store.ActiveSites()),
+		"feedCount":    len(store.Feed()),
+		"lastCrawl":    store.LastCrawlAt(),
+		"crawlSummary": store.CrawlSummary(),
+		"liveUrl":      store.LiveURL(),
+		"privacyAgreed": store.PrivacyAgreed(),
+		"guideDone":    store.GuideDone(),
+	})
+}
+
+func hSites(w http.ResponseWriter, r *http.Request) {
+	if store.TotalSites() == 0 {
+		crawler.Restore()
+	}
+	explicitKeys := store.EnabledKeys()
+	// 若用户从未手动配置过 enabled 列表，默认全部 usable 站源均视为开启，
+	// 与 EnabledSites() 的 fallback 逻辑保持一致，让设置页 badge 显示正确。
+	useAll := len(explicitKeys) == 0
+	enabled := map[string]bool{}
+	for _, k := range explicitKeys {
+		enabled[k] = true
+	}
+	sites := store.Sites()
+	out := make([]model.Site, len(sites))
+	copy(out, sites)
+	for i := range out {
+		if useAll {
+			out[i].Enabled = out[i].Usable
+		} else {
+			out[i].Enabled = enabled[out[i].Key]
+		}
+	}
+	ok(w, out)
+}
+
+func hSitesEnabled(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Keys []string `json:"keys"`
+	}
+	if err := body(r, &req); err != nil {
+		fail(w, 400, "参数错误")
+		return
+	}
+	store.SetEnabledKeys(req.Keys)
+	cms.ClearCache()
+	ok(w, map[string]any{"ok": true})
+}
+
+// hSitesSpeed 站源测速：对每个可用站源发一次 ?ac=list，只读首包计时。
+func hSitesSpeed(w http.ResponseWriter, r *http.Request) {
+	type item struct {
+		Key  string `json:"key"`
+		Name string `json:"name"`
+		MS   int    `json:"ms"`
+		OK   bool   `json:"ok"`
+	}
+	sites := store.UsableSites()
+	var mu sync.Mutex
+	var out []item
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 4)
+	for _, s := range sites {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(s model.Site) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			c := cms.New(s)
+			u := c.APIURL("ac=list")
+			t0 := time.Now()
+			ok := false
+			if _, err := httpc.Text(u, nil, 8*time.Second); err == nil {
+				ok = true
+			}
+			ms := int(time.Since(t0).Milliseconds())
+			mu.Lock()
+			out = append(out, item{Key: s.Key, Name: s.Name, MS: ms, OK: ok})
+			mu.Unlock()
+		}(s)
+	}
+	wg.Wait()
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].OK != out[j].OK {
+			return out[i].OK
+		}
+		return out[i].MS < out[j].MS
+	})
+	ok(w, out)
+}
+
+// ---------- 配置 / 订阅 ----------
+
+func hConfig(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Source string `json:"source"`
+	}
+	if err := body(r, &req); err != nil {
+		fail(w, 400, "参数错误")
+		return
+	}
+	n, err := crawler.LoadConfig(req.Source)
+	if err != nil {
+		fail(w, 400, err.Error())
+		return
+	}
+	cms.ClearCache()
+	ok(w, map[string]any{"count": n})
+}
+
+func hSubscription(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Source string `json:"source"`
+	}
+	if err := body(r, &req); err != nil {
+		fail(w, 400, "参数错误")
+		return
+	}
+	res, err := crawler.LoadSubscription(req.Source)
+	if err != nil {
+		fail(w, 400, err.Error())
+		return
+	}
+	cms.ClearCache()
+	ok(w, res)
+}
+
+// ---------- 点播 ----------
+
+func hCategories(w http.ResponseWriter, r *http.Request) {
+	site := store.Site(q(r, "site"))
+	if site == nil {
+		fail(w, 400, "站源不存在")
+		return
+	}
+	c := cms.New(*site)
+	cats, err := c.Categories()
+	if err != nil {
+		fail(w, 500, err.Error())
+		return
+	}
+	ok(w, cats)
+}
+
+func hVod(w http.ResponseWriter, r *http.Request) {
+	site := store.Site(q(r, "site"))
+	if site == nil {
+		fail(w, 400, "站源不存在")
+		return
+	}
+	tid := q(r, "tid")
+	page, _ := strconv.Atoi(q(r, "page"))
+	if page <= 0 {
+		page = 1
+	}
+	c := cms.New(*site)
+	if ext := q(r, "ext"); ext != "" {
+		c.SetExtra(ext)
+	}
+
+	// 父分类聚合：前端把该父分类的子分类 id 用 children 参数传入，
+	// 命中时合并父 + 子分类第一页（按 vod id 去重）。
+	var pg model.VodPage
+	var err error
+	if children := q(r, "children"); children != "" {
+		ids := []string{tid}
+		for _, id := range strings.Split(children, ",") {
+			if id = strings.TrimSpace(id); id != "" {
+				ids = append(ids, id)
+			}
+		}
+		pg, err = c.ListMerged(ids, page)
+	} else {
+		pg, err = c.List(tid, page)
+	}
+	if err != nil {
+		fail(w, 500, err.Error())
+		return
+	}
+	ok(w, pg)
+}
+
+func hVodDetail(w http.ResponseWriter, r *http.Request) {
+	site := store.Site(q(r, "site"))
+	if site == nil {
+		fail(w, 400, "站源不存在")
+		return
+	}
+	id := q(r, "id")
+	c := cms.New(*site)
+	v, err := c.Detail(id)
+	if err != nil {
+		fail(w, 500, err.Error())
+		return
+	}
+	ok(w, v)
+}
+
+// hSearch 多站并发搜索（每批 6，最多 18 站，单站失败不影响整体）。
+func hSearch(w http.ResponseWriter, r *http.Request) {
+	kw := q(r, "kw")
+	if kw == "" {
+		ok(w, map[string]any{"list": []model.Vod{}, "sites": 0})
+		return
+	}
+	sites := store.ActiveSites()
+	var searchable []model.Site
+	for _, s := range sites {
+		if s.Searchable {
+			searchable = append(searchable, s)
+		}
+	}
+	if len(searchable) > 18 {
+		searchable = searchable[:18]
+	}
+	type result struct {
+		site model.Site
+		vods []model.Vod
+	}
+	ch := make(chan result, len(searchable))
+	sem := make(chan struct{}, 6)
+	for _, s := range searchable {
+		sem <- struct{}{}
+		go func(s model.Site) {
+			defer func() { <-sem }()
+			c := cms.New(s)
+			ch <- result{s, c.Search(kw)}
+		}(s)
+	}
+	var list []model.Vod
+	alive := 0
+	for range searchable {
+		res := <-ch
+		if len(res.vods) > 0 {
+			alive++
+			list = append(list, res.vods...)
+		}
+	}
+
+	// 拼音首字母搜索：关键词是纯 ASCII（如 sgyy）时，站源按中文搜往往返回空，
+	// 这里用拼音首字母缩写从「最近更新 feed」里匹配片名，作为本地联想补充。
+	if isAsciiLetters(kw) {
+		seen := map[string]bool{}
+		for _, v := range list {
+			seen[v.Name+"|"+v.SiteKey] = true
+		}
+		for _, v := range store.Feed() {
+			if !seen[v.Name+"|"+v.SiteKey] && pinyin.MatchAbbr(v.Name, kw) {
+				list = append(list, v)
+			}
+		}
+	}
+
+	ok(w, map[string]any{"list": list, "sites": alive, "total": len(searchable)})
+}
+
+// isAsciiLetters 判断是否为纯 ASCII 字母（可能是拼音首字母缩写）。
+func isAsciiLetters(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+			return false
+		}
+	}
+	return true
+}
+
+// hSuggest 搜索联想：从「最近更新 feed」+「搜索历史」里做片名联想，
+// 支持中文前缀/包含、拼音首字母缩写（sgyy→三国演义）、T9 数字串。
+func hSuggest(w http.ResponseWriter, r *http.Request) {
+	kw := strings.TrimSpace(q(r, "kw"))
+	if kw == "" {
+		ok(w, []string{})
+		return
+	}
+	seen := map[string]bool{}
+	var pool []string
+	for _, v := range store.Feed() {
+		if v.Name != "" && !seen[v.Name] {
+			seen[v.Name] = true
+			pool = append(pool, v.Name)
+		}
+	}
+	for _, k := range store.Keywords() {
+		if k != "" && !seen[k] {
+			seen[k] = true
+			pool = append(pool, k)
+		}
+	}
+	var out []string
+	for _, name := range pool {
+		if pinyin.MatchAbbr(name, kw) {
+			out = append(out, name)
+		}
+	}
+	// 排序：前缀/包含优先，拼音命中的靠后
+	sort.SliceStable(out, func(i, j int) bool {
+		ci := strings.Contains(out[i], kw)
+		cj := strings.Contains(out[j], kw)
+		if ci != cj {
+			return ci
+		}
+		pi := strings.HasPrefix(out[i], kw)
+		pj := strings.HasPrefix(out[j], kw)
+		return pi && !pj
+	})
+	if len(out) > 12 {
+		out = out[:12]
+	}
+	ok(w, out)
+}
+
+func hResolve(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		URL string `json:"url"`
+	}
+	if err := body(r, &req); err != nil {
+		fail(w, 400, "参数错误")
+		return
+	}
+	ok(w, resolve.Resolve(req.URL, store.Parses()))
+}
+
+func hPinyinAbbr(w http.ResponseWriter, r *http.Request) {
+	word := q(r, "word")
+	ok(w, map[string]any{"abbrs": pinyin.AbbrsOf(word)})
+}
+
+// ---------- 历史 / 收藏 / 关键词 ----------
+
+func hHistory(w http.ResponseWriter, r *http.Request) { ok(w, store.History()) }
+
+func hHistoryPos(w http.ResponseWriter, r *http.Request) {
+	var h store.HistItem
+	if err := body(r, &h); err != nil {
+		fail(w, 400, "参数错误")
+		return
+	}
+	store.UpdateHistoryPos(h)
+	ok(w, map[string]any{"ok": true})
+}
+
+func hHistoryRemove(w http.ResponseWriter, r *http.Request) {
+	var h store.HistItem
+	if err := body(r, &h); err != nil {
+		fail(w, 400, "参数错误")
+		return
+	}
+	store.RemoveHistory(h)
+	ok(w, map[string]any{"ok": true})
+}
+
+func hHistoryClear(w http.ResponseWriter, r *http.Request) {
+	store.ClearHistory()
+	ok(w, map[string]any{"ok": true})
+}
+
+func hFavorites(w http.ResponseWriter, r *http.Request) { ok(w, store.Favorites()) }
+
+func hFavToggle(w http.ResponseWriter, r *http.Request) {
+	var f store.FavItem
+	if err := body(r, &f); err != nil {
+		fail(w, 400, "参数错误")
+		return
+	}
+	added := store.ToggleFavorite(f)
+	ok(w, map[string]any{"added": added})
+}
+
+func hKeywords(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		ok(w, store.Keywords())
+	case http.MethodPost:
+		var req struct {
+			Kw string `json:"kw"`
+		}
+		_ = body(r, &req)
+		ok(w, store.PushKeyword(req.Kw))
+	case http.MethodDelete:
+		store.ClearKeywords()
+		ok(w, map[string]any{"ok": true})
+	default:
+		fail(w, 405, "method not allowed")
+	}
+}
+
+// ---------- 直播 ----------
+
+func hLiveURL(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		ok(w, map[string]string{"url": store.LiveURL()})
+	case http.MethodPost:
+		var req struct {
+			URL string `json:"url"`
+		}
+		_ = body(r, &req)
+		store.SetLiveURL(req.URL)
+		ok(w, map[string]any{"ok": true})
+	}
+}
+
+func hLiveSources(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		ok(w, store.SubLives())
+	case http.MethodPost:
+		var req struct {
+			Lives []model.RawLive `json:"lives"`
+		}
+		_ = body(r, &req)
+		store.SetSubLives(req.Lives)
+		if len(req.Lives) > 0 && store.LiveURL() == "" {
+			store.SetLiveURL(req.Lives[0].URL)
+		}
+		ok(w, map[string]any{"ok": true})
+	}
+}
+
+func hLiveChannels(w http.ResponseWriter, r *http.Request) {
+	u := q(r, "url")
+	if u == "" {
+		u = store.LiveURL()
+	}
+	if u == "" {
+		fail(w, 400, "还没有配置直播源")
+		return
+	}
+	groups, err := live.Load(u, 25*time.Second)
+	if err != nil {
+		fail(w, 500, err.Error())
+		return
+	}
+	root := live.BuildTree(groups)
+	ok(w, map[string]any{"root": root, "groups": groups, "url": u})
+}
+
+func hLiveRankOne(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name string `json:"name"`
+		URL  string `json:"url"`
+	}
+	if err := body(r, &req); err != nil {
+		fail(w, 400, "参数错误")
+		return
+	}
+	ok(w, liveprobe.RankOne(req.Name, req.URL))
+}
+
+func hLiveRank(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Items []liveprobe.LiveScore `json:"items"`
+	}
+	if err := body(r, &req); err != nil {
+		fail(w, 400, "参数错误")
+		return
+	}
+	ranked := liveprobe.RankAll(req.Items, func(i int, r liveprobe.LiveScore) {})
+	ok(w, liveprobe.Sort(ranked))
+}
+
+func hLiveProbeChannels(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Channels []model.Channel `json:"channels"`
+	}
+	if err := body(r, &req); err != nil {
+		fail(w, 400, "参数错误")
+		return
+	}
+	if len(req.Channels) > 40 {
+		req.Channels = req.Channels[:40]
+	}
+	dead := liveprobe.Channels(req.Channels, func(ch model.Channel, alive bool) {}, 4)
+	ok(w, map[string]any{"dead": dead, "total": len(req.Channels)})
+}
+
+// hPeek 单条流探活（直播换台前用）。
+func hPeek(w http.ResponseWriter, r *http.Request) {
+	u := q(r, "url")
+	if u == "" {
+		fail(w, 400, "缺少 url")
+		return
+	}
+	alive := live.Probe(u, 2500*time.Millisecond)
+	ok(w, map[string]any{"alive": alive})
+}
+
+// ---------- 抓取 / 首页 ----------
+
+func hCrawl(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		ok(w, map[string]any{"summary": store.CrawlSummary(), "last": store.LastCrawlAt(), "running": crawler.IsRunning()})
+	case http.MethodPost:
+		var req struct {
+			Force bool `json:"force"`
+		}
+		_ = body(r, &req)
+		go crawler.Run(true)
+		ok(w, map[string]any{"started": true})
+	}
+}
+
+func hFeed(w http.ResponseWriter, r *http.Request) {
+	ok(w, map[string]any{"feed": store.Feed(), "deadKeys": store.DeadKeys(), "summary": store.CrawlSummary()})
+}
+
+func hQualityMaster(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		URL string `json:"url"`
+	}
+	if err := body(r, &req); err != nil {
+		fail(w, 400, "参数错误")
+		return
+	}
+	if req.URL == "" || !strings.HasPrefix(req.URL, "http") {
+		ok(w, []quality.QLevel{})
+		return
+	}
+	txt, err := httpc.Text(req.URL, nil, 6*time.Second)
+	if err != nil {
+		ok(w, []quality.QLevel{})
+		return
+	}
+	ok(w, quality.ParseMaster(txt, req.URL))
+}
+
+func hPrefs(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		ok(w, map[string]any{
+			"qPref":      store.QPref(),
+			"introSkip":  store.IntroSkipSec(),
+			"outroSkip":  store.OutroSkipSec(),
+			"tapSound":   store.TapSound(),
+			"tapVibrate": store.TapVibrate(),
+		})
+	case http.MethodPost:
+		var req map[string]int
+		if err := body(r, &req); err != nil {
+			fail(w, 400, "参数错误")
+			return
+		}
+		if v, ok := req["qPref"]; ok {
+			store.SetQPref(v)
+		}
+		if v, ok := req["introSkip"]; ok {
+			store.SetIntroSkipSec(v)
+		}
+		if v, ok := req["outroSkip"]; ok {
+			store.SetOutroSkipSec(v)
+		}
+		if v, ok := req["tapSound"]; ok {
+			store.SetTapSound(v)
+		}
+		if v, ok := req["tapVibrate"]; ok {
+			store.SetTapVibrate(v)
+		}
+		ok(w, map[string]any{"ok": true})
+	}
+}
+
+// ---------- WebDAV ----------
+
+func hWdSources(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		ok(w, store.WebdavSources())
+	case http.MethodPost:
+		var src model.WebdavSource
+		if err := body(r, &src); err != nil {
+			fail(w, 400, "参数错误")
+			return
+		}
+		store.SaveWebdavSource(src)
+		ok(w, map[string]any{"ok": true})
+	case http.MethodDelete:
+		store.RemoveWebdavSource(q(r, "id"))
+		ok(w, map[string]any{"ok": true})
+	}
+}
+
+func hWdProbe(w http.ResponseWriter, r *http.Request) {
+	var src model.WebdavSource
+	if err := body(r, &src); err != nil {
+		fail(w, 400, "参数错误")
+		return
+	}
+	n, err := webdav.Probe(src)
+	if err != nil {
+		fail(w, 400, err.Error())
+		return
+	}
+	ok(w, map[string]any{"count": n})
+}
+
+func hWdList(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Src  model.WebdavSource `json:"src"`
+		Path string             `json:"path"`
+	}
+	if err := body(r, &req); err != nil {
+		fail(w, 400, "参数错误")
+		return
+	}
+	if req.Path == "" {
+		req.Path = webdav.MountHref(req.Src)
+	}
+	entries, err := webdav.List(req.Src, req.Path)
+	if err != nil {
+		fail(w, 400, err.Error())
+		return
+	}
+	ok(w, entries)
+}
+
+func hWdScan(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Src      model.WebdavSource `json:"src"`
+		MaxDepth int                `json:"maxDepth"`
+	}
+	if err := body(r, &req); err != nil {
+		fail(w, 400, "参数错误")
+		return
+	}
+	if req.MaxDepth <= 0 {
+		req.MaxDepth = 4
+	}
+	vods := webdav.Scan(req.Src, req.MaxDepth, nil)
+	if req.Src.ID != "" {
+		store.SaveWebdavScan(req.Src.ID, vods)
+	}
+	ok(w, vods)
+}
+
+func hWdVods(w http.ResponseWriter, r *http.Request) {
+	ok(w, store.WebdavScanCache(q(r, "srcId")))
+}
+
+func hWdHistory(w http.ResponseWriter, r *http.Request) { ok(w, store.WdHistory()) }
+
+func hWdHistoryUpdate(w http.ResponseWriter, r *http.Request) {
+	var h model.WdHistory
+	if err := body(r, &h); err != nil {
+		fail(w, 400, "参数错误")
+		return
+	}
+	store.UpdateWdHistory(h)
+	ok(w, map[string]any{"ok": true})
+}
+
+func hWdHistoryRemove(w http.ResponseWriter, r *http.Request) {
+	var h model.WdHistory
+	if err := body(r, &h); err != nil {
+		fail(w, 400, "参数错误")
+		return
+	}
+	store.RemoveWdHistory(h)
+	ok(w, map[string]any{"ok": true})
+}
+
+func hWdHistoryClear(w http.ResponseWriter, r *http.Request) {
+	store.ClearWdHistory()
+	ok(w, map[string]any{"ok": true})
+}
+
+// ---------- 直连 / 隐私 ----------
+
+func hDirect(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		ok(w, store.DirectList())
+	case http.MethodPost:
+		var req struct {
+			URL string `json:"url"`
+		}
+		_ = body(r, &req)
+		store.PushDirect(req.URL)
+		ok(w, map[string]any{"ok": true})
+	}
+}
+
+func hPrivacy(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		ok(w, map[string]any{"agreed": store.PrivacyAgreed(), "guideDone": store.GuideDone()})
+	case http.MethodPost:
+		var req struct {
+			Agree bool `json:"agree"`
+			Guide bool `json:"guide"`
+		}
+		_ = body(r, &req)
+		if req.Agree {
+			store.SetPrivacyAgreed()
+		}
+		if req.Guide {
+			store.SetGuideDone()
+		}
+		ok(w, map[string]any{"ok": true})
+	}
+}
+
+// ---------- 视频代理 ----------
+
+// hProxy 视频流代理：透传 Range，重写 m3u8 内的相对/绝对地址，绕开跨域。
+func hProxy(w http.ResponseWriter, r *http.Request) {
+	target := q(r, "url")
+	if target == "" {
+		http.Error(w, "missing url", http.StatusBadRequest)
+		return
+	}
+	if !strings.HasPrefix(target, "http://") && !strings.HasPrefix(target, "https://") {
+		http.Error(w, "invalid url", http.StatusBadRequest)
+		return
+	}
+	auth := q(r, "auth")
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, target, nil)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	req.Header.Set("User-Agent", httpc.WebUA)
+	req.Header.Set("Accept", "*/*")
+	if auth != "" {
+		req.Header.Set("Authorization", "Basic "+auth)
+	}
+	if rng := r.Header.Get("Range"); rng != "" {
+		req.Header.Set("Range", rng)
+	}
+	res, err := httpc.StreamClient.Do(req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer res.Body.Close()
+
+	ct := res.Header.Get("Content-Type")
+	isM3u8 := strings.Contains(ct, "mpegurl") || strings.Contains(ct, "m3u8") ||
+		strings.Contains(ct, "x-mpegurl") || strings.Contains(ct, "vnd.apple")
+
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Range, Accept-Ranges")
+
+	if isM3u8 {
+		// 重写 m3u8，body 长度会变：不透传 Content-Length，让 Go 自动计算
+		data, _ := io.ReadAll(res.Body)
+		// base 用跟随重定向后的最终 URL，而非原始 target：
+		// 302 跳转到真实流地址时，m3u8 里的相对分片/子流地址应相对最终 URL 解析，
+		// 否则会拼错域名（如 iFan 聚合 → miguvideo 的场景）。
+		base := target
+		if res.Request != nil && res.Request.URL != nil {
+			base = res.Request.URL.String()
+		}
+		rewritten := rewriteM3u8(string(data), base, auth)
+		for _, h := range []string{"Content-Type", "Cache-Control", "ETag", "Last-Modified"} {
+			if v := res.Header.Get(h); v != "" {
+				w.Header().Set(h, v)
+			}
+		}
+		w.WriteHeader(res.StatusCode)
+		_, _ = w.Write([]byte(rewritten))
+		return
+	}
+
+	// 非 m3u8（分片/key 等二进制）：透传长度，逐字节转发
+	for _, h := range []string{"Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "ETag", "Last-Modified", "Cache-Control"} {
+		if v := res.Header.Get(h); v != "" {
+			w.Header().Set(h, v)
+		}
+	}
+	w.WriteHeader(res.StatusCode)
+	_, _ = io.Copy(w, res.Body)
+}
+
+// rewriteM3u8 把 m3u8 里所有 URI（分片行 + #EXT-X-KEY/#EXT-X-MAP/#EXT-X-MEDIA 的 URI 属性）
+// 都改成走代理，保证分片、AES 密钥、fMP4 init 段都能正确拉取。
+func rewriteM3u8(body, base, auth string) string {
+	lines := strings.Split(strings.ReplaceAll(strings.ReplaceAll(body, "\r\n", "\n"), "\r", "\n"), "\n")
+	proxyOf := func(uri string) string {
+		u := strings.TrimSpace(uri)
+		if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
+			u = absURL(base, u)
+		}
+		return "/api/proxy?url=" + url.QueryEscape(u) + proxyAuth(auth)
+	}
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "#") {
+			lines[i] = rewriteUriAttrs(line, proxyOf)
+			continue
+		}
+		// 分片行：整行就是 URI（可能带 KEY 属性尾巴，取第一段）
+		uri := trimmed
+		if idx := strings.IndexAny(uri, " \t"); idx >= 0 {
+			uri = uri[:idx]
+		}
+		lines[i] = proxyOf(uri)
+	}
+	return strings.Join(lines, "\n")
+}
+
+var uriAttrRe = regexp.MustCompile(`(?i)(URI\s*=\s*")([^"]*)(")`)
+
+// rewriteUriAttrs 重写标签行里 URI="..." 的值（#EXT-X-KEY / #EXT-X-MAP / #EXT-X-MEDIA 等）。
+func rewriteUriAttrs(line string, proxyOf func(string) string) string {
+	return uriAttrRe.ReplaceAllStringFunc(line, func(m string) string {
+		parts := uriAttrRe.FindStringSubmatch(m)
+		if len(parts) < 4 {
+			return m
+		}
+		return parts[1] + proxyOf(parts[2]) + parts[3]
+	})
+}
+
+func proxyAuth(auth string) string {
+	if auth == "" {
+		return ""
+	}
+	return "&auth=" + url.QueryEscape(auth)
+}
+
+func absURL(base, ref string) string {
+	u, err := url.Parse(base)
+	if err != nil {
+		return ref
+	}
+	r, err := url.Parse(ref)
+	if err != nil {
+		return ref
+	}
+	return u.ResolveReference(r).String()
+}
+
+var _ = fmt.Sprintf
