@@ -28,8 +28,18 @@ async function request<T>(path: string, opts: RequestInit = {}): Promise<T> {
   if (!res.ok) {
     let msg = `请求失败 (${res.status})`
     try {
-      const j = await res.json()
-      if (j && j.error) msg = j.error
+      // 检查 Content-Type，避免 HTML 错误页面解析失败导致错误信息丢失
+      const ct = res.headers.get('Content-Type') || ''
+      if (ct.includes('application/json')) {
+        const j = await res.json()
+        if (j && j.error) msg = j.error
+      } else {
+        const text = await res.text()
+        // 截取前 200 字符作为提示，避免显示完整 HTML
+        if (text && !text.trim().startsWith('<')) {
+          msg = text.slice(0, 200)
+        }
+      }
     } catch {
       /* ignore */
     }

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { api } from '@/api'
 import { useAppStore } from '@/stores/app'
@@ -19,9 +19,7 @@ const hasSites = ref(false)
 const confirmClear = ref(false)
 let confirmTimer = 0
 
-onMounted(async () => {
-  await app.loadStatus()
-  hasSites.value = (app.status?.totalSites ?? 0) > 0
+async function loadFeed() {
   try {
     const [h, f] = await Promise.all([api.history(), api.feed()])
     // 过滤掉影片名为空的记录（来自旧格式或测试遗留）
@@ -31,8 +29,22 @@ onMounted(async () => {
   } finally {
     loading.value = false
   }
+}
+
+onMounted(async () => {
+  await app.loadStatus()
+  hasSites.value = (app.status?.totalSites ?? 0) > 0
+  await loadFeed()
   // 到期自动抓一轮（后台）
   api.triggerCrawl().catch(() => {})
+})
+
+// 监听订阅/站源变更信号，自动重载 Feed 和状态
+watch(() => app.feedVersion, async () => {
+  loading.value = true
+  await app.loadStatus()
+  hasSites.value = (app.status?.totalSites ?? 0) > 0
+  await loadFeed()
 })
 
 // 进度钳制：>0.99 视为看完（不再显示继续观看），<0.02 抬到 0.02（区分「刚开始看」与「没看过」）

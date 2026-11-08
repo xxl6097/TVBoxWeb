@@ -20,7 +20,9 @@ export const useAppStore = defineStore('app', {
     status: null as Status | null,
     // 全局提示（对应 Tip.ets）
     tip: '',
-    tipTimer: 0 as ReturnType<typeof setTimeout> | 0
+    tipTimer: 0 as ReturnType<typeof setTimeout> | 0,
+    // 订阅刷新信号：每次订阅成功后自增，HomeView watch 它来重载 Feed
+    feedVersion: 0
   }),
   actions: {
     async loadStatus() {
@@ -38,6 +40,10 @@ export const useAppStore = defineStore('app', {
         this.tip = ''
         this.tipTimer = 0
       }, 1800)
+    },
+    // notifyFeedRefresh 通知需要刷新首页 Feed（订阅/站源变更后调用）
+    notifyFeedRefresh() {
+      this.feedVersion++
     }
   }
 })

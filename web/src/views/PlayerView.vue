@@ -76,6 +76,7 @@ let flashTimer = 0
 let volTimer = 0
 let leave = false
 let lastSaveMs = 0
+let saveTimer = 0 // savePos 防抖 timer
 
 const isLivePlaying = computed(() => isLive)
 const playPauseText = computed(() => (playing.value ? '暂停' : '播放'))
@@ -174,6 +175,8 @@ onMounted(async () => {
 
 onUnmounted(() => {
   leave = true
+  if (saveTimer) clearTimeout(saveTimer)
+  savePos() // 退出时立即保存最终进度
   savePos()
   destroyPlayer()
 })
@@ -255,7 +258,10 @@ async function probeLive(u: string): Promise<boolean> {
 async function pickPlayableLive(): Promise<string> {
   let skip = 0
   let tries = 0
-  while (skip <= LIVE_SKIP_MAX && tries < 7) {
+  // 直播探活最多重试 4 次（含备用线路），每次 3-4 秒，合计约 12-16 秒
+  // 超过上限后显示提示让用户手动换源，而不是无限等待
+  const MAX_TRIES = 4
+  while (skip <= LIVE_SKIP_MAX && tries < MAX_TRIES) {
     tries++
     if (await probeLive(rawUrl)) {
       liveFail = 0
@@ -301,7 +307,8 @@ async function initPlayer() {
   if (src.includes('.m3u8') || via.value === '直播直连' || via.value === '补全 m3u8') {
     const HlsCls = await loadHls()
     if (HlsCls.isSupported()) {
-      const h = new HlsCls({ maxBufferLength: 30 })
+      // maxBufferLength: 10 秒缓冲（原来 30 秒，在 1080p 流上会占 100MB+ 内存）
+      const h = new HlsCls({ maxBufferLength: 10 })
       hls = h
       h.loadSource(src)
       h.attachMedia(vid)
@@ -359,10 +366,11 @@ function bindVideoEvents(vid: HTMLVideoElement) {
   }
   vid.ontimeupdate = () => {
     curMs.value = vid.currentTime * 1000
-    // 每 5 秒节流保存一次进度（退出/换集也会保存）
+    // 进度保存：节流（5 秒）+ 防抖（300ms），保证最后一次 seek 后一定保存
     if (curMs.value - lastSaveMs > 5000) {
       lastSaveMs = curMs.value
-      savePos()
+      if (saveTimer) clearTimeout(saveTimer)
+      saveTimer = window.setTimeout(() => { savePos(); saveTimer = 0 }, 300)
     }
     if (!isLive && outroSkipSec.value > 0 && durMs.value > 0 && !outroFired && curMs.value >= durMs.value - outroSkipSec.value * 1000) {
       outroFired = true
@@ -783,6 +791,9 @@ async function switchEpisode(delta: number) {
     return
   }
   savePos()
+  // 清除进度条拖动状态，避免切集/切台后进度条显示混乱
+  dragging.value = false
+  previewMs.value = -1
   const ep = player.step(delta)
   if (!ep) {
     app.showTip(delta > 0 ? '已经是最后一个了' : '已经是第一个了')

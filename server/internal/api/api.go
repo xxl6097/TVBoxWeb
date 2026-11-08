@@ -93,7 +93,13 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 // normalize 递归把 nil slice/map 转成空 slice/map，避免前端收到 null
 // （前端模板普遍直接读 arr.length，null 会抛 TypeError 导致白屏）。
-func normalize(v any) any {
+// depth 限制防止循环引用导致栈溢出。
+func normalize(v any) any { return normalizeDepth(v, 0) }
+
+func normalizeDepth(v any, depth int) any {
+	if depth > 20 {
+		return v // 超过深度限制，原样返回，防止循环引用
+	}
 	rv := reflect.ValueOf(v)
 	if !rv.IsValid() {
 		return v
@@ -103,14 +109,17 @@ func normalize(v any) any {
 		if rv.IsNil() {
 			return nil
 		}
-		return normalize(rv.Elem().Interface())
+		return normalizeDepth(rv.Elem().Interface(), depth+1)
 	case reflect.Slice:
 		if rv.IsNil() {
 			return reflect.MakeSlice(rv.Type(), 0, 0).Interface()
 		}
 		out := reflect.MakeSlice(rv.Type(), rv.Len(), rv.Len())
 		for i := 0; i < rv.Len(); i++ {
-			out.Index(i).Set(reflect.ValueOf(normalize(rv.Index(i).Interface())))
+			n := normalizeDepth(rv.Index(i).Interface(), depth+1)
+			if reflect.TypeOf(n).AssignableTo(rv.Type().Elem()) {
+				out.Index(i).Set(reflect.ValueOf(n))
+			}
 		}
 		return out.Interface()
 	case reflect.Map:
@@ -120,7 +129,7 @@ func normalize(v any) any {
 		out := reflect.MakeMap(rv.Type())
 		iter := rv.MapRange()
 		for iter.Next() {
-			out.SetMapIndex(iter.Key(), reflect.ValueOf(normalize(iter.Value().Interface())))
+			out.SetMapIndex(iter.Key(), reflect.ValueOf(normalizeDepth(iter.Value().Interface(), depth+1)))
 		}
 		return out.Interface()
 	case reflect.Struct:
@@ -128,7 +137,12 @@ func normalize(v any) any {
 		for i := 0; i < rv.NumField(); i++ {
 			f := rv.Field(i)
 			if f.CanInterface() {
-				out.Field(i).Set(reflect.ValueOf(normalize(f.Interface())))
+				n := normalizeDepth(f.Interface(), depth+1)
+				if reflect.TypeOf(n).AssignableTo(rv.Type().Field(i).Type) {
+					out.Field(i).Set(reflect.ValueOf(n))
+				} else {
+					out.Field(i).Set(f)
+				}
 			}
 		}
 		return out.Interface()
@@ -221,6 +235,7 @@ func hSitesEnabled(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	store.SetEnabledKeys(req.Keys)
+	store.SaveFeed(nil) // 清空旧 feed，避免首页显示过期站源的内容
 	cms.ClearCache()
 	ok(w, map[string]any{"ok": true})
 }
@@ -407,23 +422,28 @@ func hSearch(w http.ResponseWriter, r *http.Request) {
 	}
 	var list []model.Vod
 	alive := 0
+	// 搜索结果去重：用 Name+SiteKey 作为唯一键
+	seen := map[string]bool{}
 	for range searchable {
 		res := <-ch
 		if len(res.vods) > 0 {
 			alive++
-			list = append(list, res.vods...)
+			for _, v := range res.vods {
+				key := v.Name + "|" + v.SiteKey
+				if !seen[key] {
+					seen[key] = true
+					list = append(list, v)
+				}
+			}
 		}
 	}
 
 	// 拼音首字母搜索：关键词是纯 ASCII（如 sgyy）时，站源按中文搜往往返回空，
 	// 这里用拼音首字母缩写从「最近更新 feed」里匹配片名，作为本地联想补充。
 	if isAsciiLetters(kw) {
-		seen := map[string]bool{}
-		for _, v := range list {
-			seen[v.Name+"|"+v.SiteKey] = true
-		}
 		for _, v := range store.Feed() {
 			if !seen[v.Name+"|"+v.SiteKey] && pinyin.MatchAbbr(v.Name, kw) {
+				seen[v.Name+"|"+v.SiteKey] = true
 				list = append(list, v)
 			}
 		}
@@ -807,6 +827,10 @@ func hWdScan(w http.ResponseWriter, r *http.Request) {
 	if req.MaxDepth <= 0 {
 		req.MaxDepth = 4
 	}
+	// 限制扫描深度上限，防止过深扫描导致 OOM 或超时
+	if req.MaxDepth > 8 {
+		req.MaxDepth = 8
+	}
 	vods := webdav.Scan(req.Src, req.MaxDepth, nil)
 	if req.Src.ID != "" {
 		store.SaveWebdavScan(req.Src.ID, vods)
@@ -923,8 +947,9 @@ func hProxy(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Range, Accept-Ranges")
 
 	if isM3u8 {
-		// 重写 m3u8，body 长度会变：不透传 Content-Length，让 Go 自动计算
-		data, _ := io.ReadAll(res.Body)
+		// 重写 m3u8，body 长度会变：不透传 Content-Length，让 Go 自动计算。
+		// 限制读取大小：正常 m3u8 文件很小（通常 < 1MB），超过 4MB 说明有问题。
+		data, _ := io.ReadAll(io.LimitReader(res.Body, 4<<20)) // max 4MB
 		// base 用跟随重定向后的最终 URL，而非原始 target：
 		// 302 跳转到真实流地址时，m3u8 里的相对分片/子流地址应相对最终 URL 解析，
 		// 否则会拼错域名（如 iFan 聚合 → miguvideo 的场景）。
@@ -983,16 +1008,19 @@ func rewriteM3u8(body, base, auth string) string {
 	return strings.Join(lines, "\n")
 }
 
-var uriAttrRe = regexp.MustCompile(`(?i)(URI\s*=\s*")([^"]*)(")`)
-
-// rewriteUriAttrs 重写标签行里 URI="..." 的值（#EXT-X-KEY / #EXT-X-MAP / #EXT-X-MEDIA 等）。
+// uriAttrRe 大小写不敏感，支持双引号和单引号两种写法：
+// URI="http://..." 或 uri='http://...'
+var uriAttrRe = regexp.MustCompile(`(?i)(URI\s*=\s*)(["'])([^"']*)(["'])`)
+// rewriteUriAttrs 重写标签行里 URI="..." 或 URI='...' 的值
+// （#EXT-X-KEY / #EXT-X-MAP / #EXT-X-MEDIA 等），大小写不敏感。
 func rewriteUriAttrs(line string, proxyOf func(string) string) string {
 	return uriAttrRe.ReplaceAllStringFunc(line, func(m string) string {
 		parts := uriAttrRe.FindStringSubmatch(m)
-		if len(parts) < 4 {
+		if len(parts) < 5 {
 			return m
 		}
-		return parts[1] + proxyOf(parts[2]) + parts[3]
+		// parts[1]=URI= parts[2]=开引号 parts[3]=URI值 parts[4]=闭引号
+		return parts[1] + parts[2] + proxyOf(parts[3]) + parts[4]
 	})
 }
 

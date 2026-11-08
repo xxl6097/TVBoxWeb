@@ -72,6 +72,8 @@ function clearKeywords() {
 
 // 实时联想
 let suggTimer = 0
+let suggAbort: AbortController | null = null
+
 function onInput() {
   const w = kw.value.trim()
   if (!w) {
@@ -79,13 +81,19 @@ function onInput() {
     return
   }
   if (suggTimer) clearTimeout(suggTimer)
+  // abort 之前还未完成的联想请求，防止旧请求结果覆盖新输入的结果
+  if (suggAbort) suggAbort.abort()
   suggTimer = window.setTimeout(async () => {
+    const ctrl = new AbortController()
+    suggAbort = ctrl
     try {
       sugg.value = await api.suggest(w)
-    } catch {
-      sugg.value = []
+    } catch (e: any) {
+      if (e?.name !== 'AbortError') sugg.value = []
+    } finally {
+      if (suggAbort === ctrl) suggAbort = null
     }
-  }, 200)
+  }, 350) // 350ms 防抖，减少打字过程中的无效请求
 }
 </script>
 

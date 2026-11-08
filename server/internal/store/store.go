@@ -117,7 +117,19 @@ func save() {
 	_ = os.WriteFile(path, b, 0o600)
 }
 
-func flush() { save() }
+// flush 线程安全地把当前 data 序列化写入磁盘。
+// 调用方不需要持锁；本函数内部加锁做快照，再在锁外写文件，
+// 避免锁竞争同时保证写入的是一致快照。
+func flush() {
+	if path == "" {
+		return
+	}
+	mu.Lock()
+	b, _ := json.MarshalIndent(data, "", "  ")
+	mu.Unlock()
+	os.MkdirAll(filepath.Dir(path), 0o755)
+	_ = os.WriteFile(path, b, 0o600)
+}
 
 // ---------- 配置 ----------
 
@@ -298,10 +310,25 @@ func UpdateHistoryPos(h HistItem) {
 		it := &data.Hist[i]
 		if it.SiteKey == h.SiteKey && it.VodID == h.VodID {
 			it.Pos, it.Dur, it.EpName, it.EpIndex, it.From, it.Time = h.Pos, h.Dur, h.EpName, h.EpIndex, h.From, time.Now().UnixMilli()
+			// 补更新影片名/封面（早期记录可能为空）
+			if h.Name != "" {
+				it.Name = h.Name
+			}
+			if h.Pic != "" {
+				it.Pic = h.Pic
+			}
+			if h.SiteName != "" {
+				it.SiteName = h.SiteName
+			}
 			found = true
+			break // 同站源同影片只有一条记录，找到后直接退出
 		}
 	}
 	if !found {
+		// 控制历史上限 40 条
+		if len(data.Hist) >= 40 {
+			data.Hist = data.Hist[:39]
+		}
 		data.Hist = append([]HistItem{h}, data.Hist...)
 	}
 	mu.Unlock()

@@ -42,6 +42,7 @@ watch(siteKey, () => {
   selectedParent.value = ''
   selectedChild.value = ''
   filterVals.value = {}
+  filters.value = [] // 清空旧站源的筛选选项，等新站源分类加载后重建
   loadCategories()
 })
 

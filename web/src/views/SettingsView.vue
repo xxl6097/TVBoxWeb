@@ -96,6 +96,7 @@ async function doSubscribe() {
     subName.value = r.name || ''
     // 不清空 subUrl，保留地址让用户可查看和再次修改
     await load()
+    app.notifyFeedRefresh() // 通知首页重载 Feed
   } catch (e: any) { app.showTip('订阅失败：' + e.message) }
 }
 

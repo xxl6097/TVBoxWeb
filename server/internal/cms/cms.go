@@ -326,6 +326,7 @@ func looksXML(txt string) bool {
 }
 
 // CleanJSON 配置 JSON 容错：去 BOM、去 // 注释行、把保留字 class 改名。
+// 注意："class" 仅当后跟 [ 时才替换，避免误匹配 "class_name"、"className" 等字段。
 func CleanJSON(txt string) string {
 	t := txt
 	if strings.HasPrefix(t, "\uFEFF") {
@@ -340,7 +341,9 @@ func CleanJSON(txt string) string {
 		}
 		keep = append(keep, line)
 	}
-	return regexp.MustCompile(`"class"\s*:`).ReplaceAllString(strings.Join(keep, "\n"), `"catList":`)
+	// 只替换 "class": [ 这种确定是分类数组的写法，
+	// 避免误把 "class_name"、"className" 等字段替换掉
+	return regexp.MustCompile(`"class"(\s*:\s*\[)`).ReplaceAllString(strings.Join(keep, "\n"), `"catList"$1`)
 }
 
 func parse(txt string) (model.JResp, error) {
