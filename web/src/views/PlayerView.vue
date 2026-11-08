@@ -75,6 +75,10 @@ const muteText = computed(() => (muted.value ? '取消静音' : '静音'))
 const volPct = computed(() => (muted.value ? '静音' : Math.round(volume.value * 100) + '%'))
 const progressPct = computed(() => (durMs.value > 0 ? (curMs.value / durMs.value) * 100 : 0))
 
+// ===== 移动端检测 =====
+const isMobile = ref(false)
+function checkMobile() { isMobile.value = window.innerWidth <= 640 }
+
 // ===== 全屏 =====
 const playerEl = ref<HTMLElement>()
 const isFullscreen = ref(false)
@@ -828,6 +832,8 @@ onMounted(() => {
   document.addEventListener('webkitfullscreenchange', onFullscreenChange)
   document.addEventListener('mozfullscreenchange', onFullscreenChange)
   document.addEventListener('MSFullscreenChange', onFullscreenChange)
+  checkMobile()
+  window.addEventListener('resize', checkMobile)
 })
 onUnmounted(() => {
   window.removeEventListener('keydown', onKey)
@@ -835,11 +841,13 @@ onUnmounted(() => {
   document.removeEventListener('webkitfullscreenchange', onFullscreenChange)
   document.removeEventListener('mozfullscreenchange', onFullscreenChange)
   document.removeEventListener('MSFullscreenChange', onFullscreenChange)
+  window.removeEventListener('resize', checkMobile)
 })
 </script>
 
 <template>
-  <div ref="playerEl" class="player" @mousemove="onMouseMove" @click="onSurfaceClick" @dblclick="toggleFullscreen">
+  <!-- 桌面端：全屏固定播放器 -->
+  <div v-if="!isMobile" ref="playerEl" class="player" @mousemove="onMouseMove" @click="onSurfaceClick" @dblclick="toggleFullscreen">
     <video ref="videoEl" class="video" :style="{ objectFit: scaleFit }"></video>
 
     <!-- 中央播放/暂停图标 -->
@@ -874,22 +882,12 @@ onUnmounted(() => {
         <span class="osd-title">{{ title }}</span>
         <span class="osd-meta">{{ epLabel }} {{ via ? '· ' + via : '' }}</span>
       </div>
-      <div
-        class="osd-progress"
-        @pointerdown="onProgressDown"
-        @pointermove="onProgressMove"
-        @pointerup="onProgressUp"
-      >
+      <div class="osd-progress" @pointerdown="onProgressDown" @pointermove="onProgressMove" @pointerup="onProgressUp">
         <div class="progress-track">
-          <div
-            class="progress-fill"
-            :style="{ width: (dragging ? (previewMs / durMs) * 100 : progressPct) + '%' }"
-          ></div>
+          <div class="progress-fill" :style="{ width: (dragging ? (previewMs / durMs) * 100 : progressPct) + '%' }"></div>
         </div>
       </div>
-      <div v-if="dragging" class="seek-hint">
-        {{ fmtMs(previewMs) }} / {{ fmtMs(durMs) }}
-      </div>
+      <div v-if="dragging" class="seek-hint">{{ fmtMs(previewMs) }} / {{ fmtMs(durMs) }}</div>
       <div class="osd-bottom">
         <span class="time">{{ dragging ? fmtMs(previewMs) : fmtMs(curMs) }}</span>
         <div class="controls">
@@ -898,15 +896,8 @@ onUnmounted(() => {
           <button class="ctl primary" @click="togglePlay">{{ playPauseText }}</button>
           <button class="ctl" @click="seekBy(1)">+10 秒</button>
           <button class="ctl" @click="toggleMute">{{ muteText }}</button>
-          <div
-            class="vol-slider"
-            @pointerdown="onVolDown"
-            @pointermove="onVolMove"
-            @pointerup="onVolUp"
-          >
-            <div class="vol-track">
-              <div class="vol-fill" :style="{ width: (muted ? 0 : volume * 100) + '%' }"></div>
-            </div>
+          <div class="vol-slider" @pointerdown="onVolDown" @pointermove="onVolMove" @pointerup="onVolUp">
+            <div class="vol-track"><div class="vol-fill" :style="{ width: (muted ? 0 : volume * 100) + '%' }"></div></div>
           </div>
           <button class="ctl" @click="showQ = !showQ">画质</button>
           <button class="ctl" @click="switchEpisode(1)">{{ isLive ? '下一台' : '下一集' }}</button>
@@ -923,73 +914,191 @@ onUnmounted(() => {
     <div v-if="showQ" class="q-panel" @click.stop @click.self="showQ = false">
       <div class="q-content">
         <div class="q-title">播放设置</div>
-
         <div class="q-section">画质</div>
         <div class="q-chips">
           <span class="chip" :class="{ active: qCap === AUTO }" @click="chooseLevel(AUTO)">自动</span>
           <span class="chip" :class="{ active: qCap >= TOP }" @click="chooseLevel(TOP)">原画</span>
-          <span
-            v-for="(lv, i) in levels"
-            :key="i"
-            class="chip"
-            :class="{ active: qCap > 0 && qCap < TOP && levelIdx === i }"
-            @click="chooseLevel(lv.height > 0 ? lv.height : TOP)"
-          >
-            {{ labelOfLevel(lv) }}
-          </span>
+          <span v-for="(lv, i) in levels" :key="i" class="chip" :class="{ active: qCap > 0 && qCap < TOP && levelIdx === i }" @click="chooseLevel(lv.height > 0 ? lv.height : TOP)">{{ labelOfLevel(lv) }}</span>
         </div>
-        <div v-if="!levels.length" class="q-hint">源只提供这一档清晰度。网络差时播放器会自动加大缓冲。</div>
-
+        <div v-if="!levels.length" class="q-hint">源只提供这一档清晰度。</div>
         <div class="q-section">画面比例</div>
         <div class="q-chips">
-          <span
-            v-for="(n, i) in scaleNames"
-            :key="'sc' + i"
-            class="chip"
-            :class="{ active: scaleMode === i }"
-            @click="setScale(i)"
-          >
-            {{ n }}
-          </span>
+          <span v-for="(n, i) in scaleNames" :key="'sc' + i" class="chip" :class="{ active: scaleMode === i }" @click="setScale(i)">{{ n }}</span>
         </div>
-
         <div class="q-section">跳过片头</div>
         <div class="q-chips">
-          <span
-            v-for="s in SKIP_PRESETS"
-            :key="'i' + s"
-            class="chip"
-            :class="{ active: introSkipSec === s }"
-            @click="setIntroSkip(s)"
-          >
-            {{ s === 0 ? '关' : s + ' 秒' }}
-          </span>
+          <span v-for="s in SKIP_PRESETS" :key="'i' + s" class="chip" :class="{ active: introSkipSec === s }" @click="setIntroSkip(s)">{{ s === 0 ? '关' : s + ' 秒' }}</span>
           <span class="chip" @click="markSkip('intro')">标当前</span>
         </div>
-
         <div class="q-section">跳过片尾</div>
         <div class="q-chips">
-          <span
-            v-for="s in SKIP_PRESETS"
-            :key="'o' + s"
-            class="chip"
-            :class="{ active: outroSkipSec === s }"
-            @click="setOutroSkip(s)"
-          >
-            {{ s === 0 ? '关' : s + ' 秒' }}
-          </span>
+          <span v-for="s in SKIP_PRESETS" :key="'o' + s" class="chip" :class="{ active: outroSkipSec === s }" @click="setOutroSkip(s)">{{ s === 0 ? '关' : s + ' 秒' }}</span>
           <span class="chip" @click="markSkip('outro')">标当前</span>
         </div>
+        <div class="q-footer"><el-button size="small" @click="showQ = false">关闭</el-button></div>
+      </div>
+    </div>
+  </div>
 
-        <div class="q-footer">
-          <el-button size="small" @click="showQ = false">关闭</el-button>
+  <!-- 移动端：视频 + 控制面板垂直流式布局 -->
+  <div v-else ref="playerEl" class="m-player" :class="{ 'm-fullscreen': isFullscreen }">
+    <!-- 视频区域 -->
+    <div class="m-video-wrap" @click="onSurfaceClick" @dblclick="toggleFullscreen">
+      <video ref="videoEl" class="video" :style="{ objectFit: scaleFit }"></video>
+
+      <!-- 加载/缓冲（视频区内）-->
+      <div v-if="resolving" class="m-center-tip">正在解析…</div>
+      <div v-else-if="buffering" class="m-center-tip">缓冲中…</div>
+      <div v-else-if="errMsg" class="m-center-tip m-err">
+        <p>{{ errMsg }}</p>
+        <div class="err-actions">
+          <el-button size="small" @click="retry">重试</el-button>
+          <el-button size="small" @click="goBack">返回</el-button>
         </div>
+      </div>
+
+      <!-- 播放/暂停动画 -->
+      <transition name="flash">
+        <div v-if="playFlash" class="play-flash" style="font-size:56px">{{ playFlash === 'play' ? '▶' : '❚❚' }}</div>
+      </transition>
+
+      <!-- 跳过按钮 -->
+      <div v-if="skipShow" class="skip-btn" @click.stop="doSkip(skipShow)">
+        <span class="ring"></span>
+        {{ skipShow === 'intro' ? '跳过片头' : player.hasNext ? '下一集' : '跳过片尾' }}
+      </div>
+
+      <!-- 全屏时的浮动 OSD（覆盖在视频上方） -->
+      <div v-if="isFullscreen && showOsd && prepared" class="m-osd-fullscreen" @click.stop>
+        <div class="m-fs-top">
+          <button class="m-back-btn" @click="goBack">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6" /></svg>
+          </button>
+          <span class="m-fs-title">{{ title }}</span>
+          <button class="m-icon-btn" @click="toggleFullscreen">⤓</button>
+        </div>
+        <div class="m-fs-bottom">
+          <div class="m-progress-wrap" @pointerdown="onProgressDown" @pointermove="onProgressMove" @pointerup="onProgressUp">
+            <div class="m-progress-track">
+              <div class="m-progress-fill" :style="{ width: (dragging ? (previewMs / durMs) * 100 : progressPct) + '%' }"></div>
+            </div>
+          </div>
+          <div v-if="dragging" class="m-seek-hint">{{ fmtMs(previewMs) }}</div>
+          <div class="m-fs-controls">
+            <span class="m-time">{{ fmtMs(curMs) }}</span>
+            <button class="m-ctl-icon" @click="seekBy(-1)">
+              <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="11 17 2 12 11 7"/><line x1="22" y1="7" x2="22" y2="17"/><polyline points="22 17 13 12 22 7"/></svg>
+            </button>
+            <button class="m-play-btn" @click="togglePlay">
+              <svg v-if="!playing" viewBox="0 0 24 24" width="32" height="32" fill="currentColor"><polygon points="5 3 19 12 5 21"/></svg>
+              <svg v-else viewBox="0 0 24 24" width="32" height="32" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+            </button>
+            <button class="m-ctl-icon" @click="seekBy(1)">
+              <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="13 17 22 12 13 7"/><line x1="2" y1="7" x2="2" y2="17"/><polyline points="2 17 11 12 2 7"/></svg>
+            </button>
+            <span class="m-time">{{ durMs > 0 ? fmtMs(durMs) : (isLive ? '直播' : '--:--') }}</span>
+            <button class="m-icon-btn" style="margin-left:auto" @click="showQ = !showQ">⚙</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 非全屏时：视频下方控制面板 -->
+    <div v-if="!isFullscreen" class="m-panel">
+      <!-- 标题栏 -->
+      <div class="m-panel-title">
+        <button class="m-back-btn" @click="goBack">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6" /></svg>
+        </button>
+        <div class="m-title-info">
+          <div class="m-title-name">{{ title }}</div>
+          <div v-if="epLabel" class="m-title-meta">{{ epLabel }}<span v-if="via"> · {{ via }}</span></div>
+        </div>
+        <button class="m-icon-btn" @click="toggleFullscreen">⛶</button>
+      </div>
+
+      <!-- 进度条 -->
+      <div v-if="!isLive" class="m-progress-row">
+        <span class="m-time-sm">{{ fmtMs(curMs) }}</span>
+        <div class="m-progress-wrap" @pointerdown="onProgressDown" @pointermove="onProgressMove" @pointerup="onProgressUp">
+          <div class="m-progress-track">
+            <div class="m-progress-fill" :style="{ width: (dragging ? (previewMs / durMs) * 100 : progressPct) + '%' }"></div>
+          </div>
+        </div>
+        <span class="m-time-sm">{{ durMs > 0 ? fmtMs(durMs) : '--:--' }}</span>
+      </div>
+      <div v-if="dragging" class="m-seek-hint">{{ fmtMs(previewMs) }}</div>
+
+      <!-- 主控制按钮行 -->
+      <div class="m-main-controls">
+        <button class="m-ctl-icon" @click="switchEpisode(-1)">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="11 17 2 12 11 7"/><line x1="22" y1="7" x2="22" y2="17"/><polyline points="22 17 13 12 22 7"/></svg>
+        </button>
+        <button class="m-ctl-icon" @click="seekBy(-1)">
+          <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-3.96"/></svg>
+        </button>
+        <button class="m-play-btn" @click="togglePlay">
+          <svg v-if="!playing" viewBox="0 0 24 24" width="36" height="36" fill="currentColor"><polygon points="5 3 19 12 5 21"/></svg>
+          <svg v-else viewBox="0 0 24 24" width="36" height="36" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+        </button>
+        <button class="m-ctl-icon" @click="seekBy(1)">
+          <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-.49-3.96"/></svg>
+        </button>
+        <button class="m-ctl-icon" @click="switchEpisode(1)">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="13 17 22 12 13 7"/><line x1="2" y1="7" x2="2" y2="17"/><polyline points="2 17 11 12 2 7"/></svg>
+        </button>
+      </div>
+
+      <!-- 辅助按钮行 -->
+      <div class="m-aux-controls">
+        <button class="m-aux-btn" @click="toggleMute">
+          <span class="m-aux-icon">{{ muted ? '🔇' : '🔊' }}</span>
+          <span>{{ muted ? '已静音' : Math.round(volume * 100) + '%' }}</span>
+        </button>
+        <button class="m-aux-btn" @click="showQ = !showQ">
+          <span class="m-aux-icon">⚙</span>
+          <span>画质</span>
+        </button>
+        <button class="m-aux-btn" @click="toggleFullscreen">
+          <span class="m-aux-icon">⛶</span>
+          <span>全屏</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- 画质面板（移动端底部弹出） -->
+    <div v-if="showQ" class="m-q-mask" @click.self="showQ = false">
+      <div class="m-q-sheet">
+        <div class="m-q-handle"></div>
+        <div class="m-q-title">播放设置</div>
+        <div class="m-q-section">画质</div>
+        <div class="m-q-chips">
+          <span class="chip" :class="{ active: qCap === AUTO }" @click="chooseLevel(AUTO)">自动</span>
+          <span class="chip" :class="{ active: qCap >= TOP }" @click="chooseLevel(TOP)">原画</span>
+          <span v-for="(lv, i) in levels" :key="i" class="chip" :class="{ active: qCap > 0 && qCap < TOP && levelIdx === i }" @click="chooseLevel(lv.height > 0 ? lv.height : TOP)">{{ labelOfLevel(lv) }}</span>
+        </div>
+        <div class="m-q-section">画面比例</div>
+        <div class="m-q-chips">
+          <span v-for="(n, i) in scaleNames" :key="'sc' + i" class="chip" :class="{ active: scaleMode === i }" @click="setScale(i)">{{ n }}</span>
+        </div>
+        <div class="m-q-section">跳过片头</div>
+        <div class="m-q-chips">
+          <span v-for="s in SKIP_PRESETS" :key="'i' + s" class="chip" :class="{ active: introSkipSec === s }" @click="setIntroSkip(s)">{{ s === 0 ? '关' : s + ' 秒' }}</span>
+          <span class="chip" @click="markSkip('intro')">标当前</span>
+        </div>
+        <div class="m-q-section">跳过片尾</div>
+        <div class="m-q-chips">
+          <span v-for="s in SKIP_PRESETS" :key="'o' + s" class="chip" :class="{ active: outroSkipSec === s }" @click="setOutroSkip(s)">{{ s === 0 ? '关' : s + ' 秒' }}</span>
+          <span class="chip" @click="markSkip('outro')">标当前</span>
+        </div>
+        <div class="m-q-close"><el-button size="small" @click="showQ = false" style="width:100%">关闭</el-button></div>
       </div>
     </div>
   </div>
 </template>
 
 <style scoped>
+/* ===== 桌面端播放器 ===== */
 .player {
   position: fixed;
   inset: 0;
@@ -1011,14 +1120,9 @@ onUnmounted(() => {
   color: rgba(255, 255, 255, 0.9);
   pointer-events: none;
 }
-.flash-enter-active,
-.flash-leave-active {
-  transition: opacity 0.3s;
-}
-.flash-enter-from,
-.flash-leave-to {
-  opacity: 0;
-}
+.flash-enter-active, .flash-leave-active { transition: opacity 0.3s; }
+.flash-enter-from, .flash-leave-to { opacity: 0; }
+
 .center-tip {
   position: absolute;
   top: 50%;
@@ -1028,14 +1132,9 @@ onUnmounted(() => {
   font-size: 18px;
   text-align: center;
 }
-.center-tip.err p {
-  margin-bottom: 12px;
-}
-.err-actions {
-  display: flex;
-  justify-content: center;
-  gap: 12px;
-}
+.center-tip.err p { margin-bottom: 12px; }
+.err-actions { display: flex; justify-content: center; gap: 12px; }
+
 .skip-btn {
   position: absolute;
   right: 48px;
@@ -1059,11 +1158,8 @@ onUnmounted(() => {
   border-top-color: #fff;
   animation: spin 1s linear infinite;
 }
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
+@keyframes spin { to { transform: rotate(360deg); } }
+
 .osd {
   position: absolute;
   left: 0;
@@ -1097,14 +1193,9 @@ onUnmounted(() => {
   background: rgba(255, 255, 255, 0.24);
   border-color: #fff;
 }
-.osd-title {
-  font-size: 18px;
-  font-weight: 600;
-}
-.osd-meta {
-  font-size: 13px;
-  color: var(--sub);
-}
+.osd-title { font-size: 18px; font-weight: 600; }
+.osd-meta { font-size: 13px; color: var(--sub); }
+
 .osd-progress {
   padding: 10px 0;
   cursor: pointer;
@@ -1121,15 +1212,14 @@ onUnmounted(() => {
   border-radius: 3px;
   background: var(--live);
 }
-.osd-progress:hover .progress-track {
-  height: 8px;
-}
+.osd-progress:hover .progress-track { height: 8px; }
 .seek-hint {
   text-align: center;
   font-size: 14px;
   color: #ffeb3b;
   margin-bottom: 4px;
 }
+
 .osd-bottom {
   display: flex;
   align-items: center;
@@ -1182,10 +1272,7 @@ onUnmounted(() => {
   border-radius: 3px;
   background: #fff;
 }
-.vol {
-  font-size: 13px;
-  color: #fff;
-}
+.vol { font-size: 13px; color: #fff; }
 .fullscreen-btn {
   font-size: 18px;
   padding: 6px 10px;
@@ -1196,12 +1283,11 @@ onUnmounted(() => {
   background: rgba(255, 255, 255, 0.2);
   border-color: rgba(255, 255, 255, 0.6);
 }
-/* 全屏状态下让 OSD 铺满全屏根元素 */
+
 :fullscreen .osd,
 :-webkit-full-screen .osd,
-:-moz-full-screen .osd {
-  position: fixed;
-}
+:-moz-full-screen .osd { position: fixed; }
+
 .q-panel {
   position: absolute;
   inset: 0;
@@ -1219,51 +1305,301 @@ onUnmounted(() => {
   max-height: 80vh;
   overflow-y: auto;
 }
-.q-title {
+.q-title { font-size: 16px; font-weight: 600; margin-bottom: 6px; }
+.q-section { font-size: 13px; color: var(--sub); margin: 16px 0 8px; }
+.q-chips { display: flex; flex-wrap: wrap; gap: 10px; }
+.q-hint { margin-top: 8px; color: var(--dim); font-size: 13px; }
+.q-footer { margin-top: 20px; text-align: right; }
+
+.chip {
+  padding: 8px 16px;
+  border-radius: 20px;
+  background: var(--card);
+  border: 1px solid transparent;
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.chip:hover { background: var(--card-hi); }
+.chip.active {
+  background: var(--live);
+  color: #fff;
+  font-weight: 600;
+}
+
+/* ===== 移动端播放器 ===== */
+.m-player {
+  position: fixed;
+  inset: 0;
+  background: #000;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.m-player.m-fullscreen {
+  /* 全屏时回归单一视频容器 */
+}
+
+.m-video-wrap {
+  position: relative;
+  width: 100%;
+  flex-shrink: 0;
+  background: #000;
+}
+.m-player:not(.m-fullscreen) .m-video-wrap {
+  aspect-ratio: 16 / 9;
+}
+.m-player.m-fullscreen .m-video-wrap {
+  flex: 1;
+  height: 100%;
+}
+
+.m-center-tip {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  color: #fff;
+  font-size: 15px;
+  text-align: center;
+  z-index: 10;
+}
+.m-center-tip.m-err p { margin-bottom: 10px; font-size: 14px; }
+
+.m-panel {
+  flex: 1;
+  background: var(--surface);
+  padding: 12px 16px 16px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.m-panel-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.m-back-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  background: var(--card);
+  border: none;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.m-title-info {
+  flex: 1;
+  min-width: 0;
+}
+.m-title-name {
+  font-size: 15px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.m-title-meta {
+  font-size: 12px;
+  color: var(--sub);
+  margin-top: 2px;
+}
+.m-icon-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  background: var(--card);
+  border: none;
+  color: var(--text);
+  font-size: 18px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.m-progress-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.m-time-sm {
+  font-size: 11px;
+  color: var(--sub);
+  min-width: 36px;
+  text-align: center;
+}
+.m-progress-wrap {
+  flex: 1;
+  padding: 8px 0;
+  cursor: pointer;
+  touch-action: none;
+}
+.m-progress-track {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--card-hi);
+  position: relative;
+}
+.m-progress-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--live);
+}
+.m-seek-hint {
+  text-align: center;
+  font-size: 13px;
+  color: #ffeb3b;
+  margin: -6px 0 6px;
+}
+
+.m-main-controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 8px 0;
+}
+.m-ctl-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 8px;
+  background: var(--card);
+  border: none;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.m-play-btn {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background: var(--live);
+  border: none;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+}
+
+.m-aux-controls {
+  display: flex;
+  gap: 8px;
+}
+.m-aux-btn {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 10px 8px;
+  border-radius: 8px;
+  background: var(--card);
+  border: none;
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+.m-aux-icon {
+  font-size: 20px;
+}
+
+/* 全屏时浮动 OSD */
+.m-osd-fullscreen {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 12px;
+  background: linear-gradient(rgba(0,0,0,0.5) 0%, transparent 20%, transparent 80%, rgba(0,0,0,0.7) 100%);
+  pointer-events: none;
+}
+.m-osd-fullscreen > * { pointer-events: auto; }
+
+.m-fs-top {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.m-fs-title {
+  flex: 1;
+  color: #fff;
+  font-size: 15px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.m-fs-bottom {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.m-fs-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.m-time {
+  font-size: 12px;
+  color: #fff;
+  min-width: 40px;
+  text-align: center;
+}
+
+/* 移动端画质弹窗（底部弹出） */
+.m-q-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: flex-end;
+  z-index: 100;
+}
+.m-q-sheet {
+  width: 100%;
+  background: var(--surface);
+  border-radius: 16px 16px 0 0;
+  padding: 20px 16px;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+.m-q-handle {
+  width: 36px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--card-hi);
+  margin: 0 auto 16px;
+}
+.m-q-title {
   font-size: 16px;
   font-weight: 600;
-  margin-bottom: 6px;
+  margin-bottom: 16px;
+  text-align: center;
 }
-.q-section {
+.m-q-section {
   font-size: 13px;
   color: var(--sub);
   margin: 16px 0 8px;
 }
-.q-chips {
+.m-q-chips {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 8px;
 }
-.q-hint {
-  margin-top: 8px;
-  color: var(--dim);
-  font-size: 13px;
-}
-.q-footer {
-  margin-top: 20px;
-  text-align: right;
-}
-
-/* ===== 移动端响应式 ===== */
-@media (max-width: 640px) {
-  /* 控制条按钮紧凑：3行布局 */
-  .controls {
-    gap: 4px;
-  }
-  .ctl {
-    padding: 6px 8px;
-    font-size: 12px;
-    min-width: 44px;
-    text-align: center;
-  }
-  .ctl.fullscreen-btn { min-width: 44px; }
-  /* 时间戳字体缩小 */
-  .time { font-size: 11px; min-width: 44px; }
-  /* 音量滑块在手机上宽度适配 */
-  .vol-track { width: 80px; }
-  /* OSD 顶栏标题截断 */
-  .osd-title { font-size: 14px; max-width: 60vw; }
-  /* 画质面板宽度 */
-  .q-content { width: 92%; max-width: none; }
+.m-q-close {
+  margin-top: 16px;
 }
 </style>
