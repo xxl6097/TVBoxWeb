@@ -61,6 +61,11 @@ func Handler() *http.ServeMux {
 	mux.HandleFunc("/api/history/clear", hHistoryClear)
 	mux.HandleFunc("/api/favorites", hFavorites)
 	mux.HandleFunc("/api/favorites/toggle", hFavToggle)
+	mux.HandleFunc("/api/favorites/groups", hFavGroups)
+	mux.HandleFunc("/api/favorites/group/create", hFavGroupCreate)
+	mux.HandleFunc("/api/favorites/group/update", hFavGroupUpdate)
+	mux.HandleFunc("/api/favorites/group/delete", hFavGroupDelete)
+	mux.HandleFunc("/api/favorites/move", hFavMove)
 	mux.HandleFunc("/api/keywords", hKeywords)
 
 	mux.HandleFunc("/api/live/url", hLiveURL)
@@ -652,6 +657,100 @@ func hFavToggle(w http.ResponseWriter, r *http.Request) {
 	}
 	added := store.ToggleFavorite(f)
 	ok(w, map[string]any{"added": added})
+}
+
+// ---------- 收藏分组 API ----------
+
+// hFavGroups GET: 获取所有分组列表。
+func hFavGroups(w http.ResponseWriter, r *http.Request) {
+	groups := store.FavGroupList()
+	// 为每个分组统计收藏数量
+	favs := store.Favorites()
+	countMap := map[string]int{"": 0} // "" = 默认分组
+	for _, f := range favs {
+		countMap[f.GroupID]++
+	}
+	type groupWithCount struct {
+		store.FavGroup
+		Count int `json:"count"`
+	}
+	out := []groupWithCount{}
+	for _, g := range groups {
+		out = append(out, groupWithCount{FavGroup: g, Count: countMap[g.ID]})
+	}
+	ok(w, map[string]any{
+		"groups":       out,
+		"defaultCount": countMap[""],
+		"total":        len(favs),
+	})
+}
+
+// hFavGroupCreate POST: 创建新分组。
+func hFavGroupCreate(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := body(r, &req); err != nil || req.Name == "" {
+		fail(w, 400, "缺少分组名称")
+		return
+	}
+	if len(req.Name) > 20 {
+		fail(w, 400, "分组名称不能超过 20 个字符")
+		return
+	}
+	g := store.CreateFavGroup(req.Name)
+	ok(w, g)
+}
+
+// hFavGroupUpdate POST: 修改分组名称。
+func hFavGroupUpdate(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+	if err := body(r, &req); err != nil || req.ID == "" || req.Name == "" {
+		fail(w, 400, "缺少参数 id 或 name")
+		return
+	}
+	if !store.UpdateFavGroup(req.ID, req.Name) {
+		fail(w, 404, "分组不存在")
+		return
+	}
+	ok(w, map[string]any{"ok": true})
+}
+
+// hFavGroupDelete POST: 删除分组（该组收藏自动归入默认分组）。
+func hFavGroupDelete(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ID string `json:"id"`
+	}
+	if err := body(r, &req); err != nil || req.ID == "" {
+		fail(w, 400, "缺少参数 id")
+		return
+	}
+	if !store.DeleteFavGroup(req.ID) {
+		fail(w, 404, "分组不存在")
+		return
+	}
+	ok(w, map[string]any{"ok": true})
+}
+
+// hFavMove POST: 将收藏移入指定分组。
+func hFavMove(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SiteKey string `json:"siteKey"`
+		VodID   string `json:"vodId"`
+		GroupID string `json:"groupId"` // 空字符串 = 默认分组
+	}
+	if err := body(r, &req); err != nil || req.SiteKey == "" || req.VodID == "" {
+		fail(w, 400, "缺少参数 siteKey 或 vodId")
+		return
+	}
+	if !store.MoveFav(req.SiteKey, req.VodID, req.GroupID) {
+		fail(w, 404, "收藏不存在")
+		return
+	}
+	ok(w, map[string]any{"ok": true})
 }
 
 func hKeywords(w http.ResponseWriter, r *http.Request) {

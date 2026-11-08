@@ -118,6 +118,14 @@ export interface FavItem {
   vodId: string
   name: string
   pic: string
+  groupId?: string  // 所属分组 ID，空字符串表示默认分组
+}
+
+export interface FavGroup {
+  id: string
+  name: string
+  time: number
+  count?: number  // 该分组内收藏数量（由后端聚合计算）
 }
 
 export interface WebdavSource {

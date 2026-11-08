@@ -7,6 +7,7 @@ import type {
   VodPage,
   HistItem,
   FavItem,
+  FavGroup,
   RawLive,
   LiveDir,
   ChannelGroup,
@@ -85,6 +86,13 @@ export const api = {
 
   favorites: () => get<FavItem[]>('/favorites'),
   toggleFavorite: (f: FavItem) => post<{ added: boolean }>('/favorites/toggle', f),
+  // 收藏分组
+  favGroups: () => get<{ groups: FavGroup[]; defaultCount: number; total: number }>('/favorites/groups'),
+  createFavGroup: (name: string) => post<FavGroup>('/favorites/group/create', { name }),
+  updateFavGroup: (id: string, name: string) => post<{ ok: boolean }>('/favorites/group/update', { id, name }),
+  deleteFavGroup: (id: string) => post<{ ok: boolean }>('/favorites/group/delete', { id }),
+  moveFav: (siteKey: string, vodId: string, groupId: string) =>
+    post<{ ok: boolean }>('/favorites/move', { siteKey, vodId, groupId }),
 
   keywords: () => get<string[]>('/keywords'),
   pushKeyword: (kw: string) => post<string[]>('/keywords', { kw }),

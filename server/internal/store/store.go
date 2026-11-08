@@ -3,6 +3,7 @@ package store
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -410,6 +411,108 @@ func ToggleFavorite(f FavItem) bool {
 	mu.Unlock()
 	flush()
 	return !removed
+}
+
+// ---------- 收藏分组 ----------
+
+// FavGroupList 获取所有分组。
+func FavGroupList() []FavGroup {
+	mu.Lock()
+	defer mu.Unlock()
+	if data.FavGroups == nil {
+		return []FavGroup{}
+	}
+	out := make([]FavGroup, len(data.FavGroups))
+	copy(out, data.FavGroups)
+	return out
+}
+
+// CreateFavGroup 创建新分组，返回新建的分组。
+func CreateFavGroup(name string) FavGroup {
+	g := FavGroup{
+		ID:   genID(),
+		Name: name,
+		Time: time.Now().Unix(),
+	}
+	mu.Lock()
+	if data.FavGroups == nil {
+		data.FavGroups = []FavGroup{}
+	}
+	data.FavGroups = append(data.FavGroups, g)
+	mu.Unlock()
+	flush()
+	return g
+}
+
+// UpdateFavGroup 修改分组名称。
+func UpdateFavGroup(id, name string) bool {
+	mu.Lock()
+	found := false
+	for i := range data.FavGroups {
+		if data.FavGroups[i].ID == id {
+			data.FavGroups[i].Name = name
+			found = true
+			break
+		}
+	}
+	mu.Unlock()
+	if found {
+		flush()
+	}
+	return found
+}
+
+// DeleteFavGroup 删除分组，该分组下的收藏自动归入默认分组（groupId=""）。
+func DeleteFavGroup(id string) bool {
+	mu.Lock()
+	var groups []FavGroup
+	found := false
+	for _, g := range data.FavGroups {
+		if g.ID == id {
+			found = true
+		} else {
+			groups = append(groups, g)
+		}
+	}
+	if found {
+		data.FavGroups = groups
+		// 收藏归入默认组
+		for i := range data.Fav {
+			if data.Fav[i].GroupID == id {
+				data.Fav[i].GroupID = ""
+			}
+		}
+	}
+	mu.Unlock()
+	if found {
+		flush()
+	}
+	return found
+}
+
+// MoveFav 将收藏移入指定分组（groupId="" 为默认分组）。
+func MoveFav(siteKey, vodID, groupID string) bool {
+	mu.Lock()
+	found := false
+	for i := range data.Fav {
+		if data.Fav[i].SiteKey == siteKey && data.Fav[i].VodID == vodID {
+			data.Fav[i].GroupID = groupID
+			found = true
+			break
+		}
+	}
+	mu.Unlock()
+	if found {
+		flush()
+	}
+	return found
+}
+
+// genID 生成简单 UUID（时间戳 + 随机后缀）。
+func genID() string {
+	// 使用 时间戳纳秒 作为简单唯一 ID（不需要真正的 UUID）
+	ns := time.Now().UnixNano()
+	return fmt.Sprintf("%x", ns)
 }
 
 // ---------- 搜索历史 ----------
