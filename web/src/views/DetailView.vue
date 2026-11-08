@@ -7,6 +7,7 @@ import { usePlayerStore } from '@/stores/player'
 import { splitLines } from '@/utils/lines'
 import type { Vod, Line } from '@/types'
 import TopBar from '@/components/TopBar.vue'
+import SkeletonList from '@/components/SkeletonList.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -135,7 +136,23 @@ function play(epIndex: number) {
     <TopBar />
     <div class="back" @click="router.back()">‹ 返回</div>
 
-    <div v-if="vod" class="detail">
+    <!-- 加载中：骨架屏 -->
+    <div v-if="loading" class="detail-loading">
+      <div class="left">
+        <div class="skeleton-poster"></div>
+      </div>
+      <div class="right">
+        <div class="skeleton-title"></div>
+        <div class="skeleton-meta"></div>
+        <div class="skeleton-meta"></div>
+        <div class="skeleton-content"></div>
+        <div class="skeleton-content"></div>
+        <div class="skeleton-content short"></div>
+      </div>
+    </div>
+
+    <!-- 详情内容 -->
+    <div v-else-if="vod" class="detail">
       <div class="left">
         <div class="poster">
           <img v-if="!posterFailed && vod.pic" :src="vod.pic" :alt="vod.name" @error="posterFailed = true" />
@@ -391,5 +408,78 @@ function play(epIndex: number) {
     flex-wrap: nowrap;
     padding-bottom: 4px;
   }
+  /* 骨架屏移动端 */
+  .detail-loading {
+    flex-direction: column;
+    padding: 0 12px;
+  }
+  .detail-loading .left {
+    width: 100%;
+    max-width: 200px;
+    margin: 0 auto;
+  }
+}
+
+/* 详情页骨架屏 */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.detail-loading {
+  display: flex;
+  gap: 24px;
+  padding: 0 24px;
+}
+
+.detail-loading .left {
+  width: 240px;
+  flex-shrink: 0;
+}
+
+.detail-loading .right {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.skeleton-poster {
+  aspect-ratio: 2 / 3;
+  border-radius: var(--radius);
+  background: linear-gradient(90deg, var(--card) 25%, var(--card-hi) 50%, var(--card) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.4s infinite;
+}
+
+.skeleton-title {
+  height: 32px;
+  width: 60%;
+  border-radius: 6px;
+  background: linear-gradient(90deg, var(--card) 25%, var(--card-hi) 50%, var(--card) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.4s infinite;
+}
+
+.skeleton-meta {
+  height: 16px;
+  width: 40%;
+  border-radius: 4px;
+  background: linear-gradient(90deg, var(--card) 25%, var(--card-hi) 50%, var(--card) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.4s infinite 0.2s;
+}
+
+.skeleton-content {
+  height: 14px;
+  width: 100%;
+  border-radius: 4px;
+  background: linear-gradient(90deg, var(--card) 25%, var(--card-hi) 50%, var(--card) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.4s infinite 0.4s;
+}
+
+.skeleton-content.short {
+  width: 70%;
 }
 </style>

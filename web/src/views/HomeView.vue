@@ -7,6 +7,7 @@ import { fmtMs } from '@/utils/format'
 import type { Vod, HistItem } from '@/types'
 import TopBar from '@/components/TopBar.vue'
 import VodGrid from '@/components/VodGrid.vue'
+import SkeletonList from '@/components/SkeletonList.vue'
 
 const router = useRouter()
 const app = useAppStore()
@@ -133,7 +134,11 @@ function refresh() {
     <TopBar />
 
     <!-- 继续观看 -->
-    <template v-if="history.length">
+    <template v-if="loading">
+      <div class="section-title">继续观看</div>
+      <SkeletonList type="card" :count="6" />
+    </template>
+    <template v-else-if="history.length">
       <div class="section-title">
         继续观看
         <span class="count">{{ history.length }} 部</span>
@@ -172,8 +177,8 @@ function refresh() {
       <span v-if="feedSummary" class="summary">{{ feedSummary }}</span>
       <span class="more" @click="refresh">更新 ›</span>
     </div>
-    <VodGrid v-if="feed.length" :vods="feed" />
-    <div v-else-if="!loading" class="empty">
+    <VodGrid :vods="feed" :loading="loading" />
+    <div v-if="!loading && !feed.length" class="empty">
       <template v-if="hasSites">
         <p>正在拉取最新影片…</p>
         <p class="hint">也可以点上方「点播」按分类浏览，或到「设置 → 内容更新 → 立即更新」</p>
