@@ -209,8 +209,8 @@ function parseFilters(ext: string, tid: string): FilterGroup[] {
       </div>
     </div>
 
-    <div v-loading="loading">
-      <VodGrid :vods="page.items" />
+    <div>
+      <VodGrid :vods="page.items" :loading="loading" />
       <div v-if="!loading && !page.items.length" class="vod-empty">
         <p>暂无内容</p>
         <p class="hint">可能是这个站源当前分类下没有数据，换个分类或站源试试</p>

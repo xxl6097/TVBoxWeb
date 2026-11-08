@@ -1,12 +1,20 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import Hls from 'hls.js'
 import { api, proxied } from '@/api'
 import { useAppStore } from '@/stores/app'
 import { usePlayerStore } from '@/stores/player'
 import { fmtMs } from '@/utils/format'
 import { fromHlsLevels, labelOfLevel, labelOf, AUTO, TOP, QLevel } from '@/utils/quality'
+
+// hls.js 动态加载（410KB → 只在进播放页时才请求）
+let Hls: any = null
+async function loadHls(): Promise<any> {
+  if (Hls) return Hls
+  const mod = await import('hls.js')
+  Hls = mod.default || mod
+  return Hls
+}
 
 const route = useRoute()
 const router = useRouter()
@@ -33,7 +41,7 @@ const levels = ref<QLevel[]>([])
 let liveFail = 0
 
 const videoEl = ref<HTMLVideoElement>()
-let hls: Hls | null = null
+let hls: any | null = null
 let hlsRecover = 0 // hls fatal 错误恢复次数，避免 seek/网络抖动直接判死
 
 const title = ref((route.query.title as string) || '')
@@ -78,6 +86,26 @@ const progressPct = computed(() => (durMs.value > 0 ? (curMs.value / durMs.value
 // ===== 移动端检测 =====
 const isMobile = ref(false)
 function checkMobile() { isMobile.value = window.innerWidth <= 640 }
+
+// ===== 画中画 =====
+const isPip = ref(false)
+function supportsPip(): boolean {
+  return !!(document as any).pictureInPictureEnabled
+}
+async function togglePip() {
+  const vid = videoEl.value
+  if (!vid) return
+  try {
+    const doc = document as any
+    if (doc.pictureInPictureElement) {
+      await doc.exitPictureInPicture()
+    } else {
+      await (vid as any).requestPictureInPicture()
+    }
+  } catch (e) {
+    app.showTip('此设备不支持画中画')
+  }
+}
 
 // ===== 全屏 =====
 const playerEl = ref<HTMLElement>()
@@ -266,33 +294,33 @@ function proxiedFinal(): string {
   return proxied(finalUrl, directMode ? player.header?.auth : undefined)
 }
 
-function initPlayer() {
+async function initPlayer() {
   if (!finalUrl || !videoEl.value) return
   const vid = videoEl.value
   const src = proxiedFinal()
-  if (src.includes('.m3u8') || src.includes('.m3u8?') || via.value === '直播直连' || via.value === '补全 m3u8') {
-    if (Hls.isSupported()) {
-      const h = new Hls({ maxBufferLength: 30 })
+  if (src.includes('.m3u8') || via.value === '直播直连' || via.value === '补全 m3u8') {
+    const HlsCls = await loadHls()
+    if (HlsCls.isSupported()) {
+      const h = new HlsCls({ maxBufferLength: 30 })
       hls = h
       h.loadSource(src)
       h.attachMedia(vid)
-      h.on(Hls.Events.MANIFEST_PARSED, () => {
+      h.on(HlsCls.Events.MANIFEST_PARSED, () => {
         if (h.levels && h.levels.length > 1) {
           levels.value = fromHlsLevels(h.levels)
           applyInitialLevel()
         }
       })
-      h.on(Hls.Events.ERROR, (_e, data) => {
+      h.on(HlsCls.Events.ERROR, (_e: any, data: any) => {
         if (!data.fatal) return
-        // seek 或网络抖动引发的 fatal 错误先尝试恢复，而不是直接判死
         if (hlsRecover < 3) {
           hlsRecover++
-          if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+          if (data.type === HlsCls.ErrorTypes.NETWORK_ERROR) {
             app.showTip('网络抖动，正在恢复…')
             h.startLoad()
             return
           }
-          if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+          if (data.type === HlsCls.ErrorTypes.MEDIA_ERROR) {
             app.showTip('解码异常，正在恢复…')
             h.recoverMediaError()
             return
@@ -364,6 +392,8 @@ function bindVideoEvents(vid: HTMLVideoElement) {
   vid.onerror = () => {
     onPlayError()
   }
+  vid.onenterpictureinpicture = () => { isPip.value = true }
+  vid.onleavepictureinpicture = () => { isPip.value = false }
 }
 
 function onPlayError() {
@@ -604,6 +634,120 @@ function seekBy(dir: number) {
   popOsd()
 }
 
+// ===== 移动端手势 =====
+let touchStartX = 0
+let touchStartY = 0
+let touchStartVol = 0
+let touchStartMs = 0
+let touchDir: 'horizontal' | 'vertical-left' | 'vertical-right' | '' = ''
+let touchLastTap = 0
+let touchTapTimer = 0
+const gestureHint = ref('')
+let gestureTimer = 0
+
+function showGestureHint(msg: string) {
+  gestureHint.value = msg
+  if (gestureTimer) clearTimeout(gestureTimer)
+  gestureTimer = window.setTimeout(() => (gestureHint.value = ''), 1200)
+}
+
+function onTouchStart(e: TouchEvent) {
+  if (e.touches.length !== 1) return
+  const t = e.touches[0]
+  touchStartX = t.clientX
+  touchStartY = t.clientY
+  touchStartVol = volume.value
+  touchStartMs = curMs.value
+  touchDir = ''
+}
+
+function onTouchMove(e: TouchEvent) {
+  if (e.touches.length !== 1) return
+  const t = e.touches[0]
+  const dx = t.clientX - touchStartX
+  const dy = t.clientY - touchStartY
+  const adx = Math.abs(dx)
+  const ady = Math.abs(dy)
+
+  if (!touchDir && (adx > 8 || ady > 8)) {
+    // 判断滑动方向：横向 or 纵向（左半屏亮度，右半屏音量）
+    if (adx > ady * 1.5) {
+      touchDir = 'horizontal'
+    } else {
+      const isRightHalf = touchStartX > window.innerWidth / 2
+      touchDir = isRightHalf ? 'vertical-right' : 'vertical-left'
+    }
+  }
+
+  if (touchDir === 'horizontal') {
+    // 横向滑动：快进退（1px = 约 0.5s，最大 ±90s）
+    if (isLive || durMs.value <= 0) return
+    e.preventDefault()
+    const seekDelta = (dx / window.innerWidth) * 90000 // 90s range
+    const newMs = Math.max(0, Math.min(durMs.value, touchStartMs + seekDelta))
+    const diff = Math.round((newMs - touchStartMs) / 1000)
+    const sign = diff >= 0 ? '+' : ''
+    showGestureHint(`${sign}${diff}s → ${fmtMs(newMs)}`)
+  } else if (touchDir === 'vertical-right') {
+    // 右半屏上下：音量
+    e.preventDefault()
+    const delta = -dy / 200 // 上划增大
+    const newVol = Math.min(1, Math.max(0, touchStartVol + delta))
+    volume.value = newVol
+    if (newVol > 0) muted.value = false
+    if (videoEl.value) videoEl.value.volume = muted.value ? 0 : newVol
+    showGestureHint(`音量 ${Math.round(newVol * 100)}%`)
+  } else if (touchDir === 'vertical-left') {
+    // 左半屏上下：预留亮度（Web API 不支持屏幕亮度，显示提示）
+    e.preventDefault()
+    showGestureHint('亮度调节请用系统控制中心')
+  }
+}
+
+function onTouchEnd(e: TouchEvent) {
+  if (!touchDir) {
+    // 无方向滑动 = 点击
+    const now = Date.now()
+    const t = e.changedTouches[0]
+    if (now - touchLastTap < 300) {
+      // 双击：左侧 -10s，右侧 +10s
+      clearTimeout(touchTapTimer)
+      const isRight = t.clientX > window.innerWidth / 2
+      if (!isLive && durMs.value > 0) {
+        seekBy(isRight ? 1 : -1)
+        flashPlay(isRight ? 'play' : 'pause')
+        showGestureHint(isRight ? '+10s' : '-10s')
+      } else {
+        togglePlay()
+      }
+      touchLastTap = 0
+    } else {
+      touchLastTap = now
+      touchTapTimer = window.setTimeout(() => {
+        // 单击：切换 OSD
+        touchLastTap = 0
+        if (!showOsd.value) popOsd()
+        else showOsd.value = false
+      }, 280)
+    }
+    return
+  }
+
+  // 横向滑动结束：实际 seek
+  if (touchDir === 'horizontal' && !isLive && durMs.value > 0) {
+    const dx = e.changedTouches[0].clientX - touchStartX
+    const seekDelta = (dx / window.innerWidth) * 90000
+    const newMs = Math.max(0, Math.min(durMs.value, touchStartMs + seekDelta))
+    if (videoEl.value) {
+      videoEl.value.currentTime = newMs / 1000
+      curMs.value = newMs
+    }
+    app.showTip('已跳到 ' + fmtMs(newMs))
+  }
+  touchDir = ''
+  gestureHint.value = ''
+}
+
 function seekToRatio(ratio: number) {
   const vid = videoEl.value
   if (!vid || !prepared.value || durMs.value <= 0) return
@@ -824,6 +968,7 @@ function onKey(e: KeyboardEvent) {
   else if (e.key === 'ArrowDown') changeVolume(-0.05)
   else if (e.key === 'm') toggleMute()
   else if (e.key === 'f' || e.key === 'F') toggleFullscreen()
+  else if (e.key === 'p' || e.key === 'P') togglePip()
 }
 
 onMounted(() => {
@@ -872,7 +1017,20 @@ onUnmounted(() => {
       {{ skipShow === 'intro' ? '跳过片头' : player.hasNext ? '下一集' : '跳过片尾' }}
     </div>
 
-    <!-- 控制条 -->
+    <!-- 桌面端右上角画中画按钮 -->
+  <button
+    v-if="prepared && supportsPip()"
+    class="pip-btn"
+    :title="isPip ? '退出画中画 (P)' : '画中画 (P)'"
+    @click="togglePip"
+  >
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="2" y="3" width="20" height="14" rx="2"/>
+      <rect x="12" y="10" width="9" height="7" rx="1"/>
+    </svg>
+  </button>
+
+  <!-- 控制条 -->
     <div v-if="showOsd && prepared" class="osd" @click.stop>
       <div class="osd-top">
         <button class="back-btn" @click="goBack">
@@ -943,8 +1101,18 @@ onUnmounted(() => {
   <!-- 移动端：视频 + 控制面板垂直流式布局 -->
   <div v-else ref="playerEl" class="m-player" :class="{ 'm-fullscreen': isFullscreen }">
     <!-- 视频区域 -->
-    <div class="m-video-wrap" @click="onSurfaceClick" @dblclick="toggleFullscreen">
+    <div
+      class="m-video-wrap"
+      @click="onSurfaceClick"
+      @dblclick="toggleFullscreen"
+      @touchstart="onTouchStart"
+      @touchmove="onTouchMove"
+      @touchend="onTouchEnd"
+    >
       <video ref="videoEl" class="video" :style="{ objectFit: scaleFit }"></video>
+
+      <!-- 手势提示 -->
+      <div v-if="gestureHint" class="m-gesture-hint">{{ gestureHint }}</div>
 
       <!-- 加载/缓冲（视频区内）-->
       <div v-if="resolving" class="m-center-tip">正在解析…</div>
@@ -1058,6 +1226,10 @@ onUnmounted(() => {
         <button class="m-aux-btn" @click="showQ = !showQ">
           <span class="m-aux-icon">⚙</span>
           <span>画质</span>
+        </button>
+        <button v-if="supportsPip()" class="m-aux-btn" @click="togglePip">
+          <span class="m-aux-icon">{{ isPip ? '⤦' : '⧉' }}</span>
+          <span>{{ isPip ? '退出PiP' : '画中画' }}</span>
         </button>
         <button class="m-aux-btn" @click="toggleFullscreen">
           <span class="m-aux-icon">⛶</span>
@@ -1282,6 +1454,29 @@ onUnmounted(() => {
 .fullscreen-btn:hover {
   background: rgba(255, 255, 255, 0.2);
   border-color: rgba(255, 255, 255, 0.6);
+}
+
+/* 桌面端画中画按钮 */
+.pip-btn {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  z-index: 20;
+  transition: background 0.15s, border-color 0.15s;
+}
+.pip-btn:hover {
+  background: rgba(255, 255, 255, 0.24);
+  border-color: #fff;
 }
 
 :fullscreen .osd,
@@ -1601,5 +1796,22 @@ onUnmounted(() => {
 }
 .m-q-close {
   margin-top: 16px;
+}
+
+/* ===== 手势提示覆盖层 ===== */
+.m-gesture-hint {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  font-size: 16px;
+  font-weight: 600;
+  padding: 10px 18px;
+  border-radius: 8px;
+  pointer-events: none;
+  z-index: 20;
+  white-space: nowrap;
 }
 </style>
