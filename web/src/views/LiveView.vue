@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { api } from '@/api'
 import { useAppStore } from '@/stores/app'
@@ -25,6 +25,11 @@ const checkedCount = ref(0)
 const rankResults = ref<Record<string, LiveScore>>({})
 const ranked = ref<LiveScore[]>([])
 const filter = ref('')
+
+// ===== 性能优化：频道索引缓存 =====
+// 避免每次搜索都递归遍历全树，改用预构建的扁平列表 + 首字母索引
+const flatChannels = ref<Channel[]>([])
+const channelIndex = ref<Map<string, Channel[]>>(new Map())
 
 onMounted(async () => {
   sources.value = await api.liveSources()
@@ -63,13 +68,40 @@ const currentDir = computed<LiveDir | null>(() => {
   return node
 })
 
+// 构建频道索引（当分组改变时）
+function buildChannelIndex() {
+  flatChannels.value = []
+  channelIndex.value.clear()
+  if (currentDir.value) {
+    collect(currentDir.value, flatChannels.value)
+  }
+  
+  // 按首字母分桶索引，加速搜索
+  for (const ch of flatChannels.value) {
+    const firstChar = ch.name.charAt(0).toLowerCase()
+    if (!channelIndex.value.has(firstChar)) {
+      channelIndex.value.set(firstChar, [])
+    }
+    channelIndex.value.get(firstChar)!.push(ch)
+  }
+}
+
+// 当 currentDir 变化时重建索引
+watch(currentDir, () => {
+  buildChannelIndex()
+}, { deep: true })
+
+// 优化搜索：先用首字母索引快速定位候选集，再精准过滤
 const channels = computed<Channel[]>(() => {
-  if (!currentDir.value) return []
-  const out: Channel[] = []
-  collect(currentDir.value, out)
   const kw = filter.value.trim().toLowerCase()
-  if (!kw) return out
-  return out.filter((c) => c.name.toLowerCase().includes(kw))
+  if (!kw) return flatChannels.value
+  
+  // 用首字母快速查找候选集
+  const firstChar = kw.charAt(0)
+  const candidates = channelIndex.value.get(firstChar) || flatChannels.value
+  
+  // 在候选集内精准过滤
+  return candidates.filter((c) => c.name.toLowerCase().includes(kw))
 })
 
 function collect(n: LiveDir, out: Channel[]) {

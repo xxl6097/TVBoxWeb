@@ -68,6 +68,21 @@ const scaleMode = ref(0)
 const skipLeft = ref(0)
 const introSkipSec = ref(0)
 const outroSkipSec = ref(0)
+// ===== 连续播放 =====
+const autoPlayNext = ref(true)  // 自动连播开关，默认开启
+// ===== 字幕支持 =====
+interface Subtitle {
+  lang: string
+  label: string
+  url: string
+  default?: boolean
+}
+const subtitles = ref<Subtitle[]>([])
+const currentSubIdx = ref(-1)  // -1 表示不加载字幕
+const subDelay = ref(0)        // 字幕延迟，单位毫秒
+// ===== 倍速播放 =====
+const playbackRate = ref(1.0)
+const PLAYBACK_RATES = [0.5, 0.75, 1, 1.25, 1.5, 2]
 let introDone = false
 let outroFired = false
 let skipTimer = 0
@@ -77,6 +92,12 @@ let volTimer = 0
 let leave = false
 let lastSaveMs = 0
 let saveTimer = 0 // savePos 防抖 timer
+
+// ===== Seek 防抖优化（三层防抖）=====
+const SEEK_DEBOUNCE = 300      // 拖拽时防抖 300ms，给用户反馈
+const SEEK_THROTTLE = 5000     // 最终落盘节流 5s，避免频繁网络请求
+let lastSeekMs = 0             // 上次成功 seek 的时间戳
+let seekPendingTimer = 0       // 等待中的 seek timer
 
 const isLivePlaying = computed(() => isLive)
 const playPauseText = computed(() => (playing.value ? '暂停' : '播放'))
@@ -175,8 +196,10 @@ onMounted(async () => {
 
 onUnmounted(() => {
   leave = true
+  // 清理所有 timers
   if (saveTimer) clearTimeout(saveTimer)
-  savePos() // 退出时立即保存最终进度
+  if (seekPendingTimer) clearTimeout(seekPendingTimer)
+  // 页面卸载时确保最终进度被保存
   savePos()
   destroyPlayer()
 })
@@ -317,6 +340,8 @@ async function initPlayer() {
           levels.value = fromHlsLevels(h.levels)
           applyInitialLevel()
         }
+        // 尝试从 m3u8 中加载字幕轨道
+        loadSubtitlesFromHls(h, src)
       })
       h.on(HlsCls.Events.ERROR, (_e: any, data: any) => {
         if (!data.fatal) return
@@ -391,10 +416,25 @@ function bindVideoEvents(vid: HTMLVideoElement) {
   }
   vid.onended = () => {
     playing.value = false
-    if (player.hasNext && !isLive) {
-      switchEpisode(1)
+    if (player.hasNext && !isLive && autoPlayNext.value) {
+      // 自动连播：3 秒倒计时后切下一集
+      let countdown = 3
+      hint.value = `即将播放下一集（${countdown}s）`
+      const countdownTimer = setInterval(() => {
+        countdown--
+        if (countdown > 0) {
+          hint.value = `即将播放下一集（${countdown}s）`
+        } else {
+          clearInterval(countdownTimer)
+          hint.value = ''
+          switchEpisode(1)
+        }
+      }, 1000)
     } else {
       showOsd.value = true
+      if (!player.hasNext && !isLive) {
+        app.showTip('播放列表已全部完成')
+      }
     }
   }
   vid.onerror = () => {
@@ -591,8 +631,29 @@ function onProgressUp(e: PointerEvent) {
   dragging.value = false
   const t = previewMs.value / 1000
   if (videoEl.value && t >= 0 && durMs.value > 0) {
+    // 方案：立即更新 UI 进度条，给用户反馈
     videoEl.value.currentTime = t
     curMs.value = previewMs.value
+    
+    // 三层防抖：只在 5s 间隔后才真正落盘进度记录
+    clearTimeout(seekPendingTimer)
+    const now = Date.now()
+    const timeSinceLastSeek = now - lastSeekMs
+    
+    if (timeSinceLastSeek >= SEEK_THROTTLE) {
+      // 距上次 seek 已超过 5s，直接落盘
+      lastSeekMs = now
+      savePos()
+    } else {
+      // 在 5s 范围内，等待 300ms 后若无新 seek 才落盘
+      seekPendingTimer = window.setTimeout(() => {
+        const elapsed = Date.now() - lastSeekMs
+        if (elapsed >= SEEK_THROTTLE) {
+          lastSeekMs = Date.now()
+          savePos()
+        }
+      }, SEEK_DEBOUNCE)
+    }
   }
   const target = fmtMs(previewMs.value)
   previewMs.value = -1
@@ -640,6 +701,97 @@ function seekBy(dir: number) {
   vid.currentTime = t
   curMs.value = t * 1000
   popOsd()
+}
+
+// ===== 字幕支持 =====
+
+// 从 HLS m3u8 中提取字幕轨道
+function loadSubtitlesFromHls(hls: any, m3u8Url: string) {
+  subtitles.value = []
+  currentSubIdx.value = -1
+  if (!hls.media) return
+  
+  // 尝试从 hls.js 的子轨列表提取
+  try {
+    // hls.js 通常会将字幕信息存储在 hls.subtitleTracks 数组中
+    if (hls.subtitleTracks && Array.isArray(hls.subtitleTracks)) {
+      for (let i = 0; i < hls.subtitleTracks.length; i++) {
+        const track = hls.subtitleTracks[i]
+        if (track) {
+          subtitles.value.push({
+            lang: track.lang || `track_${i}`,
+            label: track.name || `字幕 ${i + 1}`,
+            url: track.url || '',
+            default: track.default || false
+          })
+        }
+      }
+    }
+  } catch (e) {
+    /* ignore */
+  }
+}
+
+// 切换字幕
+function switchSubtitle(idx: number) {
+  if (idx === -1) {
+    currentSubIdx.value = -1
+    if (hls && hls.media && hls.media.textTracks) {
+      for (let i = 0; i < hls.media.textTracks.length; i++) {
+        hls.media.textTracks[i].mode = 'hidden'
+      }
+    }
+    app.showTip('已关闭字幕')
+    return
+  }
+  if (idx < 0 || idx >= subtitles.value.length) return
+  currentSubIdx.value = idx
+  if (hls && hls.media && hls.media.textTracks) {
+    for (let i = 0; i < hls.media.textTracks.length; i++) {
+      hls.media.textTracks[i].mode = i === idx ? 'showing' : 'hidden'
+    }
+  }
+  const sub = subtitles.value[idx]
+  app.showTip(`已激活字幕：${sub.label}`)
+}
+
+// 调整字幕延迟
+function setSubDelay(ms: number) {
+  subDelay.value = ms
+  // 通过 CSS 调整字幕位置（或其他 hls.js 提供的 API）
+  if (hls && hls.media && hls.media.textTracks) {
+    for (let i = 0; i < hls.media.textTracks.length; i++) {
+      const track = hls.media.textTracks[i]
+      if (track.cues) {
+        for (let j = 0; j < track.cues.length; j++) {
+          const cue = track.cues[j]
+          cue.startTime += ms / 1000
+          cue.endTime += ms / 1000
+        }
+      }
+    }
+  }
+  app.showTip(`字幕延迟 ${ms > 0 ? '+' : ''}${(ms / 1000).toFixed(1)}s`)
+}
+
+// ===== 倍速播放 =====
+
+function setPlaybackRate(rate: number) {
+  const vid = videoEl.value
+  if (!vid || !prepared.value) return
+  if (!PLAYBACK_RATES.includes(rate)) return
+  playbackRate.value = rate
+  vid.playbackRate = rate
+  // 同步到 HLS 配置（防止切换线路时重置）
+  if (hls) hls.config.playbackRate = rate
+  app.showTip(`${rate}x 倍速播放`)
+}
+
+// 循环切换倍速（0.5x → 0.75x → 1x → 1.25x → 1.5x → 2x → 0.5x）
+function togglePlaySpeed() {
+  const idx = PLAYBACK_RATES.indexOf(playbackRate.value)
+  const nextIdx = (idx + 1) % PLAYBACK_RATES.length
+  setPlaybackRate(PLAYBACK_RATES[nextIdx])
 }
 
 // ===== 移动端手势 =====
@@ -1233,6 +1385,10 @@ onUnmounted(() => {
         <button class="m-aux-btn" @click="toggleMute">
           <span class="m-aux-icon">{{ muted ? '🔇' : '🔊' }}</span>
           <span>{{ muted ? '已静音' : Math.round(volume * 100) + '%' }}</span>
+        </button>
+        <button v-if="!isLive && player.hasNext" class="m-aux-btn" @click="autoPlayNext = !autoPlayNext">
+          <span class="m-aux-icon">{{ autoPlayNext ? '▶' : '⏸' }}</span>
+          <span>{{ autoPlayNext ? '自动连播' : '手动切集' }}</span>
         </button>
         <button class="m-aux-btn" @click="showQ = !showQ">
           <span class="m-aux-icon">⚙</span>
