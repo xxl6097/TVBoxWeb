@@ -7,6 +7,7 @@ import * as ElementPlusIconsVue from '@element-plus/icons-vue'
 import App from './App.vue'
 import router from './router'
 import './styles/main.css'
+import { initWS } from './ws'
 
 const app = createApp(App)
 
@@ -34,3 +35,6 @@ app.use(createPinia())
 app.use(router)
 app.use(ElementPlus)
 app.mount('#app')
+
+// 初始化 WebSocket 连接（非阻塞）
+initWS().catch(console.error)

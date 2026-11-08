@@ -793,8 +793,59 @@ func RecordSiteRequest(siteKey string, success bool, ms int) {
 		stat.AvgMs = (stat.AvgMs*9 + ms) / 10
 	}
 	data.SiteHealth[siteKey] = stat
-	// 异步落盘，避免每次请求都写磁盘
-	go flush()
+	
+	// 计算健康状态并广播 WebSocket
+	health := calcHealth(stat)
+	errorRate := float64(stat.FailCount) / float64(stat.TotalReq)
+	if errorRate > 1.0 {
+		errorRate = 1.0
+	}
+	
+	// 异步广播与落盘，避免阻塞
+	go func() {
+		// 广播 WebSocket 消息
+		if hub := getWSHub(); hub != nil {
+			// 使用类型断言调用 BroadcastHealth
+			if h, ok := hub.(interface{ BroadcastHealth(string, string, float64, int, int64, int64) }); ok {
+				h.BroadcastHealth(siteKey, health, errorRate, stat.AvgMs, now*1000, stat.LastSuccess*1000)
+			}
+		}
+		// 落盘
+		flush()
+	}()
+}
+
+// calcHealth 根据统计数据计算健康状态。
+func calcHealth(stat SiteHealthStat) string {
+	if stat.TotalReq == 0 {
+		return "unknown"
+	}
+	errorRate := float64(stat.FailCount) / float64(stat.TotalReq)
+	now := time.Now().Unix()
+	daysSinceSuccess := (now - stat.LastSuccess) / 86400
+	
+	if daysSinceSuccess > 1 || errorRate > 0.8 {
+		return "dead"
+	}
+	if errorRate > 0.5 || stat.AvgMs > 5000 {
+		return "slow"
+	}
+	return "healthy"
+}
+
+// getWSHub 获取全局 WebSocket Hub（延迟导入，避免循环依赖）。
+func getWSHub() interface{} {
+	// 使用 api 包的 exported 函数获取 Hub
+	// 为了避免循环依赖，我们在 api 包中导出一个访问器
+	return getGlobalWSHub()
+}
+
+// SetGlobalWSHub 由 api 包调用，设置全局 Hub。
+var getGlobalWSHub = func() interface{} { return nil }
+
+// InitWSHub 由 main 或 api 包调用，初始化 Hub 访问器。
+func InitWSHub(getter func() interface{}) {
+	getGlobalWSHub = getter
 }
 
 // SiteHealthMap 返回所有站源健康度数据。

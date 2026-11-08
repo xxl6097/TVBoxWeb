@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, watch, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { api } from '@/api'
 import { useAppStore } from '@/stores/app'
 import { usePlayerStore } from '@/stores/player'
+import { getWSClient } from '@/ws'
 import type { LiveDir, Channel, RawLive, LiveScore } from '@/types'
+import type { HealthUpdate } from '@/ws'
 import TopBar from '@/components/TopBar.vue'
 import SkeletonList from '@/components/SkeletonList.vue'
 
@@ -27,6 +29,9 @@ const rankResults = ref<Record<string, LiveScore>>({})
 const ranked = ref<LiveScore[]>([])
 const filter = ref('')
 
+// ===== 实时健康度追踪（WebSocket） =====
+const siteHealthStatus = ref<Map<string, HealthUpdate>>(new Map())
+
 // ===== 性能优化：频道索引缓存 =====
 // 避免每次搜索都递归遍历全树，改用预构建的扁平列表 + 首字母索引
 const flatChannels = ref<Channel[]>([])
@@ -39,6 +44,17 @@ onMounted(async () => {
     currentUrl.value = u
     await loadChannels()
   }
+  
+  // 订阅 WebSocket 健康度更新
+  const ws = getWSClient()
+  ws.onHealth((update: HealthUpdate) => {
+    siteHealthStatus.value.set(update.siteKey, update)
+  })
+})
+
+onUnmounted(() => {
+  const ws = getWSClient()
+  ws.offHealth(() => {}) // 简单方案：移除所有回调；生产环境可保存回调引用
 })
 
 async function loadChannels() {
@@ -245,6 +261,17 @@ async function probeChannels() {
 function isDead(ch: Channel): boolean {
   return deadSet.value.has(ch.name + '|' + ch.url)
 }
+
+// 获取站源实时健康度
+function getSiteHealth(name: string): HealthUpdate | null {
+  // 按 name 匹配（站源名称作为 key）
+  for (const [key, val] of siteHealthStatus.value) {
+    if (key === name || key.includes(name) || name.includes(key)) {
+      return val
+    }
+  }
+  return null
+}
 </script>
 
 <template>
@@ -344,6 +371,13 @@ function isDead(ch: Channel): boolean {
               {{ s.name }}
               <span v-if="s.url === currentUrl" class="tag">使用中</span>
               <span v-else-if="ranked.length && ranked[0].url === s.url" class="tag rec">推荐</span>
+              <!-- 实时健康度指示器 -->
+              <span
+                v-if="getSiteHealth(s.name)"
+                class="health-dot"
+                :class="getSiteHealth(s.name)!.health"
+                :title="`健康度: ${getSiteHealth(s.name)!.health} · 错误率 ${(getSiteHealth(s.name)!.errorRate * 100).toFixed(0)}% · 平均 ${getSiteHealth(s.name)!.avgMs}ms`"
+              ></span>
             </div>
             <div class="speed-state" :class="{ fail: rankResults[s.url] && !rankResults[s.url].ok }">
               {{ rankResults[s.url] ? rankResults[s.url].state : '待测' }}
@@ -530,6 +564,33 @@ function isDead(ch: Channel): boolean {
 .tag.rec {
   color: #7ee787;
   border-color: #7ee787;
+}
+/* 实时健康度指示器 */
+.health-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-left: 4px;
+  cursor: help;
+  transition: all 0.3s;
+}
+.health-dot.healthy {
+  background: #4caf50;
+  box-shadow: 0 0 4px rgba(76, 175, 80, 0.5);
+}
+.health-dot.slow {
+  background: #ff9800;
+  box-shadow: 0 0 4px rgba(255, 152, 0, 0.5);
+}
+.health-dot.dead {
+  background: #f44336;
+  box-shadow: 0 0 4px rgba(244, 67, 54, 0.5);
+  animation: pulse-dead 1.5s ease-in-out infinite;
+}
+@keyframes pulse-dead {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
 }
 .speed-state {
   font-size: 12px;

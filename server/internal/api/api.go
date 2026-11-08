@@ -31,9 +31,19 @@ import (
 // startTime 服务启动时间，用于健康检查返回 uptime。
 var startTime time.Time
 
+// wsHub 全局 WebSocket Hub 引用（由 main 设置）。
+var wsHub interface{}
+
 // SetStartTime 由 main 包设置服务启动时间。
 func SetStartTime(t time.Time) {
 	startTime = t
+}
+
+// SetWSHub 由 main 包设置全局 WebSocket Hub。
+func SetWSHub(hub interface{}) {
+	wsHub = hub
+	// 初始化 store 包的 Hub 访问器
+	store.InitWSHub(func() interface{} { return wsHub })
 }
 
 // Handler 返回根路由。

@@ -17,6 +17,7 @@ import (
 	"tvbox/internal/api"
 	"tvbox/internal/crawler"
 	"tvbox/internal/store"
+	"tvbox/internal/ws"
 )
 
 //go:embed all:dist
@@ -33,6 +34,11 @@ func main() {
 	// 记录启动时间
 	api.SetStartTime(startTime)
 
+	// 初始化 WebSocket Hub
+	ws.Init()
+	api.SetWSHub(ws.GlobalHub)
+	defer ws.Shutdown()
+
 	// 数据文件
 	dataFile := filepath.Join(*dataDir, "store.json")
 	if err := store.Init(dataFile); err != nil {
@@ -45,6 +51,10 @@ func main() {
 	}
 
 	mux := api.Handler()
+
+	// WebSocket 端点
+	wsHandler := ws.NewHandler(ws.GlobalHub)
+	mux.HandleFunc("/ws", wsHandler.ServeWS)
 
 	// 静态资源：优先本地 dist，其次内嵌
 	if _, err := os.Stat("dist"); err == nil {
