@@ -129,6 +129,7 @@ export const api = {
   del,
 
   status: () => get<any>('/status'),
+  metrics: () => get<any>('/metrics'),
   sites: () => get<Site[]>('/sites'),
   setEnabled: (keys: string[]) => post('/sites/enabled', { keys }),
   sitesSpeed: () => get<{ key: string; name: string; ms: number; ok: boolean }[]>('/sites/speed'),
@@ -162,10 +163,16 @@ export const api = {
   deleteFavGroup: (id: string) => post<{ ok: boolean }>('/favorites/group/delete', { id }),
   moveFav: (siteKey: string, vodId: string, groupId: string) =>
     post<{ ok: boolean }>('/favorites/move', { siteKey, vodId, groupId }),
+  batchRemoveFav: (items: FavItem[]) => post<{ removed: number }>('/favorites/batch/remove', { items }),
+  batchMoveFav: (items: FavItem[], groupId: string) =>
+    post<{ moved: number }>('/favorites/batch/move', { items, groupId }),
+  importFav: (items: FavItem[]) => post<{ added: number; duplicate: number }>('/favorites/import', { items }),
 
   keywords: () => get<string[]>('/keywords'),
   pushKeyword: (kw: string) => post<string[]>('/keywords', { kw }),
+  removeKeyword: (kw: string) => post<string[]>('/keywords/remove', { kw }),
   clearKeywords: () => del('/keywords'),
+  hotKeywords: () => get<string[]>('/keywords/hot'),
 
   liveUrl: () => get<{ url: string }>('/live/url'),
   setLiveUrl: (url: string) => post('/live/url', { url }),

@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { api } from '@/api'
 import { useAppStore } from '@/stores/app'
 import type { Site, WebdavSource } from '@/types'
 import TopBar from '@/components/TopBar.vue'
 
 const app = useAppStore()
+const router = useRouter()
 
 // ===== 导航 =====
 type NavKey = 'source' | 'update' | 'webdav' | 'sites' | 'data' | 'about'
@@ -58,6 +60,10 @@ let   ccTimer = 0
 // ===== 关于 =====
 const showPrivacy = ref(false)
 const appVersion  = '1.0.0'
+
+function goMetrics() {
+  router.push('/metrics')
+}
 
 // ==============================
 onMounted(load)
@@ -498,6 +504,12 @@ async function clearHistory() {
                 <p>· 本应用为本地播放器，不提供、不存储、不分发任何影视内容；内容全部来自你自行填写的第三方接口。</p>
               </div>
             </template>
+            <div class="sdiv"></div>
+            <div class="srow srow-clickable" @click="goMetrics">
+              <span class="srow-title">性能监控</span>
+              <span class="srow-val">查看运行指标</span>
+              <span class="arrow" style="margin-left:8px">›</span>
+            </div>
             <div class="sdiv"></div>
             <div class="srow">
               <span class="srow-title">技术栈</span>

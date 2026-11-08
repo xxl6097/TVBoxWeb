@@ -13,7 +13,8 @@ const router = createRouter({
     { path: '/history', name: 'history', component: () => import('@/views/HistoryView.vue') },
     { path: '/settings', name: 'settings', component: () => import('@/views/SettingsView.vue') },
     { path: '/webdav', name: 'webdav', component: () => import('@/views/WebdavView.vue') },
-    { path: '/direct', name: 'direct', component: () => import('@/views/DirectView.vue') }
+    { path: '/direct', name: 'direct', component: () => import('@/views/DirectView.vue') },
+    { path: '/metrics', name: 'metrics', component: () => import('@/views/MetricsView.vue') }
   ]
 })
 

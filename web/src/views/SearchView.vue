@@ -16,12 +16,21 @@ const results = ref<Vod[]>([])
 const searching = ref(false)
 const searched = ref(false)
 const keywords = ref<string[]>([])
+const hotKeywords = ref<string[]>([])
 const siteInfo = ref('')
 const sugg = ref<string[]>([])
 const suggLoading = ref(false)
 
 onMounted(async () => {
   keywords.value = await api.keywords()
+  // 热门词（feed 提取），失败静默
+  api.hotKeywords().then(h => { hotKeywords.value = h }).catch(() => {})
+})
+
+// 判断关键词是否为纯 ASCII（可能是拼音缩写）
+const isPinyin = computed(() => {
+  const w = kw.value.trim()
+  return w.length > 0 && /^[a-zA-Z0-9]+$/.test(w)
 })
 
 // 按站源分组结果
@@ -35,6 +44,24 @@ const grouped = computed(() => {
   return [...map.entries()]
 })
 
+// 搜索结果相关性排序（模糊匹配）
+function rankResults(list: Vod[], word: string): Vod[] {
+  const w = word.trim().toLowerCase()
+  const score = (v: Vod): number => {
+    const name = (v.name || '').toLowerCase()
+    if (name === w) return 100          // 完全匹配
+    if (name.startsWith(w)) return 80   // 前缀匹配
+    if (name.includes(w)) return 60     // 包含匹配
+    if (w.length >= 2 && name.replace(/[^\u4e00-\u9fa5a-z0-9]/g, '').includes(w.replace(/\s/g, ''))) return 40 // 去空格包含
+    return 0                            // 不相关（保持原顺序）
+  }
+  // 稳定排序：按分数降序，分数相同保持原顺序
+  return list
+    .map((v, i) => ({ v, s: score(v), i }))
+    .sort((a, b) => b.s - a.s || a.i - b.i)
+    .map(x => x.v)
+}
+
 async function doSearch(k?: string) {
   const word = (k ?? kw.value).trim()
   if (!word) {
@@ -47,7 +74,8 @@ async function doSearch(k?: string) {
   searched.value = true
   try {
     const r = await api.search(word)
-    results.value = r.list
+    // 相关性排序：最相关的排前面
+    results.value = rankResults(r.list, word)
     siteInfo.value = `${r.sites}/${r.total} 个站源有响应`
     keywords.value = await api.pushKeyword(word)
   } catch (e: any) {
@@ -69,6 +97,10 @@ function clearKeywords() {
     keywords.value = []
     app.showTip('已清空搜索记录')
   })
+}
+
+async function removeKeyword(k: string) {
+  keywords.value = await api.removeKeyword(k)
 }
 
 // 实时联想
@@ -115,6 +147,10 @@ function onInput() {
           <el-button :loading="searching" @click="doSearch()">搜索</el-button>
         </template>
       </el-input>
+      <!-- 拼音输入提示 -->
+      <div v-if="isPinyin && !searched" class="pinyin-hint">
+        检测到字母输入，将按「拼音首字母」匹配，如 sgyy → 三国演义
+      </div>
     </div>
 
     <!-- 猜你想搜 -->
@@ -131,11 +167,22 @@ function onInput() {
         <span class="clear" @click="clearKeywords">清空记录</span>
       </div>
       <div class="kw-chips">
-        <span v-for="k in keywords" :key="k" class="chip" @click="doSearch(k)">{{ k }}</span>
+        <span v-for="k in keywords" :key="k" class="chip">
+          <span class="chip-text" @click="doSearch(k)">{{ k }}</span>
+          <span class="chip-del" title="删除" @click="removeKeyword(k)">✕</span>
+        </span>
       </div>
     </div>
 
-    <div v-if="!searched && !sugg.length && !keywords.length" class="empty-guide">
+    <!-- 热门搜索 -->
+    <div v-if="!searched && !sugg.length && hotKeywords.length" class="kw-box">
+      <div class="kw-head"><span>热门搜索</span></div>
+      <div class="kw-chips">
+        <span v-for="k in hotKeywords" :key="k" class="chip hot" @click="doSearch(k)">{{ k }}</span>
+      </div>
+    </div>
+
+    <div v-if="!searched && !sugg.length && !keywords.length && !hotKeywords.length" class="empty-guide">
       <div class="guide-title">搜索影片</div>
       <p class="guide-sub">会在已启用的协议型站源里并发检索（最多 18 个）</p>
       <p class="guide-sub">支持拼音首字母，如输入 sgyy 搜「三国演义」</p>
@@ -166,6 +213,11 @@ function onInput() {
   padding: 16px 24px;
   max-width: 640px;
 }
+.pinyin-hint {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--primary, #409eff);
+}
 .sugg-box,
 .kw-box {
   padding: 0 24px 16px;
@@ -187,6 +239,27 @@ function onInput() {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+.chip {
+  gap: 6px;
+}
+.chip.hot {
+  color: #ffb74d;
+  border: 1px solid rgba(255, 183, 77, 0.3);
+}
+.chip-text {
+  cursor: pointer;
+}
+.chip-del {
+  font-size: 10px;
+  color: var(--dim);
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 50%;
+}
+.chip-del:hover {
+  color: #ff4d4f;
+  background: rgba(255, 77, 79, 0.15);
 }
 .group {
   margin-bottom: 20px;

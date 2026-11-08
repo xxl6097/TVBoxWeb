@@ -15,6 +15,17 @@ const defaultCount = ref(0)
 const selectedGroupId = ref<string | null>(null) // null=全部, ''=未分组, 'xxx'=指定分组
 const moveMenuFav = ref<FavItem | null>(null)
 
+// ===== 批量操作 =====
+const batchMode = ref(false)
+const selectedKeys = ref<Set<string>>(new Set())
+
+// ===== 拖拽移动 =====
+const dragFav = ref<FavItem | null>(null)
+const dragOverGroup = ref<string | null>(null)
+
+// ===== 导入导出 =====
+const importInput = ref<HTMLInputElement | null>(null)
+
 onMounted(load)
 
 async function load() {
@@ -22,6 +33,9 @@ async function load() {
   const r = await api.favGroups()
   groups.value = r.groups.map(g => ({ ...g, count: g.count ?? 0 }))
   defaultCount.value = r.defaultCount
+  // 清理已不存在的选中项
+  const validKeys = new Set(favs.value.map(f => f.siteKey + '|' + f.vodId))
+  selectedKeys.value = new Set([...selectedKeys.value].filter(k => validKeys.has(k)))
 }
 
 const filteredFavs = computed<FavItem[]>(() => {
@@ -29,6 +43,12 @@ const filteredFavs = computed<FavItem[]>(() => {
   if (selectedGroupId.value === '') return favs.value.filter(f => !f.groupId)
   return favs.value.filter(f => f.groupId === selectedGroupId.value)
 })
+
+const selectedCount = computed(() => selectedKeys.value.size)
+
+function favKey(f: FavItem): string {
+  return f.siteKey + '|' + f.vodId
+}
 
 function selectGroup(id: string | null) {
   selectedGroupId.value = id
@@ -101,6 +121,145 @@ function currentGroupName(): string {
   if (selectedGroupId.value === '') return '未分组'
   return groups.value.find(g => g.id === selectedGroupId.value)?.name || '未知分组'
 }
+
+// ===== 批量操作 =====
+function toggleBatchMode() {
+  batchMode.value = !batchMode.value
+  if (!batchMode.value) selectedKeys.value = new Set()
+}
+
+function toggleSelect(f: FavItem) {
+  const key = favKey(f)
+  const next = new Set(selectedKeys.value)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
+  selectedKeys.value = next
+}
+
+function selectAll() {
+  if (selectedKeys.value.size === filteredFavs.value.length) {
+    selectedKeys.value = new Set()
+  } else {
+    selectedKeys.value = new Set(filteredFavs.value.map(f => favKey(f)))
+  }
+}
+
+function isSelected(f: FavItem): boolean {
+  return selectedKeys.value.has(favKey(f))
+}
+
+async function batchRemove() {
+  if (!selectedCount.value) return
+  try {
+    await ElMessageBox.confirm(
+      `确定删除选中的 ${selectedCount.value} 部收藏？`,
+      '批量删除', { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' }
+    )
+    const items = favs.value.filter(f => isSelected(f))
+    const r = await api.batchRemoveFav(items)
+    app.showTip(`已删除 ${r.removed} 部收藏`)
+    batchMode.value = false
+    selectedKeys.value = new Set()
+    load()
+  } catch { /* 用户取消 */ }
+}
+
+async function batchMove(groupId: string) {
+  if (!selectedCount.value) return
+  const items = favs.value.filter(f => isSelected(f))
+  const r = await api.batchMoveFav(items, groupId)
+  app.showTip(`已移动 ${r.moved} 部收藏`)
+  batchMode.value = false
+  selectedKeys.value = new Set()
+  load()
+}
+
+// ===== 拖拽移动 =====
+function onDragStart(f: FavItem, e: DragEvent) {
+  dragFav.value = f
+  if (e.dataTransfer) {
+    e.dataTransfer.effectAllowed = 'move'
+    e.dataTransfer.setData('text/plain', favKey(f))
+  }
+}
+
+function onDragEnd() {
+  dragFav.value = null
+  dragOverGroup.value = null
+}
+
+function onGroupDragOver(groupId: string, e: DragEvent) {
+  e.preventDefault()
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'
+  dragOverGroup.value = groupId
+}
+
+async function onGroupDrop(groupId: string) {
+  dragOverGroup.value = null
+  if (!dragFav.value) return
+  await moveTo(dragFav.value, groupId)
+  dragFav.value = null
+}
+
+// ===== 导入导出 =====
+function exportFavs() {
+  if (!favs.value.length) {
+    app.showTip('没有收藏可导出')
+    return
+  }
+  const data = {
+    app: '夜帧影视',
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    groups: groups.value.map(g => ({ id: g.id, name: g.name })),
+    favorites: favs.value
+  }
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `夜帧影视收藏_${new Date().toISOString().slice(0, 10)}.json`
+  a.click()
+  URL.revokeObjectURL(url)
+  app.showTip(`已导出 ${favs.value.length} 部收藏`)
+}
+
+function triggerImport() {
+  importInput.value?.click()
+}
+
+async function onImportFile(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  try {
+    const text = await file.text()
+    const data = JSON.parse(text)
+    const items: FavItem[] = Array.isArray(data) ? data : (data.favorites || [])
+    if (!items.length) {
+      app.showTip('文件中没有收藏数据')
+      return
+    }
+    // 规范化字段
+    const normalized = items
+      .filter((it: any) => it.siteKey && it.vodId)
+      .map((it: any) => ({
+        siteKey: it.siteKey,
+        siteName: it.siteName || '',
+        vodId: it.vodId,
+        name: it.name || '',
+        pic: it.pic || '',
+        groupId: it.groupId || ''
+      }))
+    const r = await api.importFav(normalized)
+    app.showTip(`导入完成：新增 ${r.added} 部，重复 ${r.duplicate} 部`)
+    load()
+  } catch (e: any) {
+    app.showTip('导入失败：' + (e?.message || '文件格式错误'))
+  } finally {
+    input.value = ''
+  }
+}
 </script>
 
 <template>
@@ -110,18 +269,34 @@ function currentGroupName(): string {
       <!-- 左侧分组导航 -->
       <div class="sidebar">
         <div class="sidebar-title">收藏分组</div>
-        <div class="group-item" :class="{ active: selectedGroupId === null }" @click="selectGroup(null)">
+        <div
+          class="group-item"
+          :class="{ active: selectedGroupId === null, 'drag-over': dragOverGroup === 'ALL' }"
+          @click="selectGroup(null)"
+          @dragover="onGroupDragOver('ALL', $event)"
+          @drop="onGroupDrop('')"
+        >
           <span class="group-name">全部</span>
           <span class="group-count">{{ favs.length }}</span>
         </div>
-        <div v-if="defaultCount > 0" class="group-item" :class="{ active: selectedGroupId === '' }" @click="selectGroup('')">
+        <div
+          v-if="defaultCount > 0"
+          class="group-item"
+          :class="{ active: selectedGroupId === '', 'drag-over': dragOverGroup === 'UNGROUPED' }"
+          @click="selectGroup('')"
+          @dragover="onGroupDragOver('UNGROUPED', $event)"
+          @drop="onGroupDrop('')"
+        >
           <span class="group-name">未分组</span>
           <span class="group-count">{{ defaultCount }}</span>
         </div>
         <div
           v-for="g in groups" :key="g.id"
-          class="group-item" :class="{ active: selectedGroupId === g.id }"
+          class="group-item"
+          :class="{ active: selectedGroupId === g.id, 'drag-over': dragOverGroup === g.id }"
           @click="selectGroup(g.id)"
+          @dragover="onGroupDragOver(g.id, $event)"
+          @drop="onGroupDrop(g.id)"
         >
           <span class="group-name">{{ g.name }}</span>
           <span class="group-count">{{ g.count }}</span>
@@ -131,6 +306,11 @@ function currentGroupName(): string {
           </div>
         </div>
         <div class="group-add" @click="createGroup">+ 新建分组</div>
+        <div class="sidebar-tools">
+          <div class="tool-btn" @click="exportFavs">⬇ 导出</div>
+          <div class="tool-btn" @click="triggerImport">⬆ 导入</div>
+          <input ref="importInput" type="file" accept=".json" style="display:none" @change="onImportFile" />
+        </div>
       </div>
 
       <!-- 右侧收藏内容 -->
@@ -138,13 +318,47 @@ function currentGroupName(): string {
         <div class="collect-header">
           <span class="collect-title">{{ currentGroupName() }}</span>
           <span class="count">{{ filteredFavs.length }} 部</span>
+          <div class="header-tools">
+            <el-button size="small" :type="batchMode ? 'primary' : 'default'" @click="toggleBatchMode">
+              {{ batchMode ? '取消批量' : '批量管理' }}
+            </el-button>
+          </div>
         </div>
+
+        <!-- 批量操作栏 -->
+        <div v-if="batchMode" class="batch-bar">
+          <span class="batch-info">已选 {{ selectedCount }} 部</span>
+          <el-button size="small" @click="selectAll">
+            {{ selectedCount === filteredFavs.length ? '取消全选' : '全选' }}
+          </el-button>
+          <el-dropdown v-if="groups.length" @command="(gid: string) => batchMove(gid)">
+            <el-button size="small">批量移动</el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="">未分组</el-dropdown-item>
+                <el-dropdown-item v-for="g in groups" :key="g.id" :command="g.id">{{ g.name }}</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+          <el-button size="small" type="danger" :disabled="!selectedCount" @click="batchRemove">批量删除</el-button>
+        </div>
+
         <div v-if="filteredFavs.length" class="grid">
-          <div v-for="f in filteredFavs" :key="f.siteKey + f.vodId" class="item">
-            <div class="poster" @click="open(f)">
+          <div
+            v-for="f in filteredFavs" :key="f.siteKey + f.vodId" class="item"
+            :class="{ selected: isSelected(f) }"
+            :draggable="!batchMode"
+            @dragstart="onDragStart(f, $event)"
+            @dragend="onDragEnd"
+          >
+            <div class="poster" @click="batchMode ? toggleSelect(f) : open(f)">
               <img :src="f.pic" :alt="f.name" loading="lazy" />
+              <!-- 批量选择勾选框 -->
+              <div v-if="batchMode" class="check-box" :class="{ checked: isSelected(f) }">
+                <span v-if="isSelected(f)">✓</span>
+              </div>
               <!-- 悬停操作菜单 -->
-              <div class="item-overlay" @click.stop>
+              <div v-if="!batchMode" class="item-overlay" @click.stop>
                 <button class="act-btn del-btn" title="取消收藏" @click="remove(f)">✕</button>
                 <button v-if="groups.length" class="act-btn move-btn" title="移到分组" @click.stop="toggleMoveMenu(f)">⬛</button>
               </div>
@@ -159,7 +373,7 @@ function currentGroupName(): string {
                 >{{ g.name }}</div>
               </div>
             </div>
-            <div class="name" @click="open(f)">{{ f.name }}</div>
+            <div class="name" @click="batchMode ? toggleSelect(f) : open(f)">{{ f.name }}</div>
             <div v-if="f.groupId" class="tag-group">
               {{ groups.find(g => g.id === f.groupId)?.name }}
             </div>
@@ -247,6 +461,33 @@ function currentGroupName(): string {
 }
 .group-add:hover { color: var(--primary, #409eff); }
 
+/* 侧边栏工具（导入导出） */
+.sidebar-tools {
+  border-top: 1px solid var(--border);
+  margin-top: 8px;
+  padding: 8px 12px;
+  display: flex;
+  gap: 8px;
+}
+.tool-btn {
+  flex: 1;
+  text-align: center;
+  padding: 6px;
+  font-size: 12px;
+  color: var(--sub);
+  background: var(--card);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.12s;
+}
+.tool-btn:hover { color: var(--primary, #409eff); background: var(--card-hi); }
+
+/* 拖拽悬停高亮 */
+.group-item.drag-over {
+  background: rgba(64, 158, 255, 0.2);
+  box-shadow: inset 0 0 0 1px var(--primary, #409eff);
+}
+
 /* 右侧 */
 .collect-main { flex: 1; min-width: 0; padding: 16px 0 0; }
 
@@ -260,6 +501,25 @@ function currentGroupName(): string {
 .collect-title { font-size: 16px; font-weight: 600; }
 .count { font-size: 13px; color: var(--dim); }
 
+.header-tools {
+  margin-left: auto;
+}
+
+/* 批量操作栏 */
+.batch-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 24px 14px;
+  flex-wrap: wrap;
+}
+.batch-info {
+  font-size: 13px;
+  color: var(--primary, #409eff);
+  font-weight: 600;
+  min-width: 70px;
+}
+
 /* 收藏网格 */
 .grid {
   display: grid;
@@ -269,6 +529,32 @@ function currentGroupName(): string {
 }
 
 .item { cursor: pointer; }
+.item.selected .poster {
+  border-color: var(--primary, #409eff);
+}
+
+/* 批量选择勾选框 */
+.check-box {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.7);
+  background: rgba(0, 0, 0, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 13px;
+  z-index: 5;
+  transition: all 0.12s;
+}
+.check-box.checked {
+  background: var(--primary, #409eff);
+  border-color: var(--primary, #409eff);
+}
 
 .poster {
   position: relative;

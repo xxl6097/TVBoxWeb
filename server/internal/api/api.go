@@ -20,6 +20,7 @@ import (
 	"tvbox/internal/httpc"
 	"tvbox/internal/live"
 	"tvbox/internal/liveprobe"
+	"tvbox/internal/metrics"
 	"tvbox/internal/model"
 	"tvbox/internal/pinyin"
 	"tvbox/internal/quality"
@@ -44,6 +45,10 @@ func SetWSHub(hub interface{}) {
 	wsHub = hub
 	// 初始化 store 包的 Hub 访问器
 	store.InitWSHub(func() interface{} { return wsHub })
+	// 注入 metrics 的 WebSocket 连接数获取器
+	if h, ok := hub.(interface{ Size() int }); ok {
+		metrics.SetWSConnectionGetter(func() int { return h.Size() })
+	}
 }
 
 // Handler 返回根路由。
@@ -51,6 +56,7 @@ func Handler() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", hHealth)
 	mux.HandleFunc("/api/status", hStatus)
+	mux.HandleFunc("/api/metrics", hMetrics)
 	mux.HandleFunc("/api/sites", hSites)
 	mux.HandleFunc("/api/sites/enabled", hSitesEnabled)
 	mux.HandleFunc("/api/sites/speed", hSitesSpeed)
@@ -76,7 +82,12 @@ func Handler() *http.ServeMux {
 	mux.HandleFunc("/api/favorites/group/update", hFavGroupUpdate)
 	mux.HandleFunc("/api/favorites/group/delete", hFavGroupDelete)
 	mux.HandleFunc("/api/favorites/move", hFavMove)
+	mux.HandleFunc("/api/favorites/batch/remove", hFavBatchRemove)
+	mux.HandleFunc("/api/favorites/batch/move", hFavBatchMove)
+	mux.HandleFunc("/api/favorites/import", hFavImport)
 	mux.HandleFunc("/api/keywords", hKeywords)
+	mux.HandleFunc("/api/keywords/remove", hKeywordRemove)
+	mux.HandleFunc("/api/keywords/hot", hHotKeywords)
 
 	mux.HandleFunc("/api/live/url", hLiveURL)
 	mux.HandleFunc("/api/live/sources", hLiveSources)
@@ -138,6 +149,7 @@ func checkETag(w http.ResponseWriter, r *http.Request, etag string) bool {
 	inm := r.Header.Get("If-None-Match")
 	if inm == `"`+etag+`"` || inm == etag {
 		w.WriteHeader(http.StatusNotModified)
+		metrics.RecordCacheHit()
 		return true
 	}
 	return false
@@ -212,9 +224,18 @@ func fail(w http.ResponseWriter, code int, msg string) {
 // CORS 跨域中间件（开发时前后端分离用），并兜底 panic 防止单站异常拖垮服务。
 func CORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 记录请求指标（只统计 API 请求）
+		start := time.Now()
+		isAPI := strings.HasPrefix(r.URL.Path, "/api/")
+
 		defer func() {
 			if rec := recover(); rec != nil {
+				metrics.RecordError()
 				writeJSON(w, 500, map[string]string{"error": "内部错误"})
+			}
+			// 记录请求耗时
+			if isAPI {
+				metrics.Record(r.URL.Path, time.Since(start).Milliseconds())
 			}
 		}()
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -265,6 +286,11 @@ func hHealth(w http.ResponseWriter, r *http.Request) {
 		"crawlSummary": store.CrawlSummary(),
 		"time":         time.Now().Unix(),
 	})
+}
+
+// hMetrics 性能监控端点，返回运行时指标（请求统计/缓存/内存/连接）。
+func hMetrics(w http.ResponseWriter, r *http.Request) {
+	ok(w, metrics.Snapshot())
 }
 
 func hSites(w http.ResponseWriter, r *http.Request) {
@@ -763,6 +789,46 @@ func hFavMove(w http.ResponseWriter, r *http.Request) {
 	ok(w, map[string]any{"ok": true})
 }
 
+// hFavBatchRemove POST: 批量删除收藏。
+func hFavBatchRemove(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Items []store.FavItem `json:"items"`
+	}
+	if err := body(r, &req); err != nil || len(req.Items) == 0 {
+		fail(w, 400, "缺少 items 参数")
+		return
+	}
+	removed := store.BatchRemoveFavorites(req.Items)
+	ok(w, map[string]any{"removed": removed})
+}
+
+// hFavBatchMove POST: 批量移动收藏到分组。
+func hFavBatchMove(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Items   []store.FavItem `json:"items"`
+		GroupID string          `json:"groupId"`
+	}
+	if err := body(r, &req); err != nil || len(req.Items) == 0 {
+		fail(w, 400, "缺少 items 参数")
+		return
+	}
+	moved := store.BatchMoveFavorites(req.Items, req.GroupID)
+	ok(w, map[string]any{"moved": moved})
+}
+
+// hFavImport POST: 批量导入收藏（去重合并）。
+func hFavImport(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Items []store.FavItem `json:"items"`
+	}
+	if err := body(r, &req); err != nil || len(req.Items) == 0 {
+		fail(w, 400, "缺少 items 参数")
+		return
+	}
+	added, dup := store.ImportFavorites(req.Items)
+	ok(w, map[string]any{"added": added, "duplicate": dup})
+}
+
 func hKeywords(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -779,6 +845,23 @@ func hKeywords(w http.ResponseWriter, r *http.Request) {
 	default:
 		fail(w, 405, "method not allowed")
 	}
+}
+
+// hKeywordRemove POST: 删除单个搜索历史词。
+func hKeywordRemove(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Kw string `json:"kw"`
+	}
+	if err := body(r, &req); err != nil {
+		fail(w, 400, "参数错误")
+		return
+	}
+	ok(w, store.RemoveKeyword(req.Kw))
+}
+
+// hHotKeywords GET: 热门搜索词（从 feed 提取）。
+func hHotKeywords(w http.ResponseWriter, r *http.Request) {
+	ok(w, store.HotKeywords())
 }
 
 // ---------- 直播 ----------

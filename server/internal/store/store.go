@@ -515,6 +515,78 @@ func genID() string {
 	return fmt.Sprintf("%x", ns)
 }
 
+// BatchRemoveFavorites 批量删除收藏，返回删除数量。
+func BatchRemoveFavorites(items []FavItem) int {
+	mu.Lock()
+	removeSet := make(map[string]bool, len(items))
+	for _, it := range items {
+		removeSet[it.SiteKey+"|"+it.VodID] = true
+	}
+	var out []FavItem
+	removed := 0
+	for _, f := range data.Fav {
+		if removeSet[f.SiteKey+"|"+f.VodID] {
+			removed++
+		} else {
+			out = append(out, f)
+		}
+	}
+	data.Fav = out
+	mu.Unlock()
+	if removed > 0 {
+		flush()
+	}
+	return removed
+}
+
+// BatchMoveFavorites 批量移动收藏到分组，返回移动数量。
+func BatchMoveFavorites(items []FavItem, groupID string) int {
+	mu.Lock()
+	moveSet := make(map[string]bool, len(items))
+	for _, it := range items {
+		moveSet[it.SiteKey+"|"+it.VodID] = true
+	}
+	moved := 0
+	for i := range data.Fav {
+		if moveSet[data.Fav[i].SiteKey+"|"+data.Fav[i].VodID] {
+			data.Fav[i].GroupID = groupID
+			moved++
+		}
+	}
+	mu.Unlock()
+	if moved > 0 {
+		flush()
+	}
+	return moved
+}
+
+// ImportFavorites 批量导入收藏（去重合并），返回新增数与重复数。
+func ImportFavorites(items []FavItem) (added, dup int) {
+	mu.Lock()
+	// 现有收藏的 key 集合
+	existing := make(map[string]bool, len(data.Fav))
+	for _, f := range data.Fav {
+		existing[f.SiteKey+"|"+f.VodID] = true
+	}
+	var toAdd []FavItem
+	for _, it := range items {
+		key := it.SiteKey + "|" + it.VodID
+		if existing[key] {
+			dup++
+			continue
+		}
+		existing[key] = true
+		toAdd = append(toAdd, it)
+	}
+	data.Fav = append(toAdd, data.Fav...)
+	added = len(toAdd)
+	mu.Unlock()
+	if added > 0 {
+		flush()
+	}
+	return added, dup
+}
+
 // ---------- 搜索历史 ----------
 
 func Keywords() []string {
@@ -548,6 +620,45 @@ func PushKeyword(kw string) []string {
 }
 
 func ClearKeywords() { mu.Lock(); data.KwHist = ""; mu.Unlock(); flush() }
+
+// RemoveKeyword 删除单个搜索历史词。
+func RemoveKeyword(kw string) []string {
+	k := trim(kw)
+	if k == "" {
+		return Keywords()
+	}
+	old := Keywords()
+	out := make([]string, 0, len(old))
+	for _, o := range old {
+		if o != k {
+			out = append(out, o)
+		}
+	}
+	mu.Lock()
+	data.KwHist = joinLines(out)
+	mu.Unlock()
+	flush()
+	return out
+}
+
+// HotKeywords 返回热门搜索词（从最近更新 feed 提取片名，去重取前 10）。
+func HotKeywords() []string {
+	feed := Feed()
+	seen := map[string]bool{}
+	out := make([]string, 0, 10)
+	for _, v := range feed {
+		name := trim(v.Name)
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+		if len(out) >= 10 {
+			break
+		}
+	}
+	return out
+}
 
 // ---------- 直播源 ----------
 
