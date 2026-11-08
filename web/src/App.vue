@@ -2,6 +2,7 @@
 import { ref, onMounted } from 'vue'
 import { api } from '@/api'
 import { useAppStore } from '@/stores/app'
+import { isOffline } from '@/pwa'
 import TipToast from '@/components/TipToast.vue'
 import PrivacyPanel from '@/components/PrivacyPanel.vue'
 
@@ -52,6 +53,13 @@ function disagree() {
   <template v-else>
     <router-view />
     <TipToast />
+    <!-- 离线提示横幅 -->
+    <transition name="offline-fade">
+      <div v-if="isOffline" class="offline-banner">
+        <span class="dot"></span>
+        当前网络已断开，正在展示缓存内容
+      </div>
+    </transition>
   </template>
 </template>
 
@@ -66,5 +74,44 @@ function disagree() {
   justify-content: center;
   gap: 16px;
   color: var(--sub);
+}
+
+/* 离线提示横幅 */
+.offline-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 16px;
+  font-size: 13px;
+  color: #fff;
+  background: rgba(200, 60, 35, 0.92);
+  backdrop-filter: blur(8px);
+  text-align: center;
+}
+.offline-banner .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #fff;
+  animation: offline-blink 1.2s ease-in-out infinite;
+}
+@keyframes offline-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+.offline-fade-enter-active,
+.offline-fade-leave-active {
+  transition: opacity 0.3s ease, transform 0.3s ease;
+}
+.offline-fade-enter-from,
+.offline-fade-leave-to {
+  opacity: 0;
+  transform: translateY(-100%);
 }
 </style>

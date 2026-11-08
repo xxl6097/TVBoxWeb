@@ -18,10 +18,55 @@ import type {
   WebdavEntry,
   WebdavVod
 } from '@/types'
+import { idbGet, idbSet } from '@/idb'
 
 const BASE = '/api'
 
+// 可离线缓存的 GET 路径（历史/收藏/分类/站源等只读数据）
+// 视频详情、搜索等也缓存，但 TTL 较短
+const CACHEABLE_PREFIXES = [
+  '/status',
+  '/sites',
+  '/categories',
+  '/history',
+  '/favorites',
+  '/keywords',
+  '/feed',
+  '/live/url',
+  '/live/sources',
+  '/live/channels',
+  '/prefs',
+  '/privacy',
+  '/webdav/sources',
+  '/webdav/vods',
+  '/direct'
+]
+
+// 判断路径是否可缓存
+function isCacheable(path: string): boolean {
+  const clean = path.split('?')[0]
+  return CACHEABLE_PREFIXES.some((p) => clean === p || clean.startsWith(p + '/'))
+}
+
+// 判断请求是否为 GET（只有 GET 可缓存）
+function isGet(opts: RequestInit): boolean {
+  return !opts.method || opts.method.toUpperCase() === 'GET'
+}
+
 async function request<T>(path: string, opts: RequestInit = {}): Promise<T> {
+  const cacheable = isGet(opts) && isCacheable(path)
+
+  // 命中 IndexedDB 缓存则秒回（离线第二层兜底）
+  if (cacheable) {
+    const cacheKey = 'api:' + path
+    const cached = await idbGet<T>(cacheKey)
+    if (cached) {
+      // 后台刷新缓存（不阻塞返回）
+      refreshCache(path, cacheKey)
+      return cached
+    }
+  }
+
   const res = await fetch(BASE + path, {
     headers: { 'Content-Type': 'application/json' },
     ...opts
@@ -46,7 +91,31 @@ async function request<T>(path: string, opts: RequestInit = {}): Promise<T> {
     }
     throw new Error(msg)
   }
-  return res.json() as Promise<T>
+
+  const data = (await res.json()) as T
+
+  // 缓存成功响应（IndexedDB）
+  if (cacheable) {
+    const cacheKey = 'api:' + path
+    idbSet(cacheKey, data, 5 * 60 * 1000) // TTL 5 分钟
+  }
+
+  return data
+}
+
+// 后台刷新缓存（stale-while-revalidate）
+async function refreshCache(path: string, cacheKey: string): Promise<void> {
+  try {
+    const res = await fetch(BASE + path, {
+      headers: { 'Content-Type': 'application/json' }
+    })
+    if (res.ok) {
+      const data = await res.json()
+      idbSet(cacheKey, data, 5 * 60 * 1000)
+    }
+  } catch {
+    /* 后台刷新失败忽略 */
+  }
 }
 
 const get = <T>(path: string) => request<T>(path)

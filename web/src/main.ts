@@ -8,6 +8,7 @@ import App from './App.vue'
 import router from './router'
 import './styles/main.css'
 import { initWS } from './ws'
+import { initPWA } from './pwa'
 
 const app = createApp(App)
 
@@ -38,3 +39,6 @@ app.mount('#app')
 
 // 初始化 WebSocket 连接（非阻塞）
 initWS().catch(console.error)
+
+// 初始化 PWA（注册 Service Worker + 离线状态检测，非阻塞）
+initPWA().catch(console.error)
