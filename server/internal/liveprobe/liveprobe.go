@@ -143,7 +143,7 @@ func score(r *LiveScore) int {
 	return int(availability*0.7 + float64(speed)*0.3 + 0.5)
 }
 
-// RankAll 批量测速，每批 3 个。
+// RankAll 批量测速，每批 3 个（保留兼容，推荐使用 RankAllConcurrent）。
 func RankAll(items []LiveScore, onEach func(i int, r LiveScore)) []LiveScore {
 	out := make([]LiveScore, len(items))
 	for i := range items {
@@ -166,6 +166,63 @@ func RankAll(items []LiveScore, onEach func(i int, r LiveScore)) []LiveScore {
 		}
 		wg.Wait()
 	}
+	return out
+}
+
+// RankAllConcurrent 并发批量测速，使用固定 worker pool。
+// workers: 并发 worker 数量（建议 5-10），0 则自动设为 8。
+// timeout: 整体超时（0 则不限制）。
+func RankAllConcurrent(items []LiveScore, workers int, timeout time.Duration, onEach func(i int, r LiveScore)) []LiveScore {
+	if workers <= 0 {
+		workers = 8
+	}
+	out := make([]LiveScore, len(items))
+	for i := range items {
+		out[i] = LiveScore{Name: items[i].Name, URL: items[i].URL, MS: -1}
+	}
+	
+	// 创建任务通道
+	type task struct {
+		idx  int
+		item LiveScore
+	}
+	tasks := make(chan task, len(items))
+	for i, it := range items {
+		tasks <- task{idx: i, item: it}
+	}
+	close(tasks)
+	
+	// 启动 worker pool
+	var wg sync.WaitGroup
+	done := make(chan struct{})
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for t := range tasks {
+				select {
+				case <-done:
+					return
+				default:
+					r := RankOne(t.item.Name, t.item.URL)
+					out[t.idx] = r
+					if onEach != nil {
+						onEach(t.idx, r)
+					}
+				}
+			}
+		}()
+	}
+	
+	// 超时控制
+	if timeout > 0 {
+		go func() {
+			time.Sleep(timeout)
+			close(done)
+		}()
+	}
+	
+	wg.Wait()
 	return out
 }
 

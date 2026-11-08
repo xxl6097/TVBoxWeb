@@ -151,29 +151,36 @@ async function rankSources() {
   speedOpen.value = true
   rankResults.value = {}
   ranked.value = []
-  app.showTip('开始测速 ' + sources.value.length + ' 个源，约 30 秒')
+  const count = sources.value.length
+  app.showTip(`开始并发测速 ${count} 个源，约 5 秒`)
+  // 初始化所有状态为"测速中..."
   for (const s of sources.value) {
-    rankResults.value[s.url] = { name: s.name, url: s.url, ok: false, ms: -1, count: 0, alive: 0, sampled: 0, score: 0, state: '排队中' }
+    rankResults.value[s.url] = { name: s.name, url: s.url, ok: false, ms: -1, count: 0, alive: 0, sampled: 0, score: 0, state: '测速中...' }
   }
-  const results: LiveScore[] = []
-  for (const s of sources.value) {
-    const r = await api.liveRankOne(s.name, s.url)
-    rankResults.value[s.url] = r
-    results.push(r)
-  }
-  ranked.value = results
-    .filter((x) => x.ok)
-    .sort((a, b) => {
-      if (a.score !== b.score) return b.score - a.score
-      if (a.alive !== b.alive) return b.alive - a.alive
-      return a.ms - b.ms
-    })
-  ranking.value = false
-  const usable = results.filter((x) => x.ok).length
-  if (ranked.value.length) {
-    app.showTip(`测完 ${results.length} 个源，${usable} 个可用；建议用「${ranked.value[0].name}」`)
-  } else {
-    app.showTip('所有源都没测通，检查网络后重试')
+  try {
+    const items = sources.value.map((s) => ({ name: s.name, url: s.url, ok: false, ms: -1, count: 0, alive: 0, sampled: 0, score: 0, state: '' }))
+    // 一次并发请求全部测速（后端 worker pool 并发）
+    const results = await api.liveRank(items)
+    for (const r of results) {
+      rankResults.value[r.url] = r
+    }
+    ranked.value = results
+      .filter((x) => x.ok)
+      .sort((a, b) => {
+        if (a.score !== b.score) return b.score - a.score
+        if (a.alive !== b.alive) return b.alive - a.alive
+        return a.ms - b.ms
+      })
+    const usable = results.filter((x) => x.ok).length
+    if (ranked.value.length) {
+      app.showTip(`测完 ${results.length} 个源，${usable} 个可用；建议用「${ranked.value[0].name}」`)
+    } else {
+      app.showTip('所有源都没测通，检查网络后重试')
+    }
+  } catch (e: any) {
+    app.showTip('测速失败：' + (e?.message || '未知错误'))
+  } finally {
+    ranking.value = false
   }
 }
 

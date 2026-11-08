@@ -40,6 +40,16 @@ type Data struct {
 	WebdavList   []model.WebdavSource `json:"webdavList"`
 	WebdavScan   map[string][]model.WebdavVod `json:"webdavScan"`
 	WdHist       []model.WdHistory    `json:"wdHist"`
+	SiteHealth   map[string]SiteHealthStat `json:"siteHealth"` // 站源健康度统计
+}
+
+// SiteHealthStat 站源健康度统计数据。
+type SiteHealthStat struct {
+	LastSuccess int64 `json:"lastSuccess"` // 最后成功时间戳（秒）
+	LastFail    int64 `json:"lastFail"`    // 最后失败时间戳（秒）
+	TotalReq    int   `json:"totalReq"`    // 总请求数
+	FailCount   int   `json:"failCount"`   // 失败次数
+	AvgMs       int   `json:"avgMs"`       // 平均响应时间（毫秒）
 }
 
 type HistItem struct {
@@ -73,10 +83,17 @@ type SubResult struct {
 var (
 	mu      sync.Mutex
 	path    string
-	data    = &Data{WebdavScan: map[string][]model.WebdavVod{}}
+	data    = &Data{
+		WebdavScan: map[string][]model.WebdavVod{},
+		SiteHealth: map[string]SiteHealthStat{},
+	}
 	siteList []model.Site
 	parseList []model.ParseRule
 	rawSites int
+	
+	// 版本追踪用于 API 缓存（ETag）
+	sitesVersion  int64 // 站源列表最后更新时间戳
+	configVersion int64 // 配置最后更新时间戳
 )
 
 // Init 指定数据文件路径并加载。
@@ -213,6 +230,7 @@ func BuildSites(cfg model.RawConfig) {
 	}
 	rawSites = len(out)
 	siteList = out
+	sitesVersion = time.Now().UnixNano() // 更新版本号
 }
 
 func BuildParses(cfg model.RawConfig) {
@@ -234,6 +252,8 @@ func BuildParses(cfg model.RawConfig) {
 func Sites() []model.Site { return siteList }
 func TotalSites() int     { return rawSites }
 func Parses() []model.ParseRule { return parseList }
+func SitesVersion() int64  { mu.Lock(); defer mu.Unlock(); return sitesVersion }
+func ConfigVersion() int64 { mu.Lock(); defer mu.Unlock(); return configVersion }
 
 func Site(key string) *model.Site {
 	for i := range siteList {
@@ -634,4 +654,91 @@ func stringTrim(s string) string {
 
 func isSpace(b byte) bool {
 	return b == ' ' || b == '\t' || b == '\n' || b == '\r'
+}
+
+// ---------- 站源健康度 ----------
+
+// RecordSiteRequest 记录站源请求（成功/失败 + 响应时间）。
+func RecordSiteRequest(siteKey string, success bool, ms int) {
+	mu.Lock()
+	defer mu.Unlock()
+	if data.SiteHealth == nil {
+		data.SiteHealth = make(map[string]SiteHealthStat)
+	}
+	stat := data.SiteHealth[siteKey]
+	now := time.Now().Unix()
+	stat.TotalReq++
+	if success {
+		stat.LastSuccess = now
+	} else {
+		stat.LastFail = now
+		stat.FailCount++
+	}
+	// 移动平均：保留历史 90%，新值占 10%
+	if stat.AvgMs == 0 {
+		stat.AvgMs = ms
+	} else {
+		stat.AvgMs = (stat.AvgMs*9 + ms) / 10
+	}
+	data.SiteHealth[siteKey] = stat
+	// 异步落盘，避免每次请求都写磁盘
+	go flush()
+}
+
+// SiteHealthMap 返回所有站源健康度数据。
+func SiteHealthMap() map[string]SiteHealthStat {
+	mu.Lock()
+	defer mu.Unlock()
+	if data.SiteHealth == nil {
+		return map[string]SiteHealthStat{}
+	}
+	// 复制一份避免并发修改
+	out := make(map[string]SiteHealthStat, len(data.SiteHealth))
+	for k, v := range data.SiteHealth {
+		out[k] = v
+	}
+	return out
+}
+
+// SiteHealth 计算站源健康状态（healthy/slow/dead）。
+type SiteHealthStatus struct {
+	Key         string  `json:"key"`
+	Status      string  `json:"status"`      // healthy / slow / dead
+	LastSuccess int64   `json:"lastSuccess"` // 最后成功时间
+	ErrorRate   float64 `json:"errorRate"`   // 错误率（0-1）
+	AvgMs       int     `json:"avgMs"`       // 平均响应时间
+}
+
+func SiteHealthStatuses() []SiteHealthStatus {
+	hm := SiteHealthMap()
+	now := time.Now().Unix()
+	var out []SiteHealthStatus
+	for _, s := range siteList {
+		stat, ok := hm[s.Key]
+		if !ok {
+			// 从未请求过，默认 unknown
+			out = append(out, SiteHealthStatus{Key: s.Key, Status: "unknown", AvgMs: -1})
+			continue
+		}
+		var errRate float64
+		if stat.TotalReq > 0 {
+			errRate = float64(stat.FailCount) / float64(stat.TotalReq)
+		}
+		status := "healthy"
+		if stat.LastSuccess == 0 || now-stat.LastSuccess > 3600*24 {
+			// 超过 24 小时没有成功过
+			status = "dead"
+		} else if errRate > 0.5 || stat.AvgMs > 5000 {
+			// 错误率超过 50% 或平均响应超过 5s
+			status = "slow"
+		}
+		out = append(out, SiteHealthStatus{
+			Key:         s.Key,
+			Status:      status,
+			LastSuccess: stat.LastSuccess,
+			ErrorRate:   errRate,
+			AvgMs:       stat.AvgMs,
+		})
+	}
+	return out
 }

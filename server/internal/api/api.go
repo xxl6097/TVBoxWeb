@@ -35,6 +35,7 @@ func Handler() *http.ServeMux {
 	mux.HandleFunc("/api/sites", hSites)
 	mux.HandleFunc("/api/sites/enabled", hSitesEnabled)
 	mux.HandleFunc("/api/sites/speed", hSitesSpeed)
+	mux.HandleFunc("/api/sites/health", hSitesHealth)
 	mux.HandleFunc("/api/config", hConfig)
 	mux.HandleFunc("/api/subscription", hSubscription)
 	mux.HandleFunc("/api/categories", hCategories)
@@ -89,6 +90,33 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(normalize(v))
+}
+
+// writeJSONWithCache 带缓存控制的 JSON 响应。
+// maxAge 单位秒，etag 可选（空字符串则不设置）。
+func writeJSONWithCache(w http.ResponseWriter, code int, v any, maxAge int, etag string) {
+	if etag != "" {
+		w.Header().Set("ETag", `"`+etag+`"`)
+	}
+	if maxAge > 0 {
+		w.Header().Set("Cache-Control", fmt.Sprintf("max-age=%d, must-revalidate", maxAge))
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(normalize(v))
+}
+
+// checkETag 检查请求的 If-None-Match，匹配则返回 304，返回 true 表示已响应。
+func checkETag(w http.ResponseWriter, r *http.Request, etag string) bool {
+	if etag == "" {
+		return false
+	}
+	inm := r.Header.Get("If-None-Match")
+	if inm == `"`+etag+`"` || inm == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return true
+	}
+	return false
 }
 
 // normalize 递归把 nil slice/map 转成空 slice/map，避免前端收到 null
@@ -205,7 +233,13 @@ func hSites(w http.ResponseWriter, r *http.Request) {
 	if store.TotalSites() == 0 {
 		crawler.Restore()
 	}
+	// 生成 ETag（基于站源版本号 + 启用列表）
 	explicitKeys := store.EnabledKeys()
+	etag := fmt.Sprintf("sites-%d-%d", store.SitesVersion(), len(explicitKeys))
+	// 检查 If-None-Match，匹配则返回 304
+	if checkETag(w, r, etag) {
+		return
+	}
 	// 若用户从未手动配置过 enabled 列表，默认全部 usable 站源均视为开启，
 	// 与 EnabledSites() 的 fallback 逻辑保持一致，让设置页 badge 显示正确。
 	useAll := len(explicitKeys) == 0
@@ -223,7 +257,8 @@ func hSites(w http.ResponseWriter, r *http.Request) {
 			out[i].Enabled = enabled[out[i].Key]
 		}
 	}
-	ok(w, out)
+	// 设置缓存 5 分钟
+	writeJSONWithCache(w, 200, out, 300, etag)
 }
 
 func hSitesEnabled(w http.ResponseWriter, r *http.Request) {
@@ -267,6 +302,8 @@ func hSitesSpeed(w http.ResponseWriter, r *http.Request) {
 				ok = true
 			}
 			ms := int(time.Since(t0).Milliseconds())
+			// 同步记录健康度
+			store.RecordSiteRequest(s.Key, ok, ms)
 			mu.Lock()
 			out = append(out, item{Key: s.Key, Name: s.Name, MS: ms, OK: ok})
 			mu.Unlock()
@@ -280,6 +317,15 @@ func hSitesSpeed(w http.ResponseWriter, r *http.Request) {
 		return out[i].MS < out[j].MS
 	})
 	ok(w, out)
+}
+
+// hSitesHealth 站源健康度状态汇总。
+func hSitesHealth(w http.ResponseWriter, r *http.Request) {
+	statuses := store.SiteHealthStatuses()
+	ok(w, map[string]any{
+		"statuses": statuses,
+		"time":     time.Now().Unix(),
+	})
 }
 
 // ---------- 配置 / 订阅 ----------
@@ -321,22 +367,33 @@ func hSubscription(w http.ResponseWriter, r *http.Request) {
 // ---------- 点播 ----------
 
 func hCategories(w http.ResponseWriter, r *http.Request) {
-	site := store.Site(q(r, "site"))
+	siteKey := q(r, "site")
+	site := store.Site(siteKey)
 	if site == nil {
 		fail(w, 400, "站源不存在")
 		return
 	}
+	// 生成 ETag（基于站源版本 + site key）
+	etag := fmt.Sprintf("cat-%s-%d", siteKey, store.SitesVersion())
+	if checkETag(w, r, etag) {
+		return
+	}
 	c := cms.New(*site)
+	t0 := time.Now()
 	cats, err := c.Categories()
+	ms := int(time.Since(t0).Milliseconds())
+	store.RecordSiteRequest(siteKey, err == nil, ms)
 	if err != nil {
 		fail(w, 500, err.Error())
 		return
 	}
-	ok(w, cats)
+	// 缓存 5 分钟
+	writeJSONWithCache(w, 200, cats, 300, etag)
 }
 
 func hVod(w http.ResponseWriter, r *http.Request) {
-	site := store.Site(q(r, "site"))
+	siteKey := q(r, "site")
+	site := store.Site(siteKey)
 	if site == nil {
 		fail(w, 400, "站源不存在")
 		return
@@ -355,6 +412,7 @@ func hVod(w http.ResponseWriter, r *http.Request) {
 	// 命中时合并父 + 子分类第一页（按 vod id 去重）。
 	var pg model.VodPage
 	var err error
+	t0 := time.Now()
 	if children := q(r, "children"); children != "" {
 		ids := []string{tid}
 		for _, id := range strings.Split(children, ",") {
@@ -366,6 +424,8 @@ func hVod(w http.ResponseWriter, r *http.Request) {
 	} else {
 		pg, err = c.List(tid, page)
 	}
+	ms := int(time.Since(t0).Milliseconds())
+	store.RecordSiteRequest(siteKey, err == nil, ms)
 	if err != nil {
 		fail(w, 500, err.Error())
 		return
@@ -374,14 +434,18 @@ func hVod(w http.ResponseWriter, r *http.Request) {
 }
 
 func hVodDetail(w http.ResponseWriter, r *http.Request) {
-	site := store.Site(q(r, "site"))
+	siteKey := q(r, "site")
+	site := store.Site(siteKey)
 	if site == nil {
 		fail(w, 400, "站源不存在")
 		return
 	}
 	id := q(r, "id")
 	c := cms.New(*site)
+	t0 := time.Now()
 	v, err := c.Detail(id)
+	ms := int(time.Since(t0).Milliseconds())
+	store.RecordSiteRequest(siteKey, err == nil, ms)
 	if err != nil {
 		fail(w, 500, err.Error())
 		return
@@ -650,13 +714,23 @@ func hLiveRankOne(w http.ResponseWriter, r *http.Request) {
 
 func hLiveRank(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Items []liveprobe.LiveScore `json:"items"`
+		Items   []liveprobe.LiveScore `json:"items"`
+		Workers int                   `json:"workers"` // 并发数，0 自动为 8
+		Timeout int                   `json:"timeout"` // 超时秒数，0 无限制
 	}
 	if err := body(r, &req); err != nil {
 		fail(w, 400, "参数错误")
 		return
 	}
-	ranked := liveprobe.RankAll(req.Items, func(i int, r liveprobe.LiveScore) {})
+	workers := req.Workers
+	if workers <= 0 {
+		workers = 8
+	}
+	timeout := time.Duration(req.Timeout) * time.Second
+	if timeout == 0 {
+		timeout = 30 * time.Second // 默认 30s 超时
+	}
+	ranked := liveprobe.RankAllConcurrent(req.Items, workers, timeout, nil)
 	ok(w, liveprobe.Sort(ranked))
 }
 
