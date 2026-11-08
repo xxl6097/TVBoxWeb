@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"tvbox/internal/api"
 	"tvbox/internal/crawler"
@@ -21,10 +22,16 @@ import (
 //go:embed all:dist
 var distFS embed.FS
 
+// startTime 服务启动时间，用于 /api/health 返回 uptime。
+var startTime = time.Now()
+
 func main() {
 	addr := flag.String("addr", ":8090", "监听地址")
 	dataDir := flag.String("data", "data", "数据目录")
 	flag.Parse()
+
+	// 记录启动时间
+	api.SetStartTime(startTime)
 
 	// 数据文件
 	dataFile := filepath.Join(*dataDir, "store.json")

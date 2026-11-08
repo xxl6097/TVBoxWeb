@@ -41,6 +41,7 @@ type Data struct {
 	WebdavScan   map[string][]model.WebdavVod `json:"webdavScan"`
 	WdHist       []model.WdHistory    `json:"wdHist"`
 	SiteHealth   map[string]SiteHealthStat `json:"siteHealth"` // 站源健康度统计
+	FavGroups    []FavGroup           `json:"favGroups"`      // 收藏分组列表
 }
 
 // SiteHealthStat 站源健康度统计数据。
@@ -72,6 +73,14 @@ type FavItem struct {
 	VodID    string `json:"vodId"`
 	Name     string `json:"name"`
 	Pic      string `json:"pic"`
+	GroupID  string `json:"groupId"` // 所属分组 ID，空字符串表示默认分组
+}
+
+// FavGroup 收藏分组。
+type FavGroup struct {
+	ID   string `json:"id"`   // 分组 ID（UUID）
+	Name string `json:"name"` // 分组名称
+	Time int64  `json:"time"` // 创建时间
 }
 
 type SubResult struct {

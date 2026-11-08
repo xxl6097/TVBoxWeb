@@ -6,6 +6,7 @@ import { useAppStore } from '@/stores/app'
 import type { Vod } from '@/types'
 import TopBar from '@/components/TopBar.vue'
 import VodGrid from '@/components/VodGrid.vue'
+import SkeletonList from '@/components/SkeletonList.vue'
 
 const router = useRouter()
 const app = useAppStore()
@@ -146,13 +147,16 @@ function onInput() {
         <span v-if="siteInfo" class="count">{{ siteInfo }}</span>
         <span v-if="results.length" class="count">共 {{ results.length }} 条</span>
       </div>
-      <div v-if="results.length">
+      <!-- 加载中：骨架屏 -->
+      <SkeletonList v-if="searching" type="search" :count="10" />
+      <!-- 搜索结果 -->
+      <div v-else-if="results.length">
         <div v-for="[site, vods] in grouped" :key="site" class="group">
           <div class="group-head">{{ site }} <span class="count">{{ vods.length }} 个结果</span></div>
           <VodGrid :vods="vods" />
         </div>
       </div>
-      <div v-else-if="!searching" class="empty">没有搜到结果（站源可能已失效，或需要爬虫运行时）</div>
+      <div v-else class="empty">没有搜到结果（站源可能已失效，或需要爬虫运行时）</div>
     </div>
   </div>
 </template>

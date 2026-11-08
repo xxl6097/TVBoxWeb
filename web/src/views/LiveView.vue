@@ -6,6 +6,7 @@ import { useAppStore } from '@/stores/app'
 import { usePlayerStore } from '@/stores/player'
 import type { LiveDir, Channel, RawLive, LiveScore } from '@/types'
 import TopBar from '@/components/TopBar.vue'
+import SkeletonList from '@/components/SkeletonList.vue'
 
 const router = useRouter()
 const app = useAppStore()
@@ -314,16 +315,21 @@ function isDead(ch: Channel): boolean {
           />
           <span v-if="filter" class="ch-search-count">{{ channels.length }} 台</span>
         </div>
-        <div
-          v-for="ch in channels"
-          :key="ch.name + ch.url"
-          class="channel"
-          :class="{ dead: isDead(ch) }"
-          @click="playChannel(ch)"
-        >
-          <span class="ch-name">{{ ch.name }}</span>
-          <span v-if="ch.urls.length > 1" class="ch-alts">{{ ch.urls.length }} 线路</span>
-        </div>
+        <!-- 加载中：骨架屏 -->
+        <SkeletonList v-if="loading" type="channel" :count="30" />
+        <!-- 频道列表 -->
+        <template v-else>
+          <div
+            v-for="ch in channels"
+            :key="ch.name + ch.url"
+            class="channel"
+            :class="{ dead: isDead(ch) }"
+            @click="playChannel(ch)"
+          >
+            <span class="ch-name">{{ ch.name }}</span>
+            <span v-if="ch.urls.length > 1" class="ch-alts">{{ ch.urls.length }} 线路</span>
+          </div>
+        </template>
       </div>
     </div>
 

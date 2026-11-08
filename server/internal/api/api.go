@@ -28,9 +28,18 @@ import (
 	"tvbox/internal/webdav"
 )
 
+// startTime 服务启动时间，用于健康检查返回 uptime。
+var startTime time.Time
+
+// SetStartTime 由 main 包设置服务启动时间。
+func SetStartTime(t time.Time) {
+	startTime = t
+}
+
 // Handler 返回根路由。
 func Handler() *http.ServeMux {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/api/health", hHealth)
 	mux.HandleFunc("/api/status", hStatus)
 	mux.HandleFunc("/api/sites", hSites)
 	mux.HandleFunc("/api/sites/enabled", hSitesEnabled)
@@ -226,6 +235,20 @@ func hStatus(w http.ResponseWriter, r *http.Request) {
 		"liveUrl":      store.LiveURL(),
 		"privacyAgreed": store.PrivacyAgreed(),
 		"guideDone":    store.GuideDone(),
+	})
+}
+
+// hHealth 健康检查端点，用于 K8s livenessProbe / readinessProbe。
+func hHealth(w http.ResponseWriter, r *http.Request) {
+	uptime := int64(time.Since(startTime).Seconds())
+	ok(w, map[string]any{
+		"status":       "ok",
+		"uptime":       uptime,
+		"sites":        store.TotalSites(),
+		"activeSites":  len(store.ActiveSites()),
+		"lastCrawl":    store.LastCrawlAt(),
+		"crawlSummary": store.CrawlSummary(),
+		"time":         time.Now().Unix(),
 	})
 }
 
