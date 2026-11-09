@@ -30,6 +30,7 @@ import (
 	"github.com/xxl6097/TVBoxWeb/internal/api"
 	"github.com/xxl6097/TVBoxWeb/internal/crawler"
 	"github.com/xxl6097/TVBoxWeb/internal/store"
+	"github.com/xxl6097/TVBoxWeb/internal/upgrade"
 	"github.com/xxl6097/TVBoxWeb/internal/ws"
 )
 
@@ -58,7 +59,7 @@ type Options struct {
 	Logger *log.Logger
 
 	// Upgrader 在线升级实现。未设置时升级接口返回「未启用」。
-	Upgrader Upgrader
+	Upgrader upgrade.Upgrader
 
 	// Version 当前版本号，用于升级检测对比。默认 AppVersion。
 	Version string
@@ -78,7 +79,7 @@ func WithLogger(l *log.Logger) Option {
 }
 
 // WithUpgrader 注入在线升级实现（复刻 gofs.WithUpgrader）。
-func WithUpgrader(u Upgrader) Option {
+func WithUpgrader(u upgrade.Upgrader) Option {
 	return func(o *Options) { o.Upgrader = u }
 }
 

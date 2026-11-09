@@ -27,13 +27,32 @@ import (
 	"github.com/xxl6097/TVBoxWeb/internal/quality"
 	"github.com/xxl6097/TVBoxWeb/internal/resolve"
 	"github.com/xxl6097/TVBoxWeb/internal/store"
+	"github.com/xxl6097/TVBoxWeb/internal/upgrade"
 	"github.com/xxl6097/TVBoxWeb/internal/webdav"
 )
 
 // 版本信息（通过 ldflags -X 注入，默认值兜底）。
 var (
-	AppVersion = "v1.1.2"
+	AppVersion = "v1.3.1"
 	BuildTime  = "unknown"
+)
+
+// upgrader 升级器实例（如果启用）
+var upgrader upgrade.Upgrader
+
+// 升级相关类型别名
+type (
+	UpgradeProgress = upgrade.UpgradeProgress
+	UpgradeStage    = upgrade.UpgradeStage
+)
+
+// 升级阶段常量
+const (
+	StageChecking    = upgrade.StageChecking
+	StageDownloading = upgrade.StageDownloading
+	StageVerifying   = upgrade.StageVerifying
+	StageReplacing   = upgrade.StageReplacing
+	StageDone        = upgrade.StageDone
 )
 
 // startTime 服务启动时间，用于健康检查返回 uptime。
@@ -56,6 +75,11 @@ func SetWSHub(hub interface{}) {
 	if h, ok := hub.(interface{ Size() int }); ok {
 		metrics.SetWSConnectionGetter(func() int { return h.Size() })
 	}
+}
+
+// SetUpgrader 设置升级器（由 main 包调用）
+func SetUpgrader(u upgrade.Upgrader) {
+	upgrader = u
 }
 
 // Handler 返回根路由。

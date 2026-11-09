@@ -1,95 +1,103 @@
 <template>
-  <div class="upgrade-panel">
-    <!-- 版本信息 -->
-    <div class="version-info">
-      <div class="info-row">
-        <span class="label">当前版本</span>
-        <span class="value">{{ currentVersion }}</span>
+  <div class="up-wrap">
+
+    <!-- 版本信息行 -->
+    <div class="up-info">
+      <div class="up-info-item">
+        <span class="up-info-label">当前版本</span>
+        <span class="up-info-val">{{ currentVersion }}</span>
       </div>
-      <div class="info-row">
-        <span class="label">构建时间</span>
-        <span class="value">{{ buildTime }}</span>
+      <div class="up-info-item">
+        <span class="up-info-label">构建时间</span>
+        <span class="up-info-val">{{ buildTime }}</span>
       </div>
-      <div class="info-row">
-        <span class="label">平台架构</span>
-        <span class="value">{{ osArch }}</span>
+      <div class="up-info-item">
+        <span class="up-info-label">平台架构</span>
+        <span class="up-info-val">{{ osArch }}</span>
       </div>
     </div>
 
-    <!-- 检查更新按钮 -->
-    <button
-      class="check-btn"
-      :class="{ loading: checking }"
-      :disabled="checking || upgrading"
-      @click="checkUpdate"
-    >
-      <span v-if="!checking">🔄 检查更新</span>
-      <span v-else>检查中...</span>
-    </button>
-
-    <!-- 发现新版本 -->
-    <div v-if="updateAvailable && !upgrading" class="update-notice">
-      <div class="notice-header">
-        <span class="icon">🎉</span>
-        <span class="title">发现新版本 {{ latestVersion }}</span>
-      </div>
-      <div class="update-details">
-        <p v-if="publishedAt"><strong>发布时间：</strong>{{ publishedAt }}</p>
-        <p v-if="size"><strong>大小：</strong>{{ fmtSize(size) }}</p>
-        <div v-if="releaseNotes" class="release-notes">
-          <div class="notes-title">更新说明</div>
-          <div class="notes-content" v-html="releaseNotes"></div>
-        </div>
-      </div>
-      <div class="upgrade-actions">
-        <button class="upgrade-btn" :disabled="confirming" @click="confirmUpgrade">
-          {{ confirming ? '再次点击确认升级' : '立即升级' }}
-        </button>
-        <a v-if="pageUrl" :href="pageUrl" target="_blank" class="view-btn">查看发布页</a>
-      </div>
-    </div>
-
-    <!-- 升级中 -->
-    <div v-else-if="upgrading" class="upgrade-progress">
-      <div class="progress-header">
-        <span class="icon">⏳</span>
-        <span class="title">{{ stageText }}</span>
-      </div>
-      <div class="progress-bar">
-        <div class="progress-fill" :style="{ width: progressPct + '%' }"></div>
-      </div>
-      <div class="progress-meta">
-        <span v-if="progressMsg">{{ progressMsg }}</span>
-        <span v-if="loaded > 0 || total > 0">{{ fmtSize(loaded) }} / {{ total > 0 ? fmtSize(total) : '未知' }}</span>
-      </div>
-    </div>
-
-    <!-- 升级完成 -->
-    <div v-else-if="upgraded" class="up-to-date done">
-      <span class="icon">✅</span>
-      <span>{{ doneMessage }}</span>
-    </div>
-
-    <!-- 已是最新 -->
-    <div v-else-if="checked && !updateAvailable" class="up-to-date">
-      <span class="icon">✅</span>
-      <span>已是最新版本</span>
+    <!-- 检查按钮 -->
+    <div class="up-actions">
+      <button
+        class="up-btn up-btn-check"
+        :class="{ spinning: checking }"
+        :disabled="checking || upgrading"
+        @click="checkUpdate"
+      >
+        <span class="up-btn-icon">↻</span>
+        <span>{{ checking ? '检查中…' : '检查更新' }}</span>
+      </button>
     </div>
 
     <!-- 错误 -->
-    <div v-if="error" class="error-notice">
-      <span class="icon">⚠️</span>
+    <div v-if="error" class="up-row up-row-error">
+      <span class="up-row-icon">⚠</span>
       <span>{{ error }}</span>
     </div>
+
+    <!-- 已是最新 -->
+    <div v-else-if="checked && !updateAvailable && !upgrading && !upgraded" class="up-row up-row-ok">
+      <span class="up-row-icon">✓</span>
+      <span>已是最新版本</span>
+    </div>
+
+    <!-- 发现新版本 -->
+    <div v-else-if="updateAvailable && !upgrading && !upgraded" class="up-notice">
+      <div class="up-notice-head">
+        <span class="up-notice-badge">NEW</span>
+        <span class="up-notice-ver">发现新版本 <strong>{{ latestVersion }}</strong></span>
+        <span v-if="publishedAt" class="up-notice-date">{{ fmtDate(publishedAt) }}</span>
+        <span v-if="size" class="up-notice-size">{{ fmtSize(size) }}</span>
+      </div>
+
+      <!-- release notes -->
+      <div v-if="releaseNotes" class="up-notes">
+        <div class="up-notes-content" v-html="releaseNotes"></div>
+      </div>
+
+      <!-- 操作 -->
+      <div class="up-upgrade-row">
+        <!-- 状态：初始 → 待确认（按钮变红高亮）→ 升级中 -->
+        <button
+          class="up-btn"
+          :class="confirming ? 'up-btn-confirm' : 'up-btn-primary'"
+          @click="confirmUpgrade"
+        >
+          <span>{{ confirming ? '⚠ 再次点击确认升级' : '立即升级' }}</span>
+        </button>
+        <a v-if="pageUrl" :href="pageUrl" target="_blank" class="up-link">查看发布页 ›</a>
+      </div>
+      <p v-if="confirming" class="up-confirm-tip">升级将替换当前程序文件，完成后需手动重启服务。</p>
+    </div>
+
+    <!-- 升级进度 -->
+    <div v-else-if="upgrading" class="up-progress">
+      <div class="up-progress-head">
+        <span class="up-progress-label">{{ stageText }}</span>
+        <span v-if="loaded > 0 || total > 0" class="up-progress-size">{{ fmtSize(loaded) }}{{ total > 0 ? ' / ' + fmtSize(total) : '' }}</span>
+      </div>
+      <div class="up-bar">
+        <div class="up-bar-fill" :style="{ width: progressPct + '%' }"></div>
+      </div>
+      <p v-if="progressMsg" class="up-progress-msg">{{ progressMsg }}</p>
+    </div>
+
+    <!-- 升级完成 -->
+    <div v-else-if="upgraded" class="up-row up-row-done">
+      <span class="up-row-icon">✓</span>
+      <span>{{ doneMessage || '升级完成，请重启服务生效' }}</span>
+    </div>
+
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 
-const currentVersion = ref('')
-const buildTime = ref('')
-const osArch = ref('')
+const currentVersion = ref('…')
+const buildTime = ref('…')
+const osArch = ref('…')
 const checking = ref(false)
 const checked = ref(false)
 const updateAvailable = ref(false)
@@ -100,9 +108,9 @@ const pageUrl = ref('')
 const size = ref(0)
 const error = ref('')
 
-// 升级状态
 const upgrading = ref(false)
 const confirming = ref(false)
+let confirmTimer = 0
 const upgraded = ref(false)
 const doneMessage = ref('')
 const stageText = ref('')
@@ -113,27 +121,24 @@ const progressPct = ref(0)
 
 onMounted(loadVersion)
 
-// 获取版本信息
 async function loadVersion() {
   try {
     const res = await fetch('/api/version')
     const data = await res.json()
-    currentVersion.value = data.appVersion || 'Unknown'
-    buildTime.value = data.buildTime || 'Unknown'
-    osArch.value = `${data.osType}/${data.arch}`
+    currentVersion.value = data.appVersion || '未知'
+    buildTime.value = data.buildTime ? data.buildTime.replace('T', ' ').replace('Z', '') : '未知'
+    osArch.value = `${data.osType || '?'}/${data.arch || '?'}`
   } catch {
-    currentVersion.value = 'Unknown'
-    buildTime.value = 'Unknown'
-    osArch.value = 'Unknown'
+    currentVersion.value = '未知'
   }
 }
 
-// 检查更新
 async function checkUpdate() {
   checking.value = true
   checked.value = false
   updateAvailable.value = false
   error.value = ''
+  upgraded.value = false
 
   try {
     const res = await fetch('/api/upgrade/check')
@@ -150,31 +155,31 @@ async function checkUpdate() {
       pageUrl.value = data.release.pageUrl || ''
       size.value = data.release.size || 0
     }
-  } catch (err) {
+  } catch {
     error.value = '检查更新失败，请稍后重试'
-    console.error('检查更新失败:', err)
   } finally {
     checking.value = false
   }
 }
 
-// 确认升级（两次点击确认）
+// 修复：confirming 时不能 disabled，两次点击才执行
 function confirmUpgrade() {
   if (!confirming.value) {
     confirming.value = true
-    setTimeout(() => (confirming.value = false), 5000)
+    clearTimeout(confirmTimer)
+    confirmTimer = window.setTimeout(() => { confirming.value = false }, 6000)
     return
   }
+  clearTimeout(confirmTimer)
   confirming.value = false
   runUpgrade()
 }
 
-// 执行升级（SSE 进度）
 async function runUpgrade() {
   upgrading.value = true
   updateAvailable.value = false
   error.value = ''
-  stageText.value = '准备升级...'
+  stageText.value = '准备中…'
   progressPct.value = 0
   loaded.value = 0
   total.value = 0
@@ -189,16 +194,13 @@ async function runUpgrade() {
     const reader = res.body!.getReader()
     const decoder = new TextDecoder()
     let buffer = ''
-
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
       buffer += decoder.decode(value, { stream: true })
       const events = buffer.split('\n\n')
       buffer = events.pop() || ''
-      for (const evt of events) {
-        handleSSE(evt)
-      }
+      for (const evt of events) handleSSE(evt)
     }
   } catch (err: any) {
     error.value = err.message || '升级失败'
@@ -206,7 +208,6 @@ async function runUpgrade() {
   }
 }
 
-// 解析单个 SSE 事件
 function handleSSE(raw: string) {
   let event = 'message'
   let data = ''
@@ -216,20 +217,14 @@ function handleSSE(raw: string) {
   }
   if (!data) return
   let payload: any
-  try {
-    payload = JSON.parse(data)
-  } catch {
-    return
-  }
+  try { payload = JSON.parse(data) } catch { return }
 
   switch (event) {
-    case 'progress':
-      applyProgress(payload)
-      break
+    case 'progress': applyProgress(payload); break
     case 'done':
       upgrading.value = false
       upgraded.value = true
-      doneMessage.value = payload.message || '升级完成'
+      doneMessage.value = payload.message || '升级完成，请重启服务生效'
       break
     case 'error':
       upgrading.value = false
@@ -238,48 +233,42 @@ function handleSSE(raw: string) {
   }
 }
 
-// 应用进度
 function applyProgress(p: any) {
-  const stage = p.stage || ''
-  switch (stage) {
-    case 'checking':
-      stageText.value = '正在检查...'
-      break
-    case 'downloading':
-      stageText.value = '正在下载...'
-      loaded.value = p.loaded || 0
-      total.value = p.total || 0
-      if (p.total > 0) progressPct.value = Math.min(100, Math.round((p.loaded / p.total) * 100))
-      break
-    case 'verifying':
-      stageText.value = '正在校验 sha256...'
-      progressPct.value = 100
-      break
-    case 'replacing':
-      stageText.value = '正在替换文件...'
-      break
-    case 'done':
-      stageText.value = '升级完成'
-      progressPct.value = 100
-      break
+  const stageMap: Record<string, string> = {
+    checking: '检查版本…',
+    downloading: '下载中…',
+    verifying: '校验 sha256…',
+    replacing: '替换文件…',
+    done: '升级完成',
+  }
+  stageText.value = stageMap[p.stage] || p.stage || '处理中…'
+  if (p.stage === 'downloading') {
+    loaded.value = p.loaded || 0
+    total.value = p.total || 0
+    if (p.total > 0) progressPct.value = Math.min(95, Math.round((p.loaded / p.total) * 100))
+  } else if (p.stage === 'verifying') {
+    progressPct.value = 97
+  } else if (p.stage === 'replacing' || p.stage === 'done') {
+    progressPct.value = 100
   }
   progressMsg.value = p.message || ''
 }
 
-// 格式化体积
 function fmtSize(bytes: number): string {
   if (!bytes || bytes <= 0) return ''
-  const units = ['B', 'KB', 'MB', 'GB']
-  let i = 0
-  let n = bytes
-  while (n >= 1024 && i < units.length - 1) {
-    n /= 1024
-    i++
-  }
-  return n.toFixed(1) + ' ' + units[i]
+  const u = ['B', 'KB', 'MB', 'GB']
+  let i = 0, n = bytes
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++ }
+  return n.toFixed(1) + ' ' + u[i]
 }
 
-// 简单的 Markdown 转换（转义 HTML，只认标题/列表/加粗/链接）
+function fmtDate(iso: string): string {
+  if (!iso) return ''
+  try {
+    return new Date(iso).toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric' })
+  } catch { return iso }
+}
+
 function formatMarkdown(text: string): string {
   if (!text) return ''
   const esc = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -296,134 +285,230 @@ function formatMarkdown(text: string): string {
 </script>
 
 <style scoped>
-.upgrade-panel {
+/* ======== 容器 ======== */
+.up-wrap {
   display: flex;
   flex-direction: column;
-  gap: 20px;
-  max-width: 600px;
-  margin: 0 auto;
+  gap: 16px;
 }
 
-.version-info {
-  background: var(--card, #1a1a1a);
-  border-radius: 12px;
+/* ======== 版本信息卡 ======== */
+.up-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.up-info-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  font-size: 13px;
+}
+.up-info-item + .up-info-item {
+  border-top: 1px solid var(--border);
+}
+.up-info-label { color: var(--sub); }
+.up-info-val   { color: var(--txt); font-weight: 500; font-variant-numeric: tabular-nums; }
+
+/* ======== 按钮区 ======== */
+.up-actions { display: flex; gap: 10px; }
+
+.up-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 20px;
+  border-radius: var(--radius);
+  font-size: 14px;
+  font-weight: 500;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, opacity 0.15s;
+  line-height: 1;
+  white-space: nowrap;
+}
+.up-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* 次要（检查更新） */
+.up-btn-check {
+  background: var(--white-15);
+  border-color: var(--border);
+  color: var(--txt);
+}
+.up-btn-check:hover:not(:disabled) {
+  background: var(--white-30);
+  border-color: var(--sub);
+}
+
+/* 主要（立即升级） */
+.up-btn-primary {
+  background: #fff;
+  color: #141218;
+  border-color: #fff;
+}
+.up-btn-primary:hover:not(:disabled) {
+  background: #e2e2e2;
+  border-color: #e2e2e2;
+}
+
+/* 确认态（红色高亮，可点击） */
+.up-btn-confirm {
+  background: transparent;
+  border-color: var(--warn);
+  color: var(--warn);
+  animation: confirm-pulse 1s ease-in-out infinite;
+}
+.up-btn-confirm:hover {
+  background: rgba(255, 180, 171, 0.12);
+}
+
+@keyframes confirm-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 180, 171, 0); }
+  50%       { box-shadow: 0 0 0 4px rgba(255, 180, 171, 0.25); }
+}
+
+/* 旋转图标 */
+.up-btn-icon { font-size: 15px; display: inline-block; }
+.spinning .up-btn-icon { animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ======== 状态行 ======== */
+.up-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-radius: var(--radius);
+  font-size: 14px;
+  border: 1px solid var(--border);
+}
+.up-row-icon { font-size: 16px; flex-shrink: 0; }
+.up-row-ok   { color: #7ee787; border-color: rgba(126, 231, 135, 0.3); background: rgba(126, 231, 135, 0.06); }
+.up-row-done { color: #7ee787; border-color: rgba(126, 231, 135, 0.3); background: rgba(126, 231, 135, 0.06); }
+.up-row-error { color: var(--warn); border-color: rgba(255, 180, 171, 0.3); background: rgba(255, 180, 171, 0.06); }
+
+/* ======== 新版本通知 ======== */
+.up-notice {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.up-notice-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.up-notice-badge {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: var(--selected);
+  color: #141218;
+  flex-shrink: 0;
+}
+.up-notice-ver   { font-size: 15px; font-weight: 600; flex-shrink: 0; }
+.up-notice-date  { font-size: 12px; color: var(--dim); margin-left: auto; }
+.up-notice-size  { font-size: 12px; color: var(--dim); flex-shrink: 0; }
+
+/* release notes */
+.up-notes {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  max-height: 200px;
+  overflow-y: auto;
+}
+.up-notes-content {
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--sub);
+}
+.up-notes-content :deep(h2),
+.up-notes-content :deep(h3),
+.up-notes-content :deep(h4) { margin: 8px 0 4px; color: var(--txt); font-size: 13px; }
+.up-notes-content :deep(li)  { margin-left: 16px; margin-bottom: 2px; list-style: disc; }
+.up-notes-content :deep(strong) { color: var(--txt); }
+.up-notes-content :deep(code) {
+  background: var(--white-15);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-family: monospace;
+  font-size: 12px;
+}
+
+/* 操作区 */
+.up-upgrade-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 16px;
+}
+.up-link {
+  font-size: 13px;
+  color: var(--dim);
+  text-decoration: none;
+  transition: color 0.12s;
+}
+.up-link:hover { color: var(--sub); }
+
+/* 确认提示文字 */
+.up-confirm-tip {
+  margin: 0;
+  padding: 0 16px 12px;
+  font-size: 12px;
+  color: var(--warn);
+  opacity: 0.8;
+}
+
+/* ======== 进度条 ======== */
+.up-progress {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
   padding: 16px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
 }
-
-.info-row {
+.up-progress-head {
   display: flex;
   justify-content: space-between;
   align-items: center;
   font-size: 14px;
 }
+.up-progress-label { font-weight: 500; }
+.up-progress-size  { font-size: 12px; color: var(--dim); font-variant-numeric: tabular-nums; }
 
-.label { color: var(--sub, #999); }
-.value { color: var(--text, #fff); font-weight: 500; }
-
-.check-btn {
-  padding: 12px 24px;
-  background: var(--primary, #409eff);
-  color: white;
-  border: none;
-  border-radius: 8px;
-  font-size: 15px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.2s;
+.up-bar {
+  height: 4px;
+  background: var(--white-15);
+  border-radius: 2px;
+  overflow: hidden;
 }
-.check-btn:hover:not(:disabled) { background: var(--primary-hover, #337ecc); transform: translateY(-1px); }
-.check-btn:disabled { opacity: 0.6; cursor: not-allowed; }
-.check-btn.loading { animation: pulse 1.5s ease-in-out infinite; }
-
-@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
-
-.update-notice {
-  background: var(--card, #1a1a1a);
-  border: 1px solid var(--primary, #409eff);
-  border-radius: 12px;
-  padding: 20px;
-  color: var(--text, #fff);
+.up-bar-fill {
+  height: 100%;
+  background: #fff;
+  border-radius: 2px;
+  transition: width 0.4s ease;
 }
 
-.notice-header {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 16px;
-  font-size: 18px;
-  font-weight: 600;
-}
-.icon { font-size: 22px; }
-
-.update-details { margin-bottom: 16px; font-size: 14px; line-height: 1.6; }
-.update-details p { margin: 8px 0; }
-
-.release-notes {
-  margin-top: 12px;
-  padding: 12px;
-  background: var(--white-10, rgba(255,255,255,0.05));
-  border-radius: 8px;
-  max-height: 240px;
-  overflow-y: auto;
-}
-.notes-title { font-size: 13px; color: var(--sub, #999); margin-bottom: 8px; }
-.notes-content { font-size: 13px; line-height: 1.6; }
-.notes-content :deep(h2), .notes-content :deep(h3), .notes-content :deep(h4) { margin: 8px 0 4px; }
-.notes-content :deep(li) { margin-left: 16px; }
-.notes-content :deep(code) { background: rgba(255,255,255,0.1); padding: 1px 5px; border-radius: 3px; }
-
-.upgrade-actions { display: flex; gap: 10px; align-items: center; }
-.upgrade-btn {
-  padding: 10px 20px;
-  background: var(--primary, #409eff);
-  color: #fff;
-  border: none;
-  border-radius: 6px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-.upgrade-btn:hover { transform: translateY(-1px); }
-.upgrade-btn:disabled { opacity: 0.7; }
-.view-btn { color: var(--sub, #999); font-size: 13px; }
-
-.upgrade-progress {
-  background: var(--card, #1a1a1a);
-  border-radius: 12px;
-  padding: 20px;
-}
-.progress-header { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; font-size: 15px; }
-.progress-bar { height: 8px; background: var(--white-10, rgba(255,255,255,0.1)); border-radius: 4px; overflow: hidden; }
-.progress-fill { height: 100%; background: var(--primary, #409eff); border-radius: 4px; transition: width 0.3s; }
-.progress-meta { display: flex; justify-content: space-between; margin-top: 8px; font-size: 12px; color: var(--sub, #999); }
-
-.up-to-date {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 16px;
-  background: var(--card, #1a1a1a);
-  border-radius: 8px;
-  color: var(--text, #fff);
-}
-.up-to-date.done { border: 1px solid #52c41a; }
-
-.error-notice {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 16px;
-  background: #ff4d4f;
-  color: white;
-  border-radius: 8px;
+.up-progress-msg {
+  margin: 0;
+  font-size: 12px;
+  color: var(--dim);
 }
 
+/* ======== 响应式 ======== */
 @media (max-width: 640px) {
-  .upgrade-panel { padding: 0; }
-  .info-row { font-size: 13px; }
-  .update-notice { padding: 16px; }
+  .up-info-item { padding: 10px 14px; }
+  .up-notice-date { display: none; }
 }
 </style>
