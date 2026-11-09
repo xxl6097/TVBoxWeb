@@ -1,5 +1,5 @@
 # ===== 阶段 1：Vue 前端构建 =====
-FROM node:20-alpine AS web-builder
+FROM node:22-alpine AS web-builder
 
 WORKDIR /build
 
