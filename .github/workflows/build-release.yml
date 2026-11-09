@@ -1,0 +1,148 @@
+name: Build & Release
+
+# 触发条件：
+# 1. 推送 tag（v*）→ 自动编译打包并发布 release
+# 2. 手动触发（workflow_dispatch，可指定版本号）
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（如 v1.1.0，留空则自动生成）'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: 编译打包（${{ matrix.os }}/${{ matrix.arch }}）
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+          - os: linux
+            arch: arm64
+          - os: darwin
+            arch: amd64
+          - os: darwin
+            arch: arm64
+          - os: windows
+            arch: amd64
+          - os: windows
+            arch: arm64
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache-dependency-path: server/go.sum
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: 构建前端（Vite → server/dist）
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - name: 交叉编译后端（内嵌前端）
+        working-directory: server
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+        run: |
+          CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o "fanren-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }}" .
+
+      - name: 打包压缩
+        shell: bash
+        run: |
+          mkdir -p dist-artifacts
+          BIN="fanren-${{ matrix.os }}-${{ matrix.arch }}"
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            zip -q "dist-artifacts/$BIN.zip" "server/$BIN.exe"
+          else
+            tar -czf "dist-artifacts/$BIN.tar.gz" -C server "$BIN"
+          fi
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: fanren-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist-artifacts/*
+          retention-days: 7
+
+  release:
+    name: 发布 Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: 下载全部产物
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: 确定版本号
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ -n "${{ github.event.inputs.version }}" ]; then
+              VER="${{ github.event.inputs.version }}"
+            else
+              VER="v$(date +%Y.%m.%d)"
+            fi
+          else
+            VER="${{ github.ref_name }}"
+          fi
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "版本号：$VER"
+
+      - name: 列出产物
+        run: ls -lh artifacts/
+
+      - name: 创建/更新 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: 夜帧影视 ${{ steps.version.outputs.version }}
+          body: |
+            ## 夜帧影视 · Web 版
+
+            电视端影视客户端 TVBoxTV 全部功能，用 Go 后端 + Vue3 前端完整复刻的 Web 应用。
+
+            ### 各平台产物
+            - `fanren-linux-amd64.tar.gz` — Linux x86_64
+            - `fanren-linux-arm64.tar.gz` — Linux ARM64
+            - `fanren-darwin-amd64.tar.gz` — macOS Intel
+            - `fanren-darwin-arm64.tar.gz` — macOS Apple Silicon
+            - `fanren-windows-amd64.zip` — Windows x64
+            - `fanren-windows-arm64.zip` — Windows ARM64
+
+            ### 使用
+            解压后直接运行，默认监听 `http://localhost:8090`，首次进入「设置 → 播放源 → 订阅」导入订阅链接即可。
+
+            ### 命令行参数
+            - `-addr` 监听地址（默认 `:8090`）
+            - `-data` 数据目录（默认 `data`）
+          files: |
+            artifacts/*
+          draft: false
+          prerelease: ${{ github.event_name == 'workflow_dispatch' }}
