@@ -36,9 +36,6 @@ var (
 	BuildTime  = "unknown"
 )
 
-// UpgradeRepo 升级检查的 GitHub 仓库（owner/repo）。
-var UpgradeRepo = "xxl6097/TVBoxWeb"
-
 // startTime 服务启动时间，用于健康检查返回 uptime。
 var startTime time.Time
 
@@ -69,6 +66,7 @@ func Handler() *http.ServeMux {
 	mux.HandleFunc("/api/metrics", hMetrics)
 	mux.HandleFunc("/api/version", hVersion)
 	mux.HandleFunc("/api/upgrade/check", hUpgradeCheck)
+	mux.HandleFunc("/api/upgrade/run", hUpgradeRun)
 	mux.HandleFunc("/api/sites", hSites)
 	mux.HandleFunc("/api/sites/enabled", hSitesEnabled)
 	mux.HandleFunc("/api/sites/speed", hSitesSpeed)
@@ -317,67 +315,89 @@ func hVersion(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// hUpgradeCheck GET: 检查 GitHub Release 是否有新版本。
+// hUpgradeCheck GET: 检查是否有新版本。
 func hUpgradeCheck(w http.ResponseWriter, r *http.Request) {
-	latest, err := fetchLatestRelease()
-	if err != nil {
-		ok(w, map[string]any{"error": "检查更新失败，请稍后重试"})
+	if upgrader == nil {
+		ok(w, map[string]any{
+			"current":    AppVersion,
+			"enabled":    false,
+			"updateable": false,
+			"error":      "本服务未启用在线升级",
+		})
 		return
 	}
-	hasUpdate := latest.TagName != "" && latest.TagName != AppVersion
-	ok(w, map[string]any{
-		"hasUpdate": hasUpdate,
-		"releaseNote": map[string]any{
-			"version":     latest.TagName,
-			"publishedAt": latest.PublishedAt,
-			"notes":       latest.Body,
-			"pageUrl":     latest.HTMLURL,
-		},
+	rel, err := upgrader.Check(r.Context())
+	if err != nil {
+		ok(w, map[string]any{
+			"current":    AppVersion,
+			"enabled":    true,
+			"updateable": false,
+			"error":      err.Error(),
+		})
+		return
+	}
+	reply := map[string]any{
+		"current":    AppVersion,
+		"enabled":    true,
+		"updateable": rel != nil,
+	}
+	if rel != nil {
+		reply["release"] = rel
+		reply["latest"] = rel.Version
+	}
+	ok(w, reply)
+}
+
+// hUpgradeRun POST: 执行升级，通过 SSE 推送进度。
+func hUpgradeRun(w http.ResponseWriter, r *http.Request) {
+	if upgrader == nil {
+		fail(w, http.StatusNotFound, "本服务未启用在线升级")
+		return
+	}
+
+	// 执行前重新向更新源确认版本，不信任客户端传入的任何 URL。
+	rel, err := upgrader.Check(r.Context())
+	if err != nil {
+		fail(w, http.StatusBadGateway, "无法向更新源确认版本: "+err.Error())
+		return
+	}
+	if rel == nil {
+		fail(w, http.StatusConflict, "当前已是最新版本")
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		fail(w, http.StatusInternalServerError, "当前环境不支持 SSE")
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+
+	// SSE 写入器：并发安全由调用方保证，这里用锁。
+	var mu sync.Mutex
+	sse := func(event string, data any) {
+		mu.Lock()
+		defer mu.Unlock()
+		b, _ := json.Marshal(data)
+		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b)
+		flusher.Flush()
+	}
+
+	sse("progress", UpgradeProgress{Stage: StageChecking, Message: "开始升级到 " + rel.Version})
+	err = upgrader.Upgrade(r.Context(), rel, func(p UpgradeProgress) {
+		sse("progress", p)
 	})
-}
-
-// releaseInfo 是 GitHub Release 的精简信息。
-type releaseInfo struct {
-	TagName     string
-	PublishedAt string
-	Body        string
-	HTMLURL     string
-}
-
-// fetchLatestRelease 从 GitHub API 获取最新 release。
-func fetchLatestRelease() (*releaseInfo, error) {
-	u := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", UpgradeRepo)
-	client := &http.Client{Timeout: 8 * time.Second}
-	req, _ := http.NewRequest(http.MethodGet, u, nil)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", "TVBoxWeb-upgrade-check")
-	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		sse("error", map[string]any{"message": err.Error()})
+		return
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("github api status %d", resp.StatusCode)
-	}
-	b, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return nil, err
-	}
-	var out struct {
-		TagName     string `json:"tag_name"`
-		PublishedAt string `json:"published_at"`
-		Body        string `json:"body"`
-		HTMLURL     string `json:"html_url"`
-	}
-	if err := json.Unmarshal(b, &out); err != nil {
-		return nil, err
-	}
-	return &releaseInfo{
-		TagName:     out.TagName,
-		PublishedAt: out.PublishedAt,
-		Body:        out.Body,
-		HTMLURL:     out.HTMLURL,
-	}, nil
+	sse("done", map[string]any{
+		"version": rel.Version,
+		"message": "升级完成，重启服务后生效",
+	})
 }
 
 func hSites(w http.ResponseWriter, r *http.Request) {

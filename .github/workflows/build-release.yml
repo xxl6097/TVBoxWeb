@@ -76,8 +76,12 @@ jobs:
           mkdir -p dist-artifacts
           BIN="yezhen-${{ matrix.os }}-${{ matrix.arch }}"
           if [ "${{ matrix.os }}" = "windows" ]; then
+            # 保留裸二进制（供在线升级下载）
+            cp "$BIN.exe" "dist-artifacts/$BIN.exe"
             zip -q "dist-artifacts/$BIN.zip" "$BIN.exe"
           else
+            # 保留裸二进制（供在线升级下载）
+            cp "$BIN" "dist-artifacts/$BIN"
             tar -czf "dist-artifacts/$BIN.tar.gz" "$BIN"
           fi
 
@@ -118,6 +122,20 @@ jobs:
 
       - name: 列出产物
         run: ls -lh artifacts/
+
+      - name: 生成校验和（供在线升级）
+        shell: bash
+        run: |
+          cd artifacts
+          : > checksums.txt
+          for f in yezhen-*; do
+            case "$f" in
+              *.tar.gz|*.zip|*.txt) continue ;;
+            esac
+            sha256sum "$f" >> checksums.txt
+          done
+          echo "=== checksums.txt ==="
+          cat checksums.txt
 
       - name: 创建/更新 Release
         uses: softprops/action-gh-release@v2

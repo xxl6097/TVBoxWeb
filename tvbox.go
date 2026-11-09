@@ -56,6 +56,12 @@ type Options struct {
 
 	// Logger 日志输出，默认 log.Default()。
 	Logger *log.Logger
+
+	// Upgrader 在线升级实现。未设置时升级接口返回「未启用」。
+	Upgrader Upgrader
+
+	// Version 当前版本号，用于升级检测对比。默认 AppVersion。
+	Version string
 }
 
 // Option 函数式配置项。
@@ -69,6 +75,21 @@ func WithDataDir(dir string) Option {
 // WithLogger 设置日志器。
 func WithLogger(l *log.Logger) Option {
 	return func(o *Options) { o.Logger = l }
+}
+
+// WithUpgrader 注入在线升级实现（复刻 gofs.WithUpgrader）。
+func WithUpgrader(u Upgrader) Option {
+	return func(o *Options) { o.Upgrader = u }
+}
+
+// WithVersion 设置当前版本号（升级检测时与远端比较）。
+func WithVersion(v string) Option {
+	return func(o *Options) { o.Version = v }
+}
+
+// Version 返回当前版本号（可通过 ldflags -X 注入 internal/api.AppVersion）。
+func Version() string {
+	return api.AppVersion
 }
 
 // 默认初始化：只跑一次，线程安全。
@@ -95,6 +116,12 @@ func New(opts ...Option) (*Server, error) {
 
 	if err := ensureInit(); err != nil {
 		return nil, err
+	}
+
+	// 注入升级实现与版本号
+	api.SetUpgrader(o.Upgrader)
+	if o.Version != "" {
+		api.AppVersion = o.Version
 	}
 
 	// 数据文件
