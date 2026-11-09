@@ -5,6 +5,7 @@ import { api } from '@/api'
 import { useAppStore } from '@/stores/app'
 import type { Site, WebdavSource } from '@/types'
 import TopBar from '@/components/TopBar.vue'
+import UpgradePanel from '@/components/UpgradePanel.vue'
 
 const app = useAppStore()
 const router = useRouter()
@@ -59,7 +60,9 @@ let   ccTimer = 0
 
 // ===== 关于 =====
 const showPrivacy = ref(false)
-const appVersion  = '1.0.0'
+const appVersion  = ref('加载中...')
+const buildTime   = ref('')
+const osArch      = ref('')
 
 function goMetrics() {
   router.push('/metrics')
@@ -90,6 +93,22 @@ async function load() {
   enabledKeys.value = new Set(list.filter((s: Site) => s.enabled).map((s: Site) => s.key))
   wdSources.value   = wdList
   liveSources.value = liveList
+
+  // 加载版本信息
+  loadVersionInfo()
+}
+
+async function loadVersionInfo() {
+  try {
+    const res = await fetch('http://localhost:8091/api/version')
+    const data = await res.json()
+    appVersion.value = data.appVersion || 'v1.0.0'
+    buildTime.value = data.buildTime || ''
+    osArch.value = `${data.osType}/${data.arch}`
+  } catch (err) {
+    console.error('获取版本信息失败:', err)
+    appVersion.value = 'v1.0.0'
+  }
 }
 
 // ---------- 播放源 ----------
@@ -486,7 +505,17 @@ async function clearHistory() {
           <div class="card">
             <div class="srow">
               <span class="srow-title">版本</span>
-              <span class="srow-val">v{{ appVersion }}</span>
+              <span class="srow-val">{{ appVersion }}</span>
+            </div>
+            <div class="sdiv" v-if="buildTime"></div>
+            <div class="srow" v-if="buildTime">
+              <span class="srow-title">构建时间</span>
+              <span class="srow-dim">{{ buildTime }}</span>
+            </div>
+            <div class="sdiv" v-if="osArch"></div>
+            <div class="srow" v-if="osArch">
+              <span class="srow-title">平台架构</span>
+              <span class="srow-dim">{{ osArch }}</span>
             </div>
             <div class="sdiv"></div>
             <div class="srow srow-clickable" @click="showPrivacy = !showPrivacy">
@@ -516,6 +545,10 @@ async function clearHistory() {
               <span class="srow-dim">Vue3 + Vite4 + TypeScript + Element Plus + Go</span>
             </div>
           </div>
+
+          <!-- 升级检测 -->
+          <div class="section-label" style="margin-top: 20px">系统更新</div>
+          <UpgradePanel />
         </template>
 
       </div>

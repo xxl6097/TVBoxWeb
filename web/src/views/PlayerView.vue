@@ -998,6 +998,29 @@ function goBack() {
   }
 }
 
+// 手动切换直播线路（同一频道的多线路）
+async function switchLine(url: string) {
+  if (url === rawUrl) {
+    app.showTip('已经是当前线路')
+    return
+  }
+  destroyPlayer()
+  curMs.value = 0
+  durMs.value = 0
+  prepared.value = false
+  playing.value = false
+  introDone = false
+  outroFired = false
+  skipShow.value = ''
+  liveFail = 0
+  rawUrl = url
+  app.showTip('切换线路中…')
+  resolving.value = true
+  await resolveUrl()
+  resolving.value = false
+  initPlayer()
+}
+
 function retry() {
   destroyPlayer()
   liveFail = 0
@@ -1257,6 +1280,19 @@ onUnmounted(() => {
           <span v-for="(lv, i) in levels" :key="i" class="chip" :class="{ active: qCap > 0 && qCap < TOP && levelIdx === i }" @click="chooseLevel(lv.height > 0 ? lv.height : TOP)">{{ labelOfLevel(lv) }}</span>
         </div>
         <div v-if="!levels.length" class="q-hint">源只提供这一档清晰度。</div>
+        <!-- 直播线路切换 -->
+        <template v-if="isLive && player.current && player.current.urls.length > 1">
+          <div class="q-section">线路</div>
+          <div class="q-chips">
+            <span
+              v-for="(u, i) in player.current.urls"
+              :key="'line' + i"
+              class="chip"
+              :class="{ active: u === rawUrl }"
+              @click="switchLine(u)"
+            >线路 {{ i + 1 }}</span>
+          </div>
+        </template>
         <div class="q-section">画面比例</div>
         <div class="q-chips">
           <span v-for="(n, i) in scaleNames" :key="'sc' + i" class="chip" :class="{ active: scaleMode === i }" @click="setScale(i)">{{ n }}</span>
@@ -1434,6 +1470,18 @@ onUnmounted(() => {
           <span class="chip" :class="{ active: qCap >= TOP }" @click="chooseLevel(TOP)">原画</span>
           <span v-for="(lv, i) in levels" :key="i" class="chip" :class="{ active: qCap > 0 && qCap < TOP && levelIdx === i }" @click="chooseLevel(lv.height > 0 ? lv.height : TOP)">{{ labelOfLevel(lv) }}</span>
         </div>
+        <template v-if="isLive && player.current && player.current.urls.length > 1">
+          <div class="m-q-section">线路</div>
+          <div class="m-q-chips">
+            <span
+              v-for="(u, i) in player.current.urls"
+              :key="'line' + i"
+              class="chip"
+              :class="{ active: u === rawUrl }"
+              @click="switchLine(u)"
+            >线路 {{ i + 1 }}</span>
+          </div>
+        </template>
         <div class="m-q-section">画面比例</div>
         <div class="m-q-chips">
           <span v-for="(n, i) in scaleNames" :key="'sc' + i" class="chip" :class="{ active: scaleMode === i }" @click="setScale(i)">{{ n }}</span>

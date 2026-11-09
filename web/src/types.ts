@@ -110,6 +110,7 @@ export interface HistItem {
   pos: number
   dur: number
   time: number
+  watchedEps?: number[]  // 已看过的集数列表（分集管理）
 }
 
 export interface FavItem {

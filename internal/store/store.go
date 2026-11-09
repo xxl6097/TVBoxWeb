@@ -57,17 +57,18 @@ type SiteHealthStat struct {
 }
 
 type HistItem struct {
-	SiteKey  string `json:"siteKey"`
-	SiteName string `json:"siteName"`
-	VodID    string `json:"vodId"`
-	Name     string `json:"name"`
-	Pic      string `json:"pic"`
-	EpName   string `json:"epName"`
-	EpIndex  int    `json:"epIndex"`
-	From     string `json:"from"`
-	Pos      int64  `json:"pos"`
-	Dur      int64  `json:"dur"`
-	Time     int64  `json:"time"`
+	SiteKey    string `json:"siteKey"`
+	SiteName   string `json:"siteName"`
+	VodID      string `json:"vodId"`
+	Name       string `json:"name"`
+	Pic        string `json:"pic"`
+	EpName     string `json:"epName"`
+	EpIndex    int    `json:"epIndex"`
+	From       string `json:"from"`
+	Pos        int64  `json:"pos"`
+	Dur        int64  `json:"dur"`
+	Time       int64  `json:"time"`
+	WatchedEps []int  `json:"watchedEps"` // 已看过的集数列表（分集管理）
 }
 
 type FavItem struct {
@@ -352,11 +353,19 @@ func UpdateHistoryPos(h HistItem) {
 			if h.SiteName != "" {
 				it.SiteName = h.SiteName
 			}
+			// 分集管理：追加当前集到已看集列表（去重）
+			if h.EpIndex >= 0 {
+				it.WatchedEps = appendEps(it.WatchedEps, h.EpIndex)
+			}
 			found = true
 			break // 同站源同影片只有一条记录，找到后直接退出
 		}
 	}
 	if !found {
+		// 首次记录：初始化已看集列表
+		if h.EpIndex >= 0 {
+			h.WatchedEps = []int{h.EpIndex}
+		}
 		// 控制历史上限 40 条
 		if len(data.Hist) >= 40 {
 			data.Hist = data.Hist[:39]
@@ -365,6 +374,20 @@ func UpdateHistoryPos(h HistItem) {
 	}
 	mu.Unlock()
 	flush()
+}
+
+// appendEps 追加集数到已看列表（去重 + 上限保护）。
+func appendEps(list []int, ep int) []int {
+	for _, e := range list {
+		if e == ep {
+			return list
+		}
+	}
+	out := append(list, ep)
+	if len(out) > 200 {
+		out = out[len(out)-200:]
+	}
+	return out
 }
 
 func RemoveHistory(h HistItem) {

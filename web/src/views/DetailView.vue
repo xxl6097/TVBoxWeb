@@ -28,6 +28,8 @@ const loading = ref(true)
 
 // 上次看到的集（用于定位）
 const watchedEp = ref(-1)
+// 已看过的所有集（分集管理）
+const watchedEps = ref<Set<number>>(new Set())
 const posterFailed = ref(false)
 
 onMounted(async () => {
@@ -54,7 +56,10 @@ onMounted(async () => {
   try {
     const hist = await api.history()
     const h = hist.find((x) => x.siteKey === siteKey && x.vodId === vodId)
-    if (h) watchedEp.value = h.epIndex
+    if (h) {
+      watchedEp.value = h.epIndex
+      watchedEps.value = new Set(h.watchedEps?.length ? h.watchedEps : [h.epIndex])
+    }
   } catch {
     /* ignore */
   }
@@ -71,7 +76,7 @@ function isWatched(displayIdx: number): boolean {
   const line = lines.value[curLine.value]
   if (!line) return false
   const realIdx = reverse.value ? line.eps.length - 1 - displayIdx : displayIdx
-  return realIdx === watchedEp.value
+  return watchedEps.value.has(realIdx)
 }
 
 const meta = computed(() => {
@@ -204,6 +209,7 @@ function play(epIndex: number) {
         <span class="eps-count">共 {{ lines[curLine].eps.length }} 集</span>
         <span v-if="lines[curLine].eps.length > 32" class="eps-hint">· 可上下滚动查看更多</span>
         <span v-if="watchedEp >= 0" class="eps-seen">上次看到第 {{ watchedEp + 1 }} 集</span>
+        <span v-if="watchedEps.size" class="eps-seen">· 已看 {{ watchedEps.size }} 集</span>
         <span class="eps-order" @click="reverse = !reverse">{{ reverse ? '正序' : '倒序' }}</span>
       </div>
       <div class="eps">

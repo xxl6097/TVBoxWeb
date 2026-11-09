@@ -98,6 +98,7 @@ function clearAll() {
           <div class="name">{{ h.name }}</div>
           <div class="meta">
             {{ h.epName || '未开始' }}<span v-if="h.siteName"> · {{ h.siteName }}</span>
+            <span v-if="h.watchedEps && h.watchedEps.length > 1"> · 已看 {{ h.watchedEps.length }} 集</span>
             <span v-if="ago(h.time)"> · {{ ago(h.time) }}</span>
           </div>
           <div v-if="progressOf(h) > 0" class="progress">
