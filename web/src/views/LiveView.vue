@@ -28,6 +28,8 @@ const checkedCount = ref(0)
 const rankResults = ref<Record<string, LiveScore>>({})
 const ranked = ref<LiveScore[]>([])
 const filter = ref('')
+// 检测代次：切台/重载频道时递增，用于中断旧的异步检测循环，防止结果污染新源
+let probeGen = 0
 
 // ===== 实时健康度追踪（WebSocket） =====
 const siteHealthStatus = ref<Map<string, HealthUpdate>>(new Map())
@@ -60,6 +62,7 @@ onUnmounted(() => {
 async function loadChannels() {
   if (!currentUrl.value) return
   loading.value = true
+  probeGen++ // 重载频道时中断正在进行的旧检测
   try {
     const r = await api.liveChannels(currentUrl.value)
     root.value = r.root
@@ -151,6 +154,14 @@ function playChannel(ch: Channel) {
 async function switchSource(url: string) {
   currentUrl.value = url
   await api.setLiveUrl(url)
+  // 切台清理：清空上一个源的测速/检测状态，避免残留误导
+  probeGen++ // 中断正在进行的旧源频道检测
+  deadSet.value = new Set()
+  rankResults.value = {}
+  ranked.value = []
+  checkedCount.value = 0
+  probing.value = false
+  speedOpen.value = false
   await loadChannels()
 }
 
@@ -228,12 +239,17 @@ async function probeChannels() {
   }
   probing.value = true
   checkedCount.value = 0
+  const myGen = ++probeGen
   const list = channels.value.slice(0, 40)
   app.showTip('开始检测 ' + list.length + ' 个频道')
   let dead = 0
   for (const ch of list) {
+    // 切台/重载后中断旧检测，防止旧源结果污染新源 deadSet
+    if (myGen !== probeGen) break
     try {
       const r = await api.peek(ch.url)
+      // await 期间可能已切台，再次校验
+      if (myGen !== probeGen) break
       const key = ch.name + '|' + ch.url
       if (!r.alive) {
         dead++
@@ -250,6 +266,8 @@ async function probeChannels() {
     }
     checkedCount.value++
   }
+  // 检测被中断（切台/重载）：不更新状态、不提示结果
+  if (myGen !== probeGen) return
   probing.value = false
   if (dead === 0) {
     app.showTip(`这 ${list.length} 台全部可连`)

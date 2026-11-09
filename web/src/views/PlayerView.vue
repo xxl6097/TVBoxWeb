@@ -164,16 +164,6 @@ function onFullscreenChange() {
   )
 }
 
-function onKeyDown(e: KeyboardEvent) {
-  // 在输入框等焦点元素里不响应
-  if ((e.target as HTMLElement).tagName === 'INPUT' || (e.target as HTMLElement).tagName === 'TEXTAREA') return
-  if (e.key === 'f' || e.key === 'F') toggleFullscreen()
-  if (e.key === ' ') { e.preventDefault(); togglePlay() }
-  if (e.key === 'ArrowRight') seekBy(1)
-  if (e.key === 'ArrowLeft') seekBy(-1)
-  if (e.key === 'Escape' && isFullscreen.value) toggleFullscreen()
-}
-
 function syncEpLabel() {
   const n = player.count
   if (isLive) {
@@ -330,8 +320,13 @@ async function initPlayer() {
   if (src.includes('.m3u8') || via.value === '直播直连' || via.value === '补全 m3u8') {
     const HlsCls = await loadHls()
     if (HlsCls.isSupported()) {
-      // maxBufferLength: 10 秒缓冲（原来 30 秒，在 1080p 流上会占 100MB+ 内存）
-      const h = new HlsCls({ maxBufferLength: 10 })
+      // 缓冲策略：直播追求低延迟用小缓冲 + 限制最大缓冲防内存膨胀；
+      // 点播用较大缓冲保证网络抖动时的流畅度。
+      // maxBufferLength 默认 30s（1080p 会占 100MB+ 内存），这里收紧到 10s。
+      const hlsCfg: any = isLive
+        ? { maxBufferLength: 10, maxMaxBufferLength: 30 } // 直播：最多缓冲 30s
+        : { maxBufferLength: 30 }                         // 点播：缓冲 30s 保流畅
+      const h = new HlsCls(hlsCfg)
       hls = h
       h.loadSource(src)
       h.attachMedia(vid)
