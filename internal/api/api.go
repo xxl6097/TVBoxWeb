@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"reflect"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -28,6 +29,15 @@ import (
 	"github.com/xxl6097/TVBoxWeb/internal/store"
 	"github.com/xxl6097/TVBoxWeb/internal/webdav"
 )
+
+// 版本信息（通过 ldflags -X 注入，默认值兜底）。
+var (
+	AppVersion = "v1.1.2"
+	BuildTime  = "unknown"
+)
+
+// UpgradeRepo 升级检查的 GitHub 仓库（owner/repo）。
+var UpgradeRepo = "xxl6097/TVBoxWeb"
 
 // startTime 服务启动时间，用于健康检查返回 uptime。
 var startTime time.Time
@@ -57,6 +67,8 @@ func Handler() *http.ServeMux {
 	mux.HandleFunc("/api/health", hHealth)
 	mux.HandleFunc("/api/status", hStatus)
 	mux.HandleFunc("/api/metrics", hMetrics)
+	mux.HandleFunc("/api/version", hVersion)
+	mux.HandleFunc("/api/upgrade/check", hUpgradeCheck)
 	mux.HandleFunc("/api/sites", hSites)
 	mux.HandleFunc("/api/sites/enabled", hSitesEnabled)
 	mux.HandleFunc("/api/sites/speed", hSitesSpeed)
@@ -293,6 +305,79 @@ func hHealth(w http.ResponseWriter, r *http.Request) {
 // hMetrics 性能监控端点，返回运行时指标（请求统计/缓存/内存/连接）。
 func hMetrics(w http.ResponseWriter, r *http.Request) {
 	ok(w, metrics.Snapshot())
+}
+
+// hVersion GET: 返回当前版本信息（appVersion/buildTime/osType/arch）。
+func hVersion(w http.ResponseWriter, r *http.Request) {
+	ok(w, map[string]any{
+		"appVersion": AppVersion,
+		"buildTime":  BuildTime,
+		"osType":     runtime.GOOS,
+		"arch":       runtime.GOARCH,
+	})
+}
+
+// hUpgradeCheck GET: 检查 GitHub Release 是否有新版本。
+func hUpgradeCheck(w http.ResponseWriter, r *http.Request) {
+	latest, err := fetchLatestRelease()
+	if err != nil {
+		ok(w, map[string]any{"error": "检查更新失败，请稍后重试"})
+		return
+	}
+	hasUpdate := latest.TagName != "" && latest.TagName != AppVersion
+	ok(w, map[string]any{
+		"hasUpdate": hasUpdate,
+		"releaseNote": map[string]any{
+			"version":     latest.TagName,
+			"publishedAt": latest.PublishedAt,
+			"notes":       latest.Body,
+			"pageUrl":     latest.HTMLURL,
+		},
+	})
+}
+
+// releaseInfo 是 GitHub Release 的精简信息。
+type releaseInfo struct {
+	TagName     string
+	PublishedAt string
+	Body        string
+	HTMLURL     string
+}
+
+// fetchLatestRelease 从 GitHub API 获取最新 release。
+func fetchLatestRelease() (*releaseInfo, error) {
+	u := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", UpgradeRepo)
+	client := &http.Client{Timeout: 8 * time.Second}
+	req, _ := http.NewRequest(http.MethodGet, u, nil)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "TVBoxWeb-upgrade-check")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("github api status %d", resp.StatusCode)
+	}
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		TagName     string `json:"tag_name"`
+		PublishedAt string `json:"published_at"`
+		Body        string `json:"body"`
+		HTMLURL     string `json:"html_url"`
+	}
+	if err := json.Unmarshal(b, &out); err != nil {
+		return nil, err
+	}
+	return &releaseInfo{
+		TagName:     out.TagName,
+		PublishedAt: out.PublishedAt,
+		Body:        out.Body,
+		HTMLURL:     out.HTMLURL,
+	}, nil
 }
 
 func hSites(w http.ResponseWriter, r *http.Request) {

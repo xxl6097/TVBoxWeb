@@ -100,7 +100,7 @@ async function load() {
 
 async function loadVersionInfo() {
   try {
-    const res = await fetch('http://localhost:8091/api/version')
+    const res = await fetch('/api/version')
     const data = await res.json()
     appVersion.value = data.appVersion || 'v1.0.0'
     buildTime.value = data.buildTime || ''

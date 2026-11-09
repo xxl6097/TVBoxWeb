@@ -29,8 +29,10 @@ for entry in "${PLATFORMS[@]}"; do
   IFS=':' read -r pair name <<< "$entry"
   IFS='/' read -r os arch <<< "$pair"
   echo "   编译 $os/$arch -> $name"
+  BUILD_TIME=$(date +%Y-%m-%dT%H:%M:%S)
   CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
-    go build -trimpath -ldflags "-s -w" -o "$RELEASE/$name" ./cmd/tvbox
+    go build -trimpath -ldflags "-s -w -X github.com/xxl6097/TVBoxWeb/internal/api.AppVersion=$VERSION -X github.com/xxl6097/TVBoxWeb/internal/api.BuildTime=$BUILD_TIME" \
+    -o "$RELEASE/$name" ./cmd/tvbox
 done
 
 echo "==> 3/3 打包压缩"

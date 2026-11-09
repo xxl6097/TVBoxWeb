@@ -4,7 +4,7 @@ import { useRouter } from 'vue-router'
 import { api } from '@/api'
 import { useAppStore } from '@/stores/app'
 import { fmtMs } from '@/utils/format'
-import type { Vod, HistItem } from '@/types'
+import type { Vod, HistItem, Category } from '@/types'
 import TopBar from '@/components/TopBar.vue'
 import VodGrid from '@/components/VodGrid.vue'
 import SkeletonList from '@/components/SkeletonList.vue'
@@ -19,6 +19,27 @@ const loading = ref(true)
 const hasSites = ref(false)
 const confirmClear = ref(false)
 let confirmTimer = 0
+
+// 首页分类导航：取第一个可用站源的顶层分类
+const cats = ref<Category[]>([])
+const catSiteKey = ref('')
+
+async function loadCats() {
+  try {
+    const sites = await api.sites()
+    const usable = sites.filter((s) => s.usable)
+    if (!usable.length) return
+    catSiteKey.value = usable[0].key
+    const all = await api.categories(usable[0].key)
+    cats.value = all.filter((c) => c.pid === '' && c.id !== '').slice(0, 12)
+  } catch {
+    /* ignore */
+  }
+}
+
+function goCat(tid: string) {
+  router.push({ name: 'vod', query: { site: catSiteKey.value, tid } })
+}
 
 async function loadFeed() {
   try {
@@ -36,6 +57,7 @@ onMounted(async () => {
   await app.loadStatus()
   hasSites.value = (app.status?.totalSites ?? 0) > 0
   await loadFeed()
+  loadCats()
   // 到期自动抓一轮（后台）
   api.triggerCrawl().catch(() => {})
 })
@@ -133,6 +155,16 @@ function refresh() {
   <div class="page">
     <TopBar />
 
+    <!-- 分类导航 -->
+    <div v-if="cats.length" class="cat-nav">
+      <span
+        v-for="c in cats"
+        :key="c.id"
+        class="cat-chip"
+        @click="goCat(c.id)"
+      >{{ c.name }}</span>
+    </div>
+
     <!-- 继续观看 -->
     <template v-if="loading">
       <div class="section-title">继续观看</div>
@@ -193,6 +225,27 @@ function refresh() {
 </template>
 
 <style scoped>
+.cat-nav {
+  display: flex;
+  gap: 8px;
+  padding: 4px 24px 16px;
+  overflow-x: auto;
+  flex-wrap: wrap;
+}
+.cat-chip {
+  padding: 5px 14px;
+  border-radius: 16px;
+  font-size: 13px;
+  color: var(--sub);
+  background: var(--card);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.14s;
+}
+.cat-chip:hover {
+  color: #fff;
+  background: var(--card-hi);
+}
 .continue-row {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));

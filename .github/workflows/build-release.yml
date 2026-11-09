@@ -66,7 +66,9 @@ jobs:
           GOOS: ${{ matrix.os }}
           GOARCH: ${{ matrix.arch }}
         run: |
-          CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o "yezhen-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }}" ./cmd/tvbox
+          VER="${GITHUB_REF_NAME:-v1.0.0}"
+          BT=$(date +%Y-%m-%dT%H:%M:%S)
+          CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X github.com/xxl6097/TVBoxWeb/internal/api.AppVersion=${VER} -X github.com/xxl6097/TVBoxWeb/internal/api.BuildTime=${BT}" -o "yezhen-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }}" ./cmd/tvbox
 
       - name: 打包压缩
         shell: bash

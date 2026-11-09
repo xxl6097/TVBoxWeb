@@ -32,8 +32,29 @@ onMounted(async () => {
   const list = await api.sites()
   sites.value = list.filter((s) => s.usable)
   if (!siteKey.value && sites.value.length) siteKey.value = sites.value[0].key
-  if (siteKey.value) await loadCategories()
+  if (siteKey.value) {
+    await loadCategories()
+    // 从 URL 读分类参数（首页分类导航跳转），自动选中
+    applyTidFromQuery()
+  }
 })
+
+// 从 URL query 的 tid 参数选中对应分类
+function applyTidFromQuery() {
+  const tid = (route.query.tid as string) || ''
+  if (!tid) return
+  const cat = categories.value.find((c) => c.id === tid)
+  if (!cat) return
+  if (cat.pid === '') {
+    selectedParent.value = tid
+    selectedChild.value = ''
+  } else {
+    selectedParent.value = cat.pid
+    selectedChild.value = tid
+  }
+  curPage.value = 1
+  load()
+}
 
 watch(siteKey, () => {
   if (route.query.site !== siteKey.value) {

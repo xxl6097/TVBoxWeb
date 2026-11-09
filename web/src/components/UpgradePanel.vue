@@ -78,7 +78,7 @@ const error = ref('')
 // 获取版本信息
 async function loadVersion() {
   try {
-    const res = await fetch('http://localhost:8091/api/version')
+    const res = await fetch('/api/version')
     const data = await res.json()
     currentVersion.value = data.appVersion || 'Unknown'
     buildTime.value = data.buildTime || 'Unknown'
@@ -99,7 +99,7 @@ async function checkUpdate() {
   error.value = ''
 
   try {
-    const res = await fetch('http://localhost:8091/api/upgrade/check')
+    const res = await fetch('/api/upgrade/check')
     const data = await res.json()
 
     checked.value = true
