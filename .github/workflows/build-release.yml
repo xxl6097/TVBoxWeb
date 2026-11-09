@@ -46,7 +46,7 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.22'
-          cache-dependency-path: server/go.sum
+          cache-dependency-path: go.sum
 
       - name: 安装 Node
         uses: actions/setup-node@v4
@@ -55,35 +55,34 @@ jobs:
           cache: 'npm'
           cache-dependency-path: web/package-lock.json
 
-      - name: 构建前端（Vite → server/dist）
+      - name: 构建前端（Vite → dist）
         working-directory: web
         run: |
           npm ci
           npm run build
 
       - name: 交叉编译后端（内嵌前端）
-        working-directory: server
         env:
           GOOS: ${{ matrix.os }}
           GOARCH: ${{ matrix.arch }}
         run: |
-          CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o "fanren-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }}" .
+          CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o "yezhen-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }}" ./cmd/tvbox
 
       - name: 打包压缩
         shell: bash
         run: |
           mkdir -p dist-artifacts
-          BIN="fanren-${{ matrix.os }}-${{ matrix.arch }}"
+          BIN="yezhen-${{ matrix.os }}-${{ matrix.arch }}"
           if [ "${{ matrix.os }}" = "windows" ]; then
-            zip -q "dist-artifacts/$BIN.zip" "server/$BIN.exe"
+            zip -q "dist-artifacts/$BIN.zip" "$BIN.exe"
           else
-            tar -czf "dist-artifacts/$BIN.tar.gz" -C server "$BIN"
+            tar -czf "dist-artifacts/$BIN.tar.gz" "$BIN"
           fi
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
-          name: fanren-${{ matrix.os }}-${{ matrix.arch }}
+          name: yezhen-${{ matrix.os }}-${{ matrix.arch }}
           path: dist-artifacts/*
           retention-days: 7
 
@@ -128,13 +127,15 @@ jobs:
 
             电视端影视客户端 TVBoxTV 全部功能，用 Go 后端 + Vue3 前端完整复刻的 Web 应用。
 
+            > 本项目同时是一个可复用的 Go 库：`go get github.com/xxl6097/TVBoxWeb`，内嵌前端，详见仓库 README。
+
             ### 各平台产物
-            - `fanren-linux-amd64.tar.gz` — Linux x86_64
-            - `fanren-linux-arm64.tar.gz` — Linux ARM64
-            - `fanren-darwin-amd64.tar.gz` — macOS Intel
-            - `fanren-darwin-arm64.tar.gz` — macOS Apple Silicon
-            - `fanren-windows-amd64.zip` — Windows x64
-            - `fanren-windows-arm64.zip` — Windows ARM64
+            - `yezhen-linux-amd64.tar.gz` — Linux x86_64
+            - `yezhen-linux-arm64.tar.gz` — Linux ARM64
+            - `yezhen-darwin-amd64.tar.gz` — macOS Intel
+            - `yezhen-darwin-arm64.tar.gz` — macOS Apple Silicon
+            - `yezhen-windows-amd64.zip` — Windows x64
+            - `yezhen-windows-arm64.zip` — Windows ARM64
 
             ### 使用
             解压后直接运行，默认监听 `http://localhost:8090`，首次进入「设置 → 播放源 → 订阅」导入订阅链接即可。

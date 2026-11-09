@@ -1,137 +1,196 @@
-# 夜帧影视 · Web 版（TVBoxWeb）
+# 夜帧影视 · TVBoxWeb
 
 将鸿蒙原生（ArkTS）电视端影视客户端 **TVBoxTV** 全部功能，用 **Go 后端 + Vue3 前端** 完整复刻的 Web 应用。
 
-- **后端**：Golang（标准库 `net/http`，零第三方依赖），单二进制 + 内嵌前端静态资源
-- **前端**：Vue3 + Vite4 + TypeScript + Element Plus + Pinia + Vue Router
-- **播放**：hls.js 播放 HLS/m3u8，`/api/proxy` 视频代理绕开跨域并重写 m3u8 分片地址
-
-> 本应用**不含任何影片内容**，只有界面、协议实现、播放器。看什么取决于你导入的 TVBox 配置（JSON）。
+同时，它也是一个**可复用的 Go 依赖库**：第三方开发者可 `go get` 引用，一行代码在自有应用中启动一个完整、内嵌前端的影视聚合服务。
 
 ---
 
-## 目录结构
+## ✨ 特性
 
-```
-TVBoxWeb/
-├── server/                 # Go 后端
-│   ├── main.go             # 入口：启动服务 + 静态资源 + 定时抓取
-│   ├── go.mod
-│   ├── dist/               # 前端构建产物（npm run build 生成，go:embed 内嵌）
-│   └── internal/
-│       ├── model/          # 数据模型 + 界面常量（对应 Model.ets）
-│       ├── store/          # JSON 文件持久化（对应 Store.ets）
-│       ├── httpc/          # HTTP 客户端：重定向/首包探测/PROPFIND（对应 Http.ets）
-│       ├── cms/            # 苹果CMS 采集协议 JSON/XML（对应 Cms.ets）
-│       ├── resolve/        # 播放地址解析 parses type=1（对应 Resolve.ets）
-│       ├── live/           # 直播源解析 M3U/TXT + 目录树（对应 Live.ets）
-│       ├── liveprobe/      # 直播源测速排行 + 频道探活（对应 LiveProbe.ets）
-│       ├── crawler/        # 定时抓取（对应 Crawler.ets）
-│       ├── quality/        # HLS 画质解析 + 网速实测（对应 Quality.ets）
-│       ├── webdav/         # WebDAV 客户端 + 影视识别（对应 Webdav.ets）
-│       ├── pinyin/         # 拼音首字母 + T9（对应 Pinyin.ets，全量 GB2312 表）
-│       └── api/            # REST API + 视频代理
-└── web/                    # Vue3 前端
-    ├── vite.config.ts      # 代理 /api → :8080，构建输出到 ../server/dist
-    └── src/
-        ├── views/          # 11 个页面（见下）
-        ├── components/     # TopBar / VodCard / VodGrid / TipToast
-        ├── stores/         # app（全局状态）+ player（播放列表单例）
-        ├── utils/          # lines / quality / format
-        ├── api.ts          # 后端 API 客户端 + proxied()
-        ├── types.ts        # 类型（对应 model.go）
-        └── theme.ts        # 主题常量（FongMi/TV leanback 色板）
-```
+- **Go 库 + 内嵌前端**：`go get` 即可用，前端静态资源通过 `go:embed` 内嵌，无外部文件依赖
+- **后端**：Golang 标准库 `net/http` 为主，仅依赖 `gorilla/websocket` + `google/uuid`
+- **前端**：Vue3 + Vite4 + TypeScript + Element Plus + Pinia + Vue Router
+- **播放**：hls.js 播放 HLS/m3u8，`/api/proxy` 视频代理绕开跨域并重写 m3u8 分片地址
+- **功能**：点播 / 直播 / 网盘 / 搜索（含拼音）/ 收藏分组 / 历史 / 倍速 / 字幕 / 连播 / 画中画 / PWA 离线 / 性能监控等
 
-## 功能复刻对照表
+> ⚠️ 本库**不含任何影片内容**，只有界面、协议实现与播放器。看什么取决于你导入的 TVBox 配置（JSON）。
 
-| 模块 | 鸿蒙影视（源） | Web 版（本仓库） |
-|---|---|---|
-| 配置导入 | URL/粘贴 JSON，容错 BOM/注释/`class` | `cms.CleanJSON` 同逻辑 |
-| 订阅 | 一份 JSON 同时带 sites + lives | `POST /api/subscription` |
-| 站源管理 | 开关/可用标注/测速排行 | `/api/sites` `/api/sites/enabled` `/api/sites/speed` |
-| 分类浏览 | 分类胶囊 + 海报网格 + 翻页 + 父分类聚合 | `/api/categories` `/api/vod?children=` |
-| 筛选 | ext.filters | 前端 `parseFilters` + `/api/vod?ext=` |
-| 详情 | 海报/元信息/简介展开/线路/剧集 | `/api/vod/detail` + 前端 `splitLines` |
-| 全局搜索 | 最多 18 站分批并发（每批 6） | `/api/search` |
-| 播放 | AVPlayer 硬解 | `<video>` + hls.js + `/api/proxy` |
-| 播放地址解析 | parses type=1 轮询前 8 个 | `/api/resolve` |
-| 历史/收藏 | 本地持久化 + 进度 | `/api/history` `/api/favorites`（JSON 文件） |
-| 定时抓取 | 6 小时刷新 + 首页「最近更新」 | `crawler` + `/api/crawl` `/api/feed` |
-| 直播 | M3U/TXT 解析 + 三级分组 + 测速 + 换线 | `/api/live/*` |
-| 直播测速 | 可播率 70% + 速度 30% 评分 | `liveprobe` |
-| 画质自适应 | master playlist + 缓冲水位 | hls.js 多档 + 自动/锁定档位 |
-| 跳过片头片尾 | Apple TV 式按钮 + 倒计时 | PlayerView 同逻辑 |
-| 直连播放 | 单地址 | `/direct` |
-| WebDAV 网盘 | PROPFIND + 递归识别影视 | `/api/webdav/*` |
-| 手机扫码录入 | 局域网 TCP 服务 | Web 端浏览器直接输入（无需扫码） |
+---
 
-## 运行
+## 📦 作为 Go 库使用
 
-### 开发模式（前后端分离）
+### 安装
 
 ```bash
-# 1. 启动 Go 后端（:8090）
-cd server && go run . 
-
-# 2. 启动 Vite 前端（:5173，自动代理 /api）
-cd web && npm install && npm run dev
+go get github.com/xxl6097/TVBoxWeb
 ```
 
-浏览器打开 http://localhost:5173 。
+### 最简用法
 
-### 生产模式（单二进制）
+```go
+package main
 
-```bash
-# 1. 构建前端到 server/dist
-cd web && npm install && npm run build
+import (
+	"log"
 
-# 2. 编译 Go（内嵌 dist）
-cd ../server && go build -o tvbox .
+	tvbox "github.com/xxl6097/TVBoxWeb"
+)
 
-# 3. 运行
-./tvbox -addr :8090 -data ./data
-```
-
-浏览器打开 http://localhost:8090 。
-
-> `-addr` 默认 `:8090`（8080 常被 macOS 系统进程占用）；`-data` 指定数据目录，配置/历史/收藏/直播源等都存为 `data/store.json`。
-
-### 跨平台打包（一键产出各平台二进制）
-
-```bash
-./build.sh v1.0.0
-```
-
-产物在 `release/v1.0.0/`，覆盖 6 个平台（前端已内嵌进二进制，单文件运行）：
-
-| 平台 | 产物 |
-|---|---|
-| macOS · Apple Silicon (arm64) | `fanren-macos-arm64.tar.gz` |
-| macOS · Intel (amd64) | `fanren-macos-amd64.tar.gz` |
-| Linux · amd64 | `fanren-linux-amd64.tar.gz` |
-| Linux · arm64 | `fanren-linux-arm64.tar.gz` |
-| Windows · amd64 | `fanren-windows-amd64.zip` |
-| Windows · arm64 | `fanren-windows-arm64.zip` |
-
-> 纯 Go 标准库、`CGO_ENABLED=0`，任意平台可交叉编译；解压后直接运行（默认 http://localhost:8090 ）。
-
-## 首次使用
-
-打开后进入 **设置 → 播放源 → 订阅**，填入一个订阅链接（一份 JSON 同时含点播站源 `sites` 与直播源 `lives`），即可同时更新点播和直播：
-
-```json
-{
-  "name": "订阅源",
-  "sites":  [ /* TVBox 站源，type 0/1/4 协议型 */ ],
-  "parses": [ /* 播放地址解析接口 type=1 */ ],
-  "lives":  [ { "name": "央视", "url": "https://…/iptv.m3u" } ]
+func main() {
+	// 默认监听 :8090，数据存到 ./data 目录
+	if err := tvbox.ListenAndServe(":8090"); err != nil {
+		log.Fatal(err)
+	}
 }
 ```
 
-## 已知边界（与原版一致）
+### 自定义配置
 
-- 爬虫型站源（`type 3`，csp_/jar，背后是 Java 字节码）不支持，站点列表中会标注「需爬虫运行时」。
-- 只支持 http/https；`proxy://` `tvbox://` 等伪协议未实现。
-- 播放格式取决于浏览器：HLS/m3u8/mp4 正常，DTS/TrueHD 音轨大概率无声。
-- 视频地址统一走 `/api/proxy`（含 m3u8 分片重写），绕开跨域。
+```go
+srv, err := tvbox.New(
+	tvbox.WithDataDir("./mydata"),   // 数据目录
+	tvbox.WithLogger(log.Default()),  // 日志器
+)
+if err != nil {
+	log.Fatal(err)
+}
+defer srv.Close()
+
+// 拿完整 Handler（含全部 API + 内嵌前端）
+http.Handle("/", srv.Handler())
+
+log.Fatal(http.ListenAndServe(":8090", nil))
+```
+
+### 嵌入自定义 mux / 框架
+
+`srv.Handler()` 返回标准 `http.Handler`，可挂到任意路由、套中间件，或嵌入 Gin / Echo 等框架：
+
+```go
+srv, _ := tvbox.New()
+handler := srv.Handler()  // 标准 http.Handler
+
+// 套一个日志中间件
+wrapped := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	log.Printf("[%s] %s", r.Method, r.URL.Path)
+	handler.ServeHTTP(w, r)
+})
+http.ListenAndServe(":8090", wrapped)
+```
+
+完整示例见 [`example/`](./example) 目录。
+
+---
+
+## 🔌 库 API
+
+| 函数 | 说明 |
+|------|------|
+| `tvbox.New(opts ...Option) (*Server, error)` | 创建服务器实例 |
+| `tvbox.ListenAndServe(addr string, opts ...Option) error` | 便捷：直接启动并阻塞 |
+| `tvbox.Handler(opts ...Option) (http.Handler, error)` | 便捷：只拿 Handler |
+| `(*Server).Handler() http.Handler` | 返回完整 Handler（API + 前端） |
+| `(*Server).ListenAndServe(addr string) error` | 在指定地址启动并阻塞 |
+| `(*Server).Close() error` | 释放资源 |
+
+**Option 函数式选项：**
+
+| 选项 | 说明 |
+|------|------|
+| `tvbox.WithDataDir(dir string)` | 设置数据目录（默认 `data`） |
+| `tvbox.WithLogger(l *log.Logger)` | 设置日志器（默认 `log.Default()`） |
+
+---
+
+## 🖥️ 作为独立程序使用
+
+### 快速运行
+
+```bash
+./run.sh                 # 一键构建前端 + 编译 + 启动 :8090
+```
+
+或手动：
+
+```bash
+# 1. 构建前端
+cd web && npm install && npm run build && cd ..
+
+# 2. 编译（前端已内嵌）
+go build -o yezhen ./cmd/tvbox
+
+# 3. 运行
+./yezhen -addr :8090 -data ./data
+```
+
+### 命令行参数
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `-addr` | `:8090` | 监听地址 |
+| `-data` | `data` | 数据目录（存 `store.json`） |
+
+### 跨平台打包
+
+```bash
+./build.sh v1.1.0    # 产出 release/v1.1.0/ 下 6 平台压缩包
+```
+
+### Docker
+
+```bash
+docker build -t yezhen .
+docker run -p 8090:8090 yezhen
+```
+
+---
+
+## 📂 目录结构
+
+```
+TVBoxWeb/
+├── tvbox.go                # 库入口（package tvbox）：embed 前端 + Handler/Serve
+├── go.mod / go.sum         # module github.com/xxl6097/TVBoxWeb
+├── cmd/tvbox/main.go       # 独立可执行入口（调用 tvbox 库）
+├── internal/               # 内部实现（不对外暴露）
+│   ├── api/                # HTTP API + 视频代理
+│   ├── store/              # JSON 文件持久化
+│   ├── cms/                # 苹果CMS 采集协议 JSON/XML
+│   ├── resolve/            # 播放地址解析
+│   ├── live/               # 直播源解析 M3U/TXT
+│   ├── liveprobe/          # 直播源测速 + 频道探活
+│   ├── crawler/            # 定时抓取
+│   ├── quality/            # HLS 画质解析 + 网速实测
+│   ├── webdav/             # 网盘（WebDAV）
+│   ├── pinyin/             # 拼音首字母搜索
+│   ├── ws/                 # WebSocket 实时推送
+│   └── metrics/            # 性能指标采集
+├── web/                    # Vue3 前端源码
+├── dist/                   # 前端构建产物（go:embed 内嵌，随库分发）
+├── example/                # 库使用示例
+└── .github/workflows/      # CI：自动编译打包 + 发布 Release
+```
+
+---
+
+## 🚀 开发
+
+```bash
+# 终端 1：后端
+go run ./cmd/tvbox -addr :8090
+
+# 终端 2：前端热更新（Vite 代理 /api → :8090）
+cd web && npm run dev
+# 打开 http://localhost:5173
+```
+
+---
+
+## 📄 免责声明
+
+本项目仅用于技术学习与交流，不含任何影视内容，不提供、不存储、不分发任何版权资源。使用本库时请遵守当地法律法规，勿用于任何侵权用途。因使用本库产生的一切后果由使用者自行承担。
+
+## 📜 License
+
+[MIT](./LICENSE) © 2026 xxl6097

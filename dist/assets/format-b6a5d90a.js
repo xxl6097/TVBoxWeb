@@ -1,0 +1,1 @@
+function n(t){if(t<=0)return"00:00";const o=Math.floor(t/1e3),r=Math.floor(o/3600),e=Math.floor(o%3600/60),f=o%60,i=(e<10?"0":"")+e,s=(f<10?"0":"")+f;return r>0?`${r}:${i}:${s}`:`${i}:${s}`}function u(t){return t<=0?"":t>=1024*1024*1024?(t/1024/1024/1024).toFixed(1)+" GB":t>=1024*1024?(t/1024/1024).toFixed(1)+" MB":t>=1024?(t/1024).toFixed(0)+" KB":t+" B"}export{u as a,n as f};

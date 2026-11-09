@@ -1,39 +1,36 @@
 #!/usr/bin/env bash
 # 夜帧影视 · 跨平台打包脚本
-# 用法：./build.sh [版本号]   （默认 v1.0.0）
+# 用法：./build.sh [版本号]   （默认 v1.1.0）
 # 产出：release/<版本号>/ 下各平台二进制 + 压缩包
 set -euo pipefail
 
 cd "$(dirname "$0")"
 
-VERSION="${1:-v1.0.0}"
+VERSION="${1:-v1.1.0}"
 RELEASE="release/${VERSION}"
 rm -rf "$RELEASE"
 mkdir -p "$RELEASE"
 
-echo "==> 1/3 构建前端 (Vite -> server/dist)"
+echo "==> 1/3 构建前端 (Vite -> dist)"
 (cd web && npm run build)
 
 echo "==> 2/3 交叉编译各平台二进制（内嵌前端，CGO 关闭）"
 # 格式：GOOS/GOARCH:产物名
 PLATFORMS=(
-  "darwin/arm64:fanren-macos-arm64"
-  "darwin/amd64:fanren-macos-amd64"
-  "linux/amd64:fanren-linux-amd64"
-  "linux/arm64:fanren-linux-arm64"
-  "windows/amd64:fanren-windows-amd64.exe"
-  "windows/arm64:fanren-windows-arm64.exe"
+  "darwin/arm64:yezhen-macos-arm64"
+  "darwin/amd64:yezhen-macos-amd64"
+  "linux/amd64:yezhen-linux-amd64"
+  "linux/arm64:yezhen-linux-arm64"
+  "windows/amd64:yezhen-windows-amd64.exe"
+  "windows/arm64:yezhen-windows-arm64.exe"
 )
 
 for entry in "${PLATFORMS[@]}"; do
   IFS=':' read -r pair name <<< "$entry"
   IFS='/' read -r os arch <<< "$pair"
   echo "   编译 $os/$arch -> $name"
-  (
-    cd server
-    CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
-      go build -trimpath -ldflags "-s -w" -o "../$RELEASE/$name" .
-  )
+  CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
+    go build -trimpath -ldflags "-s -w" -o "$RELEASE/$name" ./cmd/tvbox
 done
 
 echo "==> 3/3 打包压缩"
@@ -61,8 +58,8 @@ cat > README.txt <<'EOF'
   -data  data        数据目录（配置/历史/收藏等存为 data/store.json）
 
 示例：
-  ./fanren-linux-amd64 -addr :9000 -data ./data
-  fanren-windows-amd64.exe
+  ./yezhen-linux-amd64 -addr :9000 -data ./data
+  yezhen-windows-amd64.exe
 EOF
 
 cd ../..
