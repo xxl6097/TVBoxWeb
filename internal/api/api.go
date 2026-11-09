@@ -1083,7 +1083,14 @@ func hPeek(w http.ResponseWriter, r *http.Request) {
 func hCrawl(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		ok(w, map[string]any{"summary": store.CrawlSummary(), "last": store.LastCrawlAt(), "running": crawler.IsRunning()})
+		processed, total, running := crawler.Progress()
+		ok(w, map[string]any{
+			"summary":   store.CrawlSummary(),
+			"last":      store.LastCrawlAt(),
+			"running":   running,
+			"processed": processed,
+			"total":     total,
+		})
 	case http.MethodPost:
 		var req struct {
 			Force bool `json:"force"`

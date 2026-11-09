@@ -30,6 +30,8 @@ const loading = ref(true)
 const watchedEp = ref(-1)
 // 已看过的所有集（分集管理）
 const watchedEps = ref<Set<number>>(new Set())
+// 上次播放进度（毫秒），用于续播
+const histPos = ref(0)
 const posterFailed = ref(false)
 
 onMounted(async () => {
@@ -59,6 +61,7 @@ onMounted(async () => {
     if (h) {
       watchedEp.value = h.epIndex
       watchedEps.value = new Set(h.watchedEps?.length ? h.watchedEps : [h.epIndex])
+      histPos.value = h.pos || 0
     }
   } catch {
     /* ignore */
@@ -102,7 +105,7 @@ function toggleFav() {
   })
 }
 
-function play(epIndex: number) {
+function play(epIndex: number, resume = false) {
   if (!vod.value || !lines.value.length) return
   const line = lines.value[curLine.value]
   const realIndex = reverse.value ? line.eps.length - 1 - epIndex : epIndex
@@ -116,6 +119,12 @@ function play(epIndex: number) {
     false,
     false
   )
+  // 续播：播放上次看到的集时，从上次进度继续
+  if (resume && realIndex === watchedEp.value && histPos.value > 0) {
+    player.seek = histPos.value
+  } else {
+    player.seek = 0
+  }
   router.push({
     name: 'play',
     query: {
@@ -133,6 +142,16 @@ function play(epIndex: number) {
       direct: line.direct ? '1' : '0'
     }
   })
+}
+
+// 续播上次进度
+function resumePlay() {
+  if (watchedEp.value < 0) return
+  // 找到上次看的集在显示列表中的位置
+  const line = lines.value[curLine.value]
+  if (!line) return
+  const displayIdx = reverse.value ? line.eps.length - 1 - watchedEp.value : watchedEp.value
+  play(displayIdx, true)
 }
 </script>
 
@@ -181,7 +200,10 @@ function play(epIndex: number) {
         </el-button>
 
         <div class="actions">
-          <el-button type="primary" @click="toggleFav">{{ isFav ? '已收藏' : '收藏' }}</el-button>
+          <el-button v-if="histPos > 0" type="primary" @click="resumePlay">
+            继续播放{{ watchedEp >= 0 ? ' · 第' + (watchedEp + 1) + '集' : '' }}
+          </el-button>
+          <el-button :type="histPos > 0 ? 'default' : 'primary'" @click="toggleFav">{{ isFav ? '已收藏' : '收藏' }}</el-button>
         </div>
       </div>
     </div>

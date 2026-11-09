@@ -380,7 +380,14 @@ async function onImportFile(e: Event) {
           </div>
         </div>
         <div v-else class="empty">
-          {{ selectedGroupId === null ? '还没有收藏内容' : '该分组暂无收藏' }}
+          <p>{{ selectedGroupId === null ? '还没有收藏内容' : '该分组暂无收藏' }}</p>
+          <template v-if="selectedGroupId === null">
+            <p class="empty-sub">在影片详情页点「收藏」，或拖拽到这里</p>
+            <div class="empty-actions">
+              <el-button type="primary" @click="router.push('/vod')">去点播</el-button>
+              <el-button @click="router.push('/search')">去搜索</el-button>
+            </div>
+          </template>
         </div>
       </div>
     </div>
@@ -645,6 +652,8 @@ async function onImportFile(e: Event) {
 }
 
 .empty { text-align: center; padding: 60px 24px; color: var(--dim); }
+.empty-sub { font-size: 13px; margin-top: 8px; }
+.empty-actions { display: flex; gap: 10px; justify-content: center; margin-top: 16px; }
 
 /* ===== 移动端 ===== */
 @media (max-width: 768px) {

@@ -358,7 +358,7 @@ async function initPlayer() {
             return
           }
         }
-        onPlayError()
+        onPlayError(data.details || data.type)
       })
     } else if (vid.canPlayType('application/vnd.apple.mpegurl')) {
       vid.src = src
@@ -443,20 +443,29 @@ function bindVideoEvents(vid: HTMLVideoElement) {
     }
   }
   vid.onerror = () => {
-    onPlayError()
+    onPlayError('mediaError')
   }
   vid.onenterpictureinpicture = () => { isPip.value = true }
   vid.onleavepictureinpicture = () => { isPip.value = false }
 }
 
-function onPlayError() {
+function onPlayError(errKind?: string) {
   if (isLive && liveFail < 3 && player.hasNext) {
     liveFail++
     app.showTip('该频道无法播放，自动换下一个')
     switchEpisode(1)
     return
   }
-  errMsg.value = '播放失败，可能是链接失效或编码不支持'
+  // 按错误类型给出友好提示
+  const tips: Record<string, string> = {
+    networkError: '网络连接失败，请检查网络后点击重试',
+    mediaError: '视频解码失败，可能是编码格式不支持',
+    manifestLoadError: '视频地址失效或已下线',
+    levelLoadError: '视频分片加载失败，源站可能不稳定',
+    fragLoadError: '视频分片加载中断，可能是网络波动',
+    manifestIncompatibleCodecsError: '编码格式不支持当前浏览器',
+  }
+  errMsg.value = tips[errKind || ''] || '播放失败，可能是链接失效或编码不支持'
   showOsd.value = true
 }
 

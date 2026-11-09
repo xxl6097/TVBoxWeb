@@ -144,9 +144,34 @@ async function clearHist() {
   app.showTip('已清空 ' + n + ' 条记录')
 }
 
+// 内容更新进度
+const updating = ref(false)
+const updatePct = ref(0)
+let updateTimer = 0
+
 function refresh() {
+  if (updating.value) return
   api.triggerCrawl().then(() => {
-    app.showTip('已开始更新，稍后刷新即可看到最新')
+    updating.value = true
+    updatePct.value = 0
+    // 轮询进度，直到抓取完成
+    updateTimer = window.setInterval(async () => {
+      try {
+        const r = await api.crawlSummary()
+        if (r.total > 0) {
+          updatePct.value = Math.min(100, Math.round((r.processed / r.total) * 100))
+        }
+        if (!r.running) {
+          clearInterval(updateTimer)
+          updating.value = false
+          updatePct.value = 0
+          await loadFeed()
+          app.showTip(r.summary || '更新完成')
+        }
+      } catch {
+        /* ignore */
+      }
+    }, 800)
   })
 }
 </script>
@@ -207,7 +232,7 @@ function refresh() {
       最近更新
       <span v-if="feed.length" class="count">{{ feed.length }} 条</span>
       <span v-if="feedSummary" class="summary">{{ feedSummary }}</span>
-      <span class="more" @click="refresh">更新 ›</span>
+      <span class="more" :class="{ updating }" @click="refresh">{{ updating ? `更新中 ${updatePct}%` : '更新 ›' }}</span>
     </div>
     <VodGrid :vods="feed" :loading="loading" />
     <div v-if="!loading && !feed.length" class="empty">
@@ -245,6 +270,10 @@ function refresh() {
 .cat-chip:hover {
   color: #fff;
   background: var(--card-hi);
+}
+.more.updating {
+  color: var(--live, #ff6b6b);
+  cursor: default;
 }
 .continue-row {
   display: grid;

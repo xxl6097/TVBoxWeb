@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
+import { useRouter, useRoute } from 'vue-router'
 import { api } from '@/api'
 import { useAppStore } from '@/stores/app'
 import { isOffline } from '@/pwa'
@@ -7,10 +8,51 @@ import TipToast from '@/components/TipToast.vue'
 import PrivacyPanel from '@/components/PrivacyPanel.vue'
 
 const app = useAppStore()
+const router = useRouter()
+const route = useRoute()
 
 const checking = ref(true)
 const agreed = ref(false)
 const refused = ref(false)
+
+// ===== 移动端左滑返回手势 =====
+let edgeStartX = 0
+let edgeStartY = 0
+let edgeTracking = false
+
+function onTouchStart(e: TouchEvent) {
+  if (window.innerWidth > 640) return
+  const t = e.touches[0]
+  // 只从屏幕左边缘（<28px）开始追踪
+  if (t.clientX < 28) {
+    edgeTracking = true
+    edgeStartX = t.clientX
+    edgeStartY = t.clientY
+  }
+}
+
+function onTouchMove(e: TouchEvent) {
+  if (!edgeTracking) return
+  const t = e.touches[0]
+  const dx = t.clientX - edgeStartX
+  const dy = t.clientY - edgeStartY
+  // 明显横向且向右滑动时，阻止页面横向滚动
+  if (dx > 0 && Math.abs(dx) > Math.abs(dy)) {
+    e.preventDefault()
+  }
+}
+
+function onTouchEnd(e: TouchEvent) {
+  if (!edgeTracking) return
+  edgeTracking = false
+  const t = e.changedTouches[0]
+  const dx = t.clientX - edgeStartX
+  const dy = t.clientY - edgeStartY
+  // 右滑超过 70px 且横向为主 → 返回（播放页有自己的手势系统，跳过）
+  if (dx > 70 && Math.abs(dx) > Math.abs(dy) * 1.5 && route.name !== 'play') {
+    router.back()
+  }
+}
 
 onMounted(async () => {
   await app.loadStatus()
@@ -21,6 +63,16 @@ onMounted(async () => {
     agreed.value = true
   }
   checking.value = false
+  // 全局左滑返回手势
+  window.addEventListener('touchstart', onTouchStart, { passive: true })
+  window.addEventListener('touchmove', onTouchMove, { passive: false })
+  window.addEventListener('touchend', onTouchEnd, { passive: true })
+})
+
+onUnmounted(() => {
+  window.removeEventListener('touchstart', onTouchStart)
+  window.removeEventListener('touchmove', onTouchMove)
+  window.removeEventListener('touchend', onTouchEnd)
 })
 
 async function agree() {

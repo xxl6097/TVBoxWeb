@@ -189,7 +189,7 @@ export const api = {
   liveProbeChannels: (channels: Channel[]) => post<{ dead: number; total: number }>('/live/probe/channels', { channels }),
   peek: (url: string) => get<{ alive: boolean }>(`/peek?url=${encodeURIComponent(url)}`),
 
-  crawlSummary: () => get<{ summary: string; last: number; running: boolean }>('/crawl'),
+  crawlSummary: () => get<{ summary: string; last: number; running: boolean; processed: number; total: number }>('/crawl'),
   triggerCrawl: () => post('/crawl', { force: true }),
   feed: () => get<{ feed: Vod[]; deadKeys: string[]; summary: string }>('/feed'),
   qualityMaster: (url: string) => post<QLevel[]>('/quality/master', { url }),

@@ -82,14 +82,23 @@ type CrawlResult struct {
 }
 
 var (
-	mu      sync.Mutex
-	running bool
+	mu                sync.Mutex
+	running           bool
+	progressProcessed int
+	progressTotal     int
 )
 
 func IsRunning() bool {
 	mu.Lock()
 	defer mu.Unlock()
 	return running
+}
+
+// Progress 返回抓取进度（已处理数/总数/是否运行中）。
+func Progress() (processed, total int, running bool) {
+	mu.Lock()
+	defer mu.Unlock()
+	return progressProcessed, progressTotal, running
 }
 
 // Run 立即跑一轮；force=false 时受 6 小时间隔限制。
@@ -125,6 +134,17 @@ func Run(force bool) CrawlResult {
 		res.Msg = "还没有站源，请先在「设置 → 播放源 → 订阅」导入"
 		return res
 	}
+
+	// 初始化进度
+	mu.Lock()
+	progressTotal = len(sites)
+	progressProcessed = 0
+	mu.Unlock()
+	defer func() {
+		mu.Lock()
+		progressProcessed = progressTotal
+		mu.Unlock()
+	}()
 
 	var bag []model.Vod
 	var dead []string
@@ -174,6 +194,10 @@ func Run(force bool) CrawlResult {
 				dead = append(dead, s.Key)
 				bagMu.Unlock()
 			}
+			// 更新进度
+			mu.Lock()
+			progressProcessed++
+			mu.Unlock()
 		}
 	}
 
