@@ -92,6 +92,8 @@ func Handler() *http.ServeMux {
 	mux.HandleFunc("/api/live/url", hLiveURL)
 	mux.HandleFunc("/api/live/sources", hLiveSources)
 	mux.HandleFunc("/api/live/channels", hLiveChannels)
+	mux.HandleFunc("/api/live/favs", hLiveFavs)
+	mux.HandleFunc("/api/live/fav/toggle", hLiveFavToggle)
 	mux.HandleFunc("/api/live/rank/one", hLiveRankOne)
 	mux.HandleFunc("/api/live/rank", hLiveRank)
 	mux.HandleFunc("/api/live/probe/channels", hLiveProbeChannels)
@@ -897,6 +899,22 @@ func hLiveSources(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// hLiveFavs GET: 返回收藏的直播频道列表。
+func hLiveFavs(w http.ResponseWriter, r *http.Request) {
+	ok(w, store.LiveFavs())
+}
+
+// hLiveFavToggle POST: 切换直播频道收藏状态。
+func hLiveFavToggle(w http.ResponseWriter, r *http.Request) {
+	var ch model.Channel
+	if err := body(r, &ch); err != nil || ch.Name == "" || ch.URL == "" {
+		fail(w, 400, "缺少频道信息")
+		return
+	}
+	added := store.ToggleLiveFav(ch)
+	ok(w, map[string]any{"added": added})
+}
+
 func hLiveChannels(w http.ResponseWriter, r *http.Request) {
 	u := q(r, "url")
 	if u == "" {
@@ -1020,33 +1038,54 @@ func hPrefs(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		ok(w, map[string]any{
 			"qPref":      store.QPref(),
+			"speedPref":  store.SpeedPref(),
 			"introSkip":  store.IntroSkipSec(),
 			"outroSkip":  store.OutroSkipSec(),
 			"tapSound":   store.TapSound(),
 			"tapVibrate": store.TapVibrate(),
 		})
 	case http.MethodPost:
-		var req map[string]int
+		var req map[string]any
 		if err := body(r, &req); err != nil {
 			fail(w, 400, "参数错误")
 			return
 		}
 		if v, ok := req["qPref"]; ok {
-			store.SetQPref(v)
+			store.SetQPref(int(toFloat(v)))
+		}
+		if v, ok := req["speedPref"]; ok {
+			store.SetSpeedPref(toFloat(v))
 		}
 		if v, ok := req["introSkip"]; ok {
-			store.SetIntroSkipSec(v)
+			store.SetIntroSkipSec(int(toFloat(v)))
 		}
 		if v, ok := req["outroSkip"]; ok {
-			store.SetOutroSkipSec(v)
+			store.SetOutroSkipSec(int(toFloat(v)))
 		}
 		if v, ok := req["tapSound"]; ok {
-			store.SetTapSound(v)
+			store.SetTapSound(int(toFloat(v)))
 		}
 		if v, ok := req["tapVibrate"]; ok {
-			store.SetTapVibrate(v)
+			store.SetTapVibrate(int(toFloat(v)))
 		}
 		ok(w, map[string]any{"ok": true})
+	}
+}
+
+// toFloat 把 JSON 反序列化出的数值统一转成 float64。
+func toFloat(v any) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case int:
+		return float64(n)
+	case int64:
+		return float64(n)
+	case json.Number:
+		f, _ := n.Float64()
+		return f
+	default:
+		return 0
 	}
 }
 

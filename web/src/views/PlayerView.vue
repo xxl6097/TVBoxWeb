@@ -174,10 +174,15 @@ function syncEpLabel() {
 }
 
 onMounted(async () => {
-  const prefs = await api.prefs().catch(() => ({ qPref: 0, introSkip: 0, outroSkip: 0, tapSound: 1, tapVibrate: 1 }))
+  const prefs = await api.prefs().catch(() => ({ qPref: 0, speedPref: 1, introSkip: 0, outroSkip: 0, tapSound: 1, tapVibrate: 1 }))
   qCap = prefs.qPref || 0
   introSkipSec.value = prefs.introSkip || 0
   outroSkipSec.value = prefs.outroSkip || 0
+  // 应用倍速偏好（持久化）
+  const sp = prefs.speedPref || 1
+  if (PLAYBACK_RATES.includes(sp)) {
+    playbackRate.value = sp
+  }
   syncEpLabel()
   await resolveUrl()
   resolving.value = false
@@ -362,6 +367,11 @@ async function initPlayer() {
     vid.src = src
   }
   bindVideoEvents(vid)
+  // 应用倍速偏好（已从 prefs 读取）
+  if (playbackRate.value !== 1) {
+    vid.playbackRate = playbackRate.value
+    if (hls) hls.config.playbackRate = playbackRate.value
+  }
   vid.play().catch(() => {})
 }
 
@@ -779,6 +789,8 @@ function setPlaybackRate(rate: number) {
   vid.playbackRate = rate
   // 同步到 HLS 配置（防止切换线路时重置）
   if (hls) hls.config.playbackRate = rate
+  // 持久化倍速偏好
+  api.setPrefs({ speedPref: rate }).catch(() => {})
   app.showTip(`${rate}x 倍速播放`)
 }
 
@@ -799,6 +811,9 @@ let touchLastTap = 0
 let touchTapTimer = 0
 const gestureHint = ref('')
 let gestureTimer = 0
+// 模拟亮度：遮罩不透明度 0~0.7（Web 无法调系统亮度，用黑色遮罩模拟）
+const brightness = ref(0)
+let touchStartBrightness = 0
 
 function showGestureHint(msg: string) {
   gestureHint.value = msg
@@ -813,6 +828,7 @@ function onTouchStart(e: TouchEvent) {
   touchStartY = t.clientY
   touchStartVol = volume.value
   touchStartMs = curMs.value
+  touchStartBrightness = brightness.value
   touchDir = ''
 }
 
@@ -853,9 +869,13 @@ function onTouchMove(e: TouchEvent) {
     if (videoEl.value) videoEl.value.volume = muted.value ? 0 : newVol
     showGestureHint(`音量 ${Math.round(newVol * 100)}%`)
   } else if (touchDir === 'vertical-left') {
-    // 左半屏上下：预留亮度（Web API 不支持屏幕亮度，显示提示）
+    // 左半屏上下：模拟亮度（黑色遮罩，Web 无法调系统屏幕亮度）
     e.preventDefault()
-    showGestureHint('亮度调节请用系统控制中心')
+    const delta = -dy / 300 // 上划变亮（遮罩变淡）
+    const newB = Math.min(0.7, Math.max(0, touchStartBrightness + delta))
+    brightness.value = newB
+    const pct = Math.round((1 - newB / 0.7) * 100)
+    showGestureHint(`亮度 ${pct}%`)
   }
 }
 
@@ -1268,6 +1288,9 @@ onUnmounted(() => {
       @touchend="onTouchEnd"
     >
       <video ref="videoEl" class="video" :style="{ objectFit: scaleFit }"></video>
+
+      <!-- 模拟亮度遮罩（左滑调节，覆盖在视频上方） -->
+      <div class="brightness-mask" :style="{ opacity: brightness }"></div>
 
       <!-- 手势提示 -->
       <div v-if="gestureHint" class="m-gesture-hint">{{ gestureHint }}</div>
@@ -1975,5 +1998,15 @@ onUnmounted(() => {
   pointer-events: none;
   z-index: 20;
   white-space: nowrap;
+}
+
+/* ===== 模拟亮度遮罩 ===== */
+.brightness-mask {
+  position: absolute;
+  inset: 0;
+  background: #000;
+  pointer-events: none;
+  z-index: 5;
+  transition: opacity 0.1s;
 }
 </style>

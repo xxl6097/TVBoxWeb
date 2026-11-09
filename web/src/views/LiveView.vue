@@ -39,6 +39,34 @@ const siteHealthStatus = ref<Map<string, HealthUpdate>>(new Map())
 const flatChannels = ref<Channel[]>([])
 const channelIndex = ref<Map<string, Channel[]>>(new Map())
 
+// ===== 直播频道收藏 =====
+const liveFavs = ref<Channel[]>([])
+const showFavs = ref(false) // 是否处于「我的频道」视图
+const favKeys = computed(() => new Set(liveFavs.value.map((c) => c.name + '|' + c.url)))
+
+function isFav(ch: Channel): boolean {
+  return favKeys.value.has(ch.name + '|' + ch.url)
+}
+
+async function toggleFav(ch: Channel) {
+  const r = await api.toggleLiveFav(ch)
+  liveFavs.value = await api.liveFavs()
+  app.showTip(r.added ? `已收藏「${ch.name}」` : `已取消收藏「${ch.name}」`)
+}
+
+function showMyFavs() {
+  showFavs.value = true
+  filter.value = ''
+  selectedPath.value = []
+}
+
+// 我的频道视图下的频道列表（按收藏顺序）
+const favChannels = computed<Channel[]>(() => {
+  if (!filter.value.trim()) return liveFavs.value
+  const kw = filter.value.trim().toLowerCase()
+  return liveFavs.value.filter((c) => c.name.toLowerCase().includes(kw))
+})
+
 onMounted(async () => {
   sources.value = await api.liveSources()
   const u = (await api.liveUrl()).url
@@ -46,7 +74,9 @@ onMounted(async () => {
     currentUrl.value = u
     await loadChannels()
   }
-  
+  // 加载收藏的直播频道
+  liveFavs.value = await api.liveFavs().catch(() => [])
+
   // 订阅 WebSocket 健康度更新
   const ws = getWSClient()
   ws.onHealth((update: HealthUpdate) => {
@@ -131,6 +161,7 @@ function collect(n: LiveDir, out: Channel[]) {
 
 function selectGroup(path: string[]) {
   selectedPath.value = path
+  showFavs.value = false
 }
 
 function pathLabel(): string {
@@ -139,7 +170,7 @@ function pathLabel(): string {
 }
 
 function playChannel(ch: Channel) {
-  const list = channels.value
+  const list = showFavs.value ? favChannels.value : channels.value
   const idx = list.findIndex((c) => c.name === ch.name && c.url === ch.url)
   player.set(
     list.map((c) => ({ name: c.name, url: c.url, urls: c.urls })),
@@ -323,14 +354,18 @@ function getSiteHealth(name: string): HealthUpdate | null {
     <div v-else class="live-body" v-loading="loading">
       <!-- 左分组 -->
       <div class="groups">
-        <div class="group" :class="{ active: !selectedPath.length }" @click="selectGroup([])">
+        <div class="group" :class="{ active: !showFavs && !selectedPath.length }" @click="selectGroup([])">
           全部频道
+        </div>
+        <div class="group fav-group" :class="{ active: showFavs }" @click="showMyFavs">
+          <span class="fav-star">⭐</span> 我的频道
+          <span v-if="liveFavs.length" class="cnt">{{ liveFavs.length }}</span>
         </div>
         <template v-if="root">
           <div v-for="g in root.children" :key="g.name">
             <div
               class="group"
-              :class="{ active: selectedPath.length === 1 && selectedPath[0] === g.name }"
+              :class="{ active: !showFavs && selectedPath.length === 1 && selectedPath[0] === g.name }"
               @click="selectGroup([g.name])"
             >
               {{ g.name }} <span class="cnt">{{ g.count }}</span>
@@ -339,7 +374,7 @@ function getSiteHealth(name: string): HealthUpdate | null {
               v-for="sub in g.children"
               :key="sub.name"
               class="group sub"
-              :class="{ active: selectedPath.length === 2 && selectedPath[0] === g.name && selectedPath[1] === sub.name }"
+              :class="{ active: !showFavs && selectedPath.length === 2 && selectedPath[0] === g.name && selectedPath[1] === sub.name }"
               @click="selectGroup([g.name, sub.name])"
             >
               {{ sub.name }} <span class="cnt">{{ sub.count }}</span>
@@ -358,14 +393,19 @@ function getSiteHealth(name: string): HealthUpdate | null {
             placeholder="搜索频道（如 CCTV / 卫视）"
             style="width: 260px"
           />
-          <span v-if="filter" class="ch-search-count">{{ channels.length }} 台</span>
+          <span v-if="filter" class="ch-search-count">{{ (showFavs ? favChannels : channels).length }} 台</span>
         </div>
         <!-- 加载中：骨架屏 -->
         <SkeletonList v-if="loading" type="channel" :count="30" />
+        <!-- 我的频道空态 -->
+        <div v-else-if="showFavs && !liveFavs.length" class="empty">
+          <p>还没有收藏的频道</p>
+          <p class="empty-sub">点频道右侧的 ⭐ 即可收藏常用频道</p>
+        </div>
         <!-- 频道列表 -->
         <template v-else>
           <div
-            v-for="ch in channels"
+            v-for="ch in (showFavs ? favChannels : channels)"
             :key="ch.name + ch.url"
             class="channel"
             :class="{ dead: isDead(ch) }"
@@ -373,6 +413,12 @@ function getSiteHealth(name: string): HealthUpdate | null {
           >
             <span class="ch-name">{{ ch.name }}</span>
             <span v-if="ch.urls.length > 1" class="ch-alts">{{ ch.urls.length }} 线路</span>
+            <span
+              class="ch-fav"
+              :class="{ on: isFav(ch) }"
+              :title="isFav(ch) ? '取消收藏' : '收藏频道'"
+              @click.stop="toggleFav(ch)"
+            >{{ isFav(ch) ? '★' : '☆' }}</span>
           </div>
         </template>
       </div>
@@ -521,10 +567,34 @@ function getSiteHealth(name: string): HealthUpdate | null {
   font-size: 11px;
   color: var(--dim);
 }
+.ch-fav {
+  font-size: 15px;
+  color: var(--dim);
+  cursor: pointer;
+  padding: 0 4px;
+  transition: color 0.14s, transform 0.14s;
+}
+.ch-fav:hover {
+  transform: scale(1.2);
+}
+.ch-fav.on {
+  color: #ffd54f;
+}
+.fav-group .fav-star {
+  font-size: 12px;
+}
+.fav-group.active {
+  color: #ffd54f;
+}
 .empty {
+  grid-column: 1 / -1;
   text-align: center;
   padding: 80px 24px;
   color: var(--dim);
+}
+.empty-sub {
+  font-size: 12px;
+  margin-top: 8px;
 }
 .speed-sub {
   font-size: 13px;

@@ -182,6 +182,8 @@ export const api = {
     get<{ root: LiveDir; groups: ChannelGroup[]; url: string }>(
       `/live/channels${url ? `?url=${encodeURIComponent(url)}` : ''}`
     ),
+  liveFavs: () => get<Channel[]>('/live/favs'),
+  toggleLiveFav: (ch: Channel) => post<{ added: boolean }>('/live/fav/toggle', ch),
   liveRankOne: (name: string, url: string) => post<LiveScore>('/live/rank/one', { name, url }),
   liveRank: (items: LiveScore[]) => post<LiveScore[]>('/live/rank', { items }),
   liveProbeChannels: (channels: Channel[]) => post<{ dead: number; total: number }>('/live/probe/channels', { channels }),
@@ -192,7 +194,7 @@ export const api = {
   feed: () => get<{ feed: Vod[]; deadKeys: string[]; summary: string }>('/feed'),
   qualityMaster: (url: string) => post<QLevel[]>('/quality/master', { url }),
 
-  prefs: () => get<{ qPref: number; introSkip: number; outroSkip: number; tapSound: number; tapVibrate: number }>('/prefs'),
+  prefs: () => get<{ qPref: number; speedPref: number; introSkip: number; outroSkip: number; tapSound: number; tapVibrate: number }>('/prefs'),
   setPrefs: (p: Record<string, number>) => post('/prefs', p),
 
   webdavSources: () => get<WebdavSource[]>('/webdav/sources'),

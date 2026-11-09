@@ -26,7 +26,9 @@ type Data struct {
 	KwHist       string               `json:"kwHist"`
 	LiveURL      string               `json:"liveUrl"`
 	SubLives     []model.RawLive      `json:"subLives"`
+	LiveFavs     []model.Channel      `json:"liveFavs"` // 直播频道收藏
 	QPref        int                  `json:"qPref"`
+	SpeedPref    float64              `json:"speedPref"` // 播放倍速偏好（0=未设置，用 1.0）
 	IntroSkip    int                  `json:"introSkip"`
 	OutroSkip    int                  `json:"outroSkip"`
 	TapSound     int                  `json:"tapSound"`
@@ -667,10 +669,57 @@ func SetLiveURL(u string)   { mu.Lock(); data.LiveURL = u; mu.Unlock(); flush() 
 func SubLives() []model.RawLive { return data.SubLives }
 func SetSubLives(list []model.RawLive) { mu.Lock(); data.SubLives = list; mu.Unlock(); flush() }
 
-// ---------- 画质 / 跳过 / 反馈 ----------
+// ---------- 直播频道收藏 ----------
+
+// LiveFavs 返回收藏的直播频道列表。
+func LiveFavs() []model.Channel {
+	mu.Lock()
+	defer mu.Unlock()
+	out := make([]model.Channel, len(data.LiveFavs))
+	copy(out, data.LiveFavs)
+	return out
+}
+
+// ToggleLiveFav 切换直播频道收藏状态，返回 true 表示已收藏，false 表示已取消。
+// 频道用 Name+URL 作为唯一标识。
+func ToggleLiveFav(ch model.Channel) bool {
+	mu.Lock()
+	added := true
+	var out []model.Channel
+	for _, f := range data.LiveFavs {
+		if f.Name == ch.Name && f.URL == ch.URL {
+			added = false // 已存在，移除
+			continue
+		}
+		out = append(out, f)
+	}
+	if added {
+		out = append([]model.Channel{ch}, out...)
+	}
+	data.LiveFavs = out
+	mu.Unlock()
+	flush()
+	return added
+}
+
+// IsLiveFav 判断频道是否已收藏。
+func IsLiveFav(name, url string) bool {
+	mu.Lock()
+	defer mu.Unlock()
+	for _, f := range data.LiveFavs {
+		if f.Name == name && f.URL == url {
+			return true
+		}
+	}
+	return false
+}
+
+// ---------- 画质 / 倍速 / 跳过 / 反馈 ----------
 
 func QPref() int            { return data.QPref }
 func SetQPref(v int)        { mu.Lock(); data.QPref = v; mu.Unlock(); flush() }
+func SpeedPref() float64    { if data.SpeedPref <= 0 { return 1.0 }; return data.SpeedPref }
+func SetSpeedPref(v float64) { mu.Lock(); data.SpeedPref = v; mu.Unlock(); flush() }
 func IntroSkipSec() int     { return data.IntroSkip }
 func SetIntroSkipSec(v int) { mu.Lock(); data.IntroSkip = v; mu.Unlock(); flush() }
 func OutroSkipSec() int     { return data.OutroSkip }
