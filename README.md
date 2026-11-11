@@ -260,6 +260,20 @@ TVBoxWeb/
 
 ---
 
+## 🆕 v1.9.1 · 修复进度条拖不动
+
+- **现象**：进度条按住拖动没反应，所有文件都这样（不只是 MKV）。
+- **根因**：`pointermove` / `pointerup` 绑在进度条元素自己身上，靠 `setPointerCapture` 兜底。但进度条只有 ~26px 高，拖快一点指针就离开元素；一旦捕获失败或元素被重渲染，`pointermove`/`pointerup` 就再也收不到 —— 表现为「拖不动」。
+- **修复**：按下时把 `pointermove` / `pointerup` / `pointercancel` **绑到 window**，松手后立即移除。这样指针移到哪里都能跟住。
+- **顺带**：
+  - 三处进度条（桌面 1 + 移动端 2）改用**函数式 ref**（`setProgressEl`）——同名 `ref="xxx"` 在移动端模板里会互相覆盖，取到错元素。
+  - 拖动落点、跳过片头统一走 `applySeek()`，转封装模式（MKV）也能正常拖。
+  - 加 `?debug=1` 诊断开关，打印 `[seek] down/up` 便于以后排查。
+- **防回归**：新增 `web/scripts/check-seek.cjs`（10 项静态断言），接入 CI。已验证：回退修复后 6 项失败。
+- 另用 jsdom 实测确认：指针移出元素后 window 仍能收到 `pointermove`/`pointerup`，拖动比例与松手结果都正确。
+
+---
+
 ## 🆕 v1.9.0 · MKV 等容器转封装播放（需要 ffmpeg）
 
 ### 为什么之前的版本「能播」，现在「不行」

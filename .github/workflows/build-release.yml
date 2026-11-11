@@ -87,6 +87,10 @@ jobs:
         working-directory: web
         run: npm run check:wd-auth
 
+      - name: 前端回归检查（进度条拖拽）
+        working-directory: web
+        run: npm run check:seek
+
       - name: 交叉编译后端（内嵌前端）
         env:
           GOOS: ${{ matrix.os }}

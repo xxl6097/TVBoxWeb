@@ -8,7 +8,8 @@
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "check:panel": "node scripts/check-panel.cjs",
-    "check:wd-auth": "node scripts/check-wd-auth.cjs"
+    "check:wd-auth": "node scripts/check-wd-auth.cjs",
+    "check:seek": "node scripts/check-seek.cjs"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.1",

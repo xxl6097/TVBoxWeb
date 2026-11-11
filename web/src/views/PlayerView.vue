@@ -788,6 +788,15 @@ function onMouseMove() {
 
 const dragging = ref(false)
 const previewMs = ref(-1)
+// 进度条 DOM 引用：拖拽时用它算比例（window 监听拿不到 currentTarget）。
+// 用函数式 ref 而不是 ref="xxx"：桌面上有一个进度条，移动端模板里有两处，
+// 同名 ref 只会保留最后一个，容易取错元素。
+const progressEl = ref<HTMLElement>()
+function setProgressEl(el: any) {
+  if (el instanceof HTMLElement) progressEl.value = el
+}
+// ?debug=1 打开拖拽诊断日志
+const DEBUG = route.query.debug === '1'
 
 function ratioFromEvent(e: PointerEvent): number {
   const el = e.currentTarget as HTMLElement
@@ -796,31 +805,66 @@ function ratioFromEvent(e: PointerEvent): number {
 }
 
 function onProgressDown(e: PointerEvent) {
+  if (DEBUG) console.log('[seek] down', { prepared: prepared.value, dur: durMs.value, live: isLive })
   if (!prepared.value || durMs.value <= 0 || isLive) return
+  e.preventDefault()
   dragging.value = true
   previewMs.value = durMs.value * ratioFromEvent(e)
-  ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+
+  // move/up 绑到 window 而不是进度条自己：
+  // 进度条只有 ~26px 高，拖快一点指针就跑出去了。虽然 setPointerCapture
+  // 理论上能兜住，但元素被重渲染、或在某些浏览器里捕获失败时，
+  // 一旦移出元素就再也收不到 pointermove/pointerup，表现为「拖不动」。
+  // 绑 window 后无论指针移到哪里都能跟住，这是最稳的做法。
+  window.addEventListener('pointermove', onProgressMove, { passive: true })
+  window.addEventListener('pointerup', onProgressUp, { passive: true })
+  window.addEventListener('pointercancel', onProgressCancel, { passive: true })
+}
+
+function ratioFromPoint(clientX: number, el: HTMLElement): number {
+  const rect = el.getBoundingClientRect()
+  if (rect.width <= 0) return 0
+  return Math.min(1, Math.max(0, (clientX - rect.left) / rect.width))
 }
 
 function onProgressMove(e: PointerEvent) {
   if (!dragging.value) return
-  previewMs.value = durMs.value * ratioFromEvent(e)
+  const el = progressEl.value
+  if (!el) return
+  previewMs.value = durMs.value * ratioFromPoint(e.clientX, el)
+}
+
+function onProgressCancel() {
+  // 被系统手势/来电等打断：撤销拖动，不改播放位置
+  if (!dragging.value) return
+  dragging.value = false
+  previewMs.value = -1
+  detachProgressListeners()
+}
+
+function detachProgressListeners() {
+  window.removeEventListener('pointermove', onProgressMove)
+  window.removeEventListener('pointerup', onProgressUp)
+  window.removeEventListener('pointercancel', onProgressCancel)
 }
 
 function onProgressUp(e: PointerEvent) {
+  if (DEBUG) console.log('[seek] up', { dragging: dragging.value, preview: previewMs.value })
   if (!dragging.value) return
   dragging.value = false
+  detachProgressListeners()
+
   const t = previewMs.value / 1000
   if (videoEl.value && t >= 0 && durMs.value > 0) {
-    // 方案：立即更新 UI 进度条，给用户反馈
-    videoEl.value.currentTime = t
+    // 统一走 applySeek：普通流直接改 currentTime，转封装流要带 seek 重新起转。
+    applySeek(t)
     curMs.value = previewMs.value
-    
+
     // 三层防抖：只在 5s 间隔后才真正落盘进度记录
     clearTimeout(seekPendingTimer)
     const now = Date.now()
     const timeSinceLastSeek = now - lastSeekMs
-    
+
     if (timeSinceLastSeek >= SEEK_THROTTLE) {
       // 距上次 seek 已超过 5s，直接落盘
       lastSeekMs = now
@@ -1184,7 +1228,8 @@ function doSkip(kind: string) {
     introDone = true
     const skipMs = introSkipSec.value * 1000
     if (videoEl.value && prepared.value && skipMs > 0) {
-      videoEl.value.currentTime = skipMs / 1000
+      // 同样要走 applySeek：转封装流直接改 currentTime 无效
+      applySeek(skipMs / 1000)
       curMs.value = skipMs
     }
     app.showTip('已跳过片头 ' + fmtSec(introSkipSec.value))
@@ -1295,7 +1340,7 @@ onUnmounted(() => {
         <span class="osd-title">{{ title }}</span>
         <span class="osd-meta">{{ epLabel }} {{ via ? '· ' + via : '' }}</span>
       </div>
-      <div class="osd-progress" @pointerdown="onProgressDown" @pointermove="onProgressMove" @pointerup="onProgressUp">
+      <div :ref="setProgressEl" class="osd-progress" @pointerdown="onProgressDown">
         <div class="progress-track">
           <div class="progress-fill" :style="{ width: (dragging ? (previewMs / durMs) * 100 : progressPct) + '%' }"></div>
         </div>
@@ -1408,7 +1453,7 @@ onUnmounted(() => {
           <button class="m-icon-btn" @click="toggleFullscreen">⤓</button>
         </div>
         <div class="m-fs-bottom">
-          <div class="m-progress-wrap" @pointerdown="onProgressDown" @pointermove="onProgressMove" @pointerup="onProgressUp">
+          <div :ref="setProgressEl" class="m-progress-wrap" @pointerdown="onProgressDown">
             <div class="m-progress-track">
               <div class="m-progress-fill" :style="{ width: (dragging ? (previewMs / durMs) * 100 : progressPct) + '%' }"></div>
             </div>
@@ -1450,7 +1495,7 @@ onUnmounted(() => {
       <!-- 进度条 -->
       <div v-if="!isLive" class="m-progress-row">
         <span class="m-time-sm">{{ fmtMs(curMs) }}</span>
-        <div class="m-progress-wrap" @pointerdown="onProgressDown" @pointermove="onProgressMove" @pointerup="onProgressUp">
+        <div :ref="setProgressEl" class="m-progress-wrap" @pointerdown="onProgressDown">
           <div class="m-progress-track">
             <div class="m-progress-fill" :style="{ width: (dragging ? (previewMs / durMs) * 100 : progressPct) + '%' }"></div>
           </div>
