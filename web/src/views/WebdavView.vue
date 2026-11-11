@@ -70,6 +70,24 @@ function authOf(src: WebdavSource): string {
   return b64Utf8(`${src.user}:${src.pass}`)
 }
 
+/**
+ * 取播放用的 Basic Auth。
+ *
+ * 不能用列表里拿到的 pass：GET /webdav/sources 出于安全返回掩码 ******，
+ * 拿它拼认证会被上游 401（这就是「加了登录后网盘视频播不了」的直接原因——
+ * 登录会清 IndexedDB，缓存里那份未掩码的旧数据没了）。
+ * 改为向服务端按 id 换真实凭据。
+ */
+async function authOfSrc(src: WebdavSource): Promise<string> {
+  try {
+    const r = await api.webdavAuth(src.id)
+    if (r?.auth) return r.auth
+  } catch {
+    /* 回退到本地拼接（无密码或旧版后端） */
+  }
+  return src.pass && src.pass !== '******' ? authOf(src) : ''
+}
+
 // ---------- 源管理 ----------
 
 function openForm(src?: WebdavSource) {
@@ -214,12 +232,12 @@ function openEp(vod: WebdavVod) {
   epOpen.value = true
 }
 
-function playEp(vod: WebdavVod, idx: number) {
+async function playEp(vod: WebdavVod, idx: number) {
   if (idx < 0 || idx >= vod.eps.length) return
   // 交给播放列表，剧集可切上/下一集
   const eps = vod.eps.map((e, i) => ({ name: epNameOf(vod, e, i), url: e.url, urls: [e.url] }))
   player.set(eps, idx, vod.name, false, true)
-  player.header = { auth: authOf(cur.value) }
+  player.header = { auth: await authOfSrc(cur.value) }
   player.seek = 0
   player.wdSrcId = cur.value.id
   player.wdSrcName = cur.value.name
@@ -267,7 +285,7 @@ async function continueWatch(h: WdHistory) {
     title = h.vodName + ' ' + h.epName
   }
   player.set(eps, startIdx, h.vodName, false, true)
-  player.header = { auth: authOf(src) }
+  player.header = { auth: await authOfSrc(src) }
   player.seek = h.pos
   player.wdSrcId = src.id
   player.wdSrcName = src.name

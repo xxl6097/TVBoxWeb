@@ -2,6 +2,7 @@
 package api
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -34,7 +35,7 @@ import (
 
 // 版本信息（通过 ldflags -X 注入，默认值兜底）。
 var (
-	AppVersion = "v1.9.2"
+	AppVersion = "v1.9.3"
 	BuildTime  = "unknown"
 )
 
@@ -163,6 +164,8 @@ func Handler() *http.ServeMux {
 	mux.HandleFunc("/api/proxy", hProxy)
 	// MKV 等浏览器不支持的容器：服务端实时转封装成 fMP4
 	mux.HandleFunc("/api/remux", hRemux)
+	// 用源 id 换播放所需的 Basic Auth（列表接口的密码是掩码，不能直接用）
+	mux.HandleFunc("/api/webdav/auth", hWdAuth)
 	return mux
 }
 
@@ -1404,6 +1407,39 @@ func toFloat(v any) float64 {
 }
 
 // ---------- WebDAV ----------
+
+// hWdAuth 用源 id 换出「播放所需的 Basic Auth」。
+//
+// 为什么需要这个接口：GET /api/webdav/sources 出于安全不回显密码（返回 ******），
+// 而播放时前端要拼 `Authorization: Basic base64(user:pass)` 给 /api/proxy。
+// 早先前端直接拿列表里的密码拼，掩码上线后拼出 webdav:****** → 上游 401。
+// 期间之所以「看起来能用」，是因为 /webdav/sources 被缓存进 IndexedDB，
+// 缓存里还是掩码上线前的旧数据；加登录后每次登录都会清缓存，问题才暴露。
+//
+// 这里只返回 Auth 头（不含明文密码本身以外的东西），且必须通过鉴权。
+func hWdAuth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		fail(w, http.StatusMethodNotAllowed, "只支持 GET")
+		return
+	}
+	id := q(r, "id")
+	if id == "" {
+		fail(w, http.StatusBadRequest, "缺少 id")
+		return
+	}
+	for _, s := range store.WebdavSources() {
+		if s.ID != id {
+			continue
+		}
+		// Basic Auth 里用 UTF-8 用户名/密码
+		raw := s.User + ":" + s.Pass
+		ok(w, map[string]string{
+			"auth": base64.StdEncoding.EncodeToString([]byte(raw)),
+		})
+		return
+	}
+	fail(w, http.StatusNotFound, "找不到该网盘源")
+}
 
 func hWdSources(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {

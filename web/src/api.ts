@@ -353,6 +353,9 @@ export const api = {
   setPrefs: (p: Record<string, number | string>) => post('/prefs', p),
 
   webdavSources: () => get<WebdavSource[]>('/webdav/sources'),
+  // 用源 id 换播放所需的 Basic Auth：列表接口的密码是掩码（******），
+  // 直接拿来拼认证会 401。这个接口在服务端用真实密码生成。
+  webdavAuth: (id: string) => get<{ auth: string }>(`/webdav/auth?id=${encodeURIComponent(id)}`),
   saveWebdavSource: (src: WebdavSource) => post('/webdav/sources', src),
   removeWebdavSource: (id: string) => del(`/webdav/sources?id=${encodeURIComponent(id)}`),
   webdavProbe: (src: WebdavSource) => post<{ count: number }>('/webdav/probe', src),

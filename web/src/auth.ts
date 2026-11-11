@@ -107,8 +107,22 @@ export async function login(user: string, pass: string): Promise<void> {
     /* 老版本后端没有这个字段，忽略 */
   }
   setMediaToken(mediaToken)
+
+  // 登录响应 200 就说明凭据正确，直接按「已登录」处理。
+  //
+  // 不能在这里再查一次 /api/session：刚设置的 Cookie 在本轮请求里可能还没生效，
+  // 拿到的会是 authed:false，于是 authState 被写成未登录 → 路由守卫把用户
+  // 立刻踢回登录页（表现为「密码对了但进不去、刷新一下就正常」）。
+  authState.needLogin = true
+  authState.authed = true
+  authState.checked = true
+  try {
+    const j = await (await fetch('/api/session', { credentials: 'same-origin' })).json()
+    if (j && typeof j.user === 'string' && j.user) authState.user = j.user
+  } catch {
+    /* 拿不到用户名不影响登录结果 */
+  }
   await clearCaches()
-  await ensureSession(true)
 }
 
 /** 退出登录。 */
