@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { api } from '@/api'
+import { api, humanizeApiError } from '@/api'
 import { useAppStore } from '@/stores/app'
 import type { Site, WebdavSource } from '@/types'
 import TopBar from '@/components/TopBar.vue'
@@ -122,7 +122,7 @@ async function doSubscribe() {
     // 不清空 subUrl，保留地址让用户可查看和再次修改
     await load()
     app.notifyFeedRefresh() // 通知首页重载 Feed
-  } catch (e: any) { app.showTip('订阅失败：' + e.message) }
+  } catch (e: any) { app.showTip('订阅失败：' + humanizeApiError(e)) }
 }
 
 async function doImportCfg() {
@@ -133,7 +133,7 @@ async function doImportCfg() {
     app.showTip(`导入成功：${r.count} 个站源`)
     cfgState.value = '已导入'
     await load()
-  } catch (e: any) { app.showTip('导入失败：' + e.message) }
+  } catch (e: any) { app.showTip('导入失败：' + humanizeApiError(e)) }
 }
 
 async function doSetLive() {
@@ -242,7 +242,7 @@ async function testWd() {
   try {
     const r = await api.webdavProbe(wdForm.value)
     wdMsg.value  = `连接成功，根目录有 ${r.count} 项`; wdMsgOk.value = true
-  } catch (e: any) { wdMsg.value = e.message; wdMsgOk.value = false }
+  } catch (e: any) { wdMsg.value = humanizeApiError(e); wdMsgOk.value = false }
   wdTesting.value = false
 }
 
@@ -385,7 +385,7 @@ async function clearHistory() {
             <div class="srow">
               <div class="srow-left">
                 <span class="srow-title">上次更新</span>
-                <span class="srow-dim">{{ crawlSummary || '还没有更新过' }}</span>
+                <span class="srow-dim">{{ crawlSummary || '暂无更新记录，可以点「立即更新」' }}</span>
               </div>
             </div>
             <div class="sdiv"></div>
@@ -466,7 +466,7 @@ async function clearHistory() {
             <!-- 站源详细列表 -->
             <template v-if="showSites">
               <div class="sdiv"></div>
-              <p v-if="!sites.length" class="note" style="padding:12px 18px 16px">还没有导入配置，去「播放源 → 点播配置」导入。</p>
+              <p v-if="!sites.length" class="note" style="padding:12px 18px 16px">暂无站点配置，可以去「播放源 → 点播配置」导入。</p>
               <div v-for="s in sites" :key="s.key" class="site-row">
                 <div class="site-bar">
                   <el-switch :model-value="enabledKeys.has(s.key)" :disabled="!s.usable" @change="(v: any) => toggleSite(s, v)" />

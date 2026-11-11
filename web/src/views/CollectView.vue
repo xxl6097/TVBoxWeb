@@ -2,7 +2,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessageBox } from 'element-plus'
-import { api } from '@/api'
+import { api, humanizeApiError } from '@/api'
 import { useAppStore } from '@/stores/app'
 import type { FavItem, FavGroup } from '@/types'
 import TopBar from '@/components/TopBar.vue'
@@ -255,7 +255,7 @@ async function onImportFile(e: Event) {
     app.showTip(`导入完成：新增 ${r.added} 部，重复 ${r.duplicate} 部`)
     load()
   } catch (e: any) {
-    app.showTip('导入失败：' + (e?.message || '文件格式错误'))
+    app.showTip('导入失败：' + humanizeApiError(e))
   } finally {
     input.value = ''
   }
@@ -380,9 +380,9 @@ async function onImportFile(e: Event) {
           </div>
         </div>
         <div v-else class="empty">
-          <p>{{ selectedGroupId === null ? '还没有收藏内容' : '该分组暂无收藏' }}</p>
+          <p>{{ selectedGroupId === null ? '暂无收藏内容' : '该分组暂无收藏' }}</p>
           <template v-if="selectedGroupId === null">
-            <p class="empty-sub">在影片详情页点「收藏」，或拖拽到这里</p>
+            <p class="empty-sub">可以在影片详情页点「收藏」，或拖拽到这里</p>
             <div class="empty-actions">
               <el-button type="primary" @click="router.push('/vod')">去点播</el-button>
               <el-button @click="router.push('/search')">去搜索</el-button>

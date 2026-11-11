@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { api } from '@/api'
+import { api, humanizeApiError } from '@/api'
 import { useAppStore } from '@/stores/app'
 import { usePlayerStore } from '@/stores/player'
 import { fmtSize } from '@/utils/format'
@@ -88,7 +88,7 @@ async function probe(s: WebdavSource) {
     const r = await api.webdavProbe(s)
     app.showTip(`连接成功，${r.count} 个条目`)
   } catch (e: any) {
-    app.showTip('连接失败：' + e.message)
+    app.showTip('连接失败：' + humanizeApiError(e))
   }
 }
 
@@ -119,7 +119,7 @@ async function loadDir() {
   try {
     entries.value = await api.webdavList(cur.value, curPath.value)
   } catch (e: any) {
-    msg.value = e.message
+    msg.value = humanizeApiError(e)
   }
   loading.value = false
 }
@@ -290,7 +290,7 @@ async function scanVods() {
     view.value = 'scan'
     msg.value = `识别到 ${result.length} 部影视`
   } catch (e: any) {
-    msg.value = e.message
+    msg.value = humanizeApiError(e)
   }
   loading.value = false
 }
@@ -374,7 +374,7 @@ function back() {
         <el-button type="primary" @click="openForm()">添加网盘源</el-button>
       </div>
 
-      <p v-if="!sources.length" class="wd-empty">还没有挂载任何网盘。点上方「添加网盘源」，填服务器地址、账号密码即可。</p>
+      <p v-if="!sources.length" class="wd-empty">暂无挂载的网盘，可以点上方「添加网盘源」，填服务器地址、账号密码即可。</p>
       <div v-else class="src-list">
         <div v-for="s in sources" :key="s.id" class="src-row">
           <div class="src-info" @click="enterSource(s)">

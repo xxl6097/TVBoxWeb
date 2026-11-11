@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { api } from '@/api'
+import { api, humanizeApiError } from '@/api'
 import { useAppStore } from '@/stores/app'
 import { usePlayerStore } from '@/stores/player'
 import { splitLines } from '@/utils/lines'
@@ -45,7 +45,7 @@ onMounted(async () => {
       curLine.value = dIdx >= 0 ? dIdx : 0
     }
   } catch (e: any) {
-    app.showTip('详情加载失败：' + e.message)
+    app.showTip('详情加载失败：' + humanizeApiError(e))
   } finally {
     loading.value = false
   }

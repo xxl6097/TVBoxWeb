@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { api } from '@/api'
+import { api, humanizeApiError } from '@/api'
 import { useAppStore } from '@/stores/app'
 import type { Vod } from '@/types'
 import TopBar from '@/components/TopBar.vue'
@@ -79,7 +79,7 @@ async function doSearch(k?: string) {
     siteInfo.value = `${r.sites}/${r.total} 个站源有响应`
     keywords.value = await api.pushKeyword(word)
   } catch (e: any) {
-    app.showTip('搜索失败：' + e.message)
+    app.showTip('搜索失败：' + humanizeApiError(e))
   } finally {
     searching.value = false
   }

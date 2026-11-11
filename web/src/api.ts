@@ -53,6 +53,44 @@ function isGet(opts: RequestInit): boolean {
   return !opts.method || opts.method.toUpperCase() === 'GET'
 }
 
+// 错误码 → 可操作的中文建议（与后端 api.go 的 ErrXxx 常量一一对应）
+const ERROR_HINTS: Record<string, string> = {
+  ERR_TIMEOUT: '站源或网络响应超时，建议切换站源 / 线路后重试',
+  ERR_UPSTREAM: '上游服务暂时不可用，稍后再试或换一个站源',
+  ERR_SITE: '该站源可能已失效，可到「设置 → 站源测速」查看并换源',
+  ERR_AUTH: '访问被拒绝，检查网盘账号密码或订阅链接鉴权',
+  ERR_NETWORK: '检查本机网络，或确认服务端是否在运行',
+  ERR_BAD_REQUEST: '请求参数有误，刷新页面后重试',
+  ERR_NOT_FOUND: '请求的内容不存在，可能已被站源下线',
+  ERR_INTERNAL: '服务端处理出错，可查看日志或稍后重试'
+}
+
+/** 带结构化错误码的请求异常。 */
+export class ApiError extends Error {
+  code: string
+  status: number
+  hint: string
+  constructor(message: string, code = 'ERR_INTERNAL', status = 0, hint = '') {
+    super(message)
+    this.name = 'ApiError'
+    this.code = code
+    this.status = status
+    this.hint = hint
+  }
+}
+
+/** 把任意异常转成用户能看懂的一句话（供 showTip / 错误面板使用）。 */
+export function humanizeApiError(e: unknown): string {
+  if (e instanceof ApiError) {
+    return e.hint ? `${e.message} · ${e.hint}` : e.message
+  }
+  const msg = e instanceof Error ? e.message : String(e || '')
+  if (/failed to fetch|networkerror|load failed|network request failed/i.test(msg)) {
+    return `网络连接失败 · ${ERROR_HINTS.ERR_NETWORK}`
+  }
+  return msg || '发生未知错误'
+}
+
 async function request<T>(path: string, opts: RequestInit = {}): Promise<T> {
   const cacheable = isGet(opts) && isCacheable(path)
 
@@ -67,18 +105,25 @@ async function request<T>(path: string, opts: RequestInit = {}): Promise<T> {
     }
   }
 
-  const res = await fetch(BASE + path, {
-    headers: { 'Content-Type': 'application/json' },
-    ...opts
-  })
+  let res: Response
+  try {
+    res = await fetch(BASE + path, {
+      headers: { 'Content-Type': 'application/json' },
+      ...opts
+    })
+  } catch {
+    throw new ApiError('网络连接失败', 'ERR_NETWORK', 0, ERROR_HINTS.ERR_NETWORK)
+  }
   if (!res.ok) {
     let msg = `请求失败 (${res.status})`
+    let code = ''
     try {
       // 检查 Content-Type，避免 HTML 错误页面解析失败导致错误信息丢失
       const ct = res.headers.get('Content-Type') || ''
       if (ct.includes('application/json')) {
         const j = await res.json()
         if (j && j.error) msg = j.error
+        if (j && j.code) code = j.code
       } else {
         const text = await res.text()
         // 截取前 200 字符作为提示，避免显示完整 HTML
@@ -89,7 +134,14 @@ async function request<T>(path: string, opts: RequestInit = {}): Promise<T> {
     } catch {
       /* ignore */
     }
-    throw new Error(msg)
+    // 兜底：老版本后端 / 纯文本错误页没有 code 时按状态码推断
+    if (!code) {
+      code = res.status === 504 || res.status === 408 ? 'ERR_TIMEOUT'
+        : res.status >= 500 ? 'ERR_UPSTREAM'
+        : res.status === 404 ? 'ERR_NOT_FOUND'
+        : 'ERR_BAD_REQUEST'
+    }
+    throw new ApiError(msg, code, res.status, ERROR_HINTS[code] || '')
   }
 
   const data = (await res.json()) as T
@@ -194,7 +246,7 @@ export const api = {
   feed: () => get<{ feed: Vod[]; deadKeys: string[]; summary: string }>('/feed'),
   qualityMaster: (url: string) => post<QLevel[]>('/quality/master', { url }),
 
-  prefs: () => get<{ qPref: number; speedPref: number; introSkip: number; outroSkip: number; tapSound: number; tapVibrate: number }>('/prefs'),
+  prefs: () => get<{ qPref: number; speedPref: number; volumePref: number; introSkip: number; outroSkip: number; tapSound: number; tapVibrate: number }>('/prefs'),
   setPrefs: (p: Record<string, number>) => post('/prefs', p),
 
   webdavSources: () => get<WebdavSource[]>('/webdav/sources'),

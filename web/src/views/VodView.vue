@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { api } from '@/api'
+import { api, humanizeApiError } from '@/api'
 import { useAppStore } from '@/stores/app'
 import type { Site, Category, VodPage, FilterGroup } from '@/types'
 import TopBar from '@/components/TopBar.vue'
@@ -72,7 +72,7 @@ async function loadCategories() {
   try {
     categories.value = await api.categories(siteKey.value)
   } catch (e: any) {
-    app.showTip('分类加载失败：' + e.message)
+    app.showTip('分类加载失败：' + humanizeApiError(e))
   } finally {
     loading.value = false
   }
@@ -117,7 +117,7 @@ async function load() {
     const ext = buildExt()
     page.value = await api.vodList(siteKey.value, currentTid(), curPage.value, ext, currentChildren())
   } catch (e: any) {
-    app.showTip('列表加载失败：' + e.message)
+    app.showTip('列表加载失败：' + humanizeApiError(e))
   } finally {
     loading.value = false
   }
@@ -235,7 +235,7 @@ function parseFilters(ext: string, tid: string): FilterGroup[] {
       <VodGrid :vods="page.items" :loading="loading" />
       <div v-if="!loading && !page.items.length" class="vod-empty">
         <p>暂无内容</p>
-        <p class="hint">可能是这个站源当前分类下没有数据，换个分类或站源试试</p>
+        <p class="hint">可以切换分类或站源，或到「设置 → 订阅」重新导入</p>
       </div>
 
       <div v-if="page.pageCount > 1" class="pager">

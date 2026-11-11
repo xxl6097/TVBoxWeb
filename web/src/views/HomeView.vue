@@ -237,12 +237,12 @@ function refresh() {
     <VodGrid :vods="feed" :loading="loading" />
     <div v-if="!loading && !feed.length" class="empty">
       <template v-if="hasSites">
-        <p>正在拉取最新影片…</p>
+        <p>暂无内容，正在拉取最新影片…</p>
         <p class="hint">也可以点上方「点播」按分类浏览，或到「设置 → 内容更新 → 立即更新」</p>
       </template>
       <template v-else>
-        <p>还没有内容</p>
-        <p class="hint">进「设置」点「订阅」，一个链接同时导入点播 + 直播源</p>
+        <p>暂无内容</p>
+        <p class="hint">可以进「设置」点「订阅」，一个链接同时导入点播 + 直播源</p>
         <el-button type="primary" @click="router.push('/settings')">去订阅</el-button>
       </template>
     </div>

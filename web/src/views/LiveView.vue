@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { api } from '@/api'
+import { api, humanizeApiError } from '@/api'
 import { useAppStore } from '@/stores/app'
 import { usePlayerStore } from '@/stores/player'
 import { getWSClient } from '@/ws'
@@ -99,7 +99,7 @@ async function loadChannels() {
     currentUrl.value = r.url
     deadSet.value = new Set()
   } catch (e: any) {
-    app.showTip('直播源加载失败：' + e.message)
+    app.showTip('直播源加载失败：' + humanizeApiError(e))
   } finally {
     loading.value = false
   }
@@ -199,7 +199,7 @@ async function switchSource(url: string) {
 // 测速排行：逐个测订阅下发的源，结果进面板
 async function rankSources() {
   if (!sources.value.length) {
-    app.showTip('还没有直播源，先去「设置 → 订阅」导入')
+    app.showTip('暂无直播源，先去「设置 → 订阅」导入')
     return
   }
   if (ranking.value) {
@@ -237,7 +237,7 @@ async function rankSources() {
       app.showTip('所有源都没测通，检查网络后重试')
     }
   } catch (e: any) {
-    app.showTip('测速失败：' + (e?.message || '未知错误'))
+    app.showTip('测速失败：' + humanizeApiError(e))
   } finally {
     ranking.value = false
   }
@@ -347,7 +347,8 @@ function getSiteHealth(name: string): HealthUpdate | null {
     </div>
 
     <div v-if="!currentUrl" class="empty">
-      <p>还没有配置直播源</p>
+      <p>暂无直播源</p>
+      <p class="empty-sub">可以去「设置 → 订阅」导入订阅链接</p>
       <el-button type="primary" @click="router.push('/settings')">去设置</el-button>
     </div>
 
@@ -399,8 +400,8 @@ function getSiteHealth(name: string): HealthUpdate | null {
         <SkeletonList v-if="loading" type="channel" :count="30" />
         <!-- 我的频道空态 -->
         <div v-else-if="showFavs && !liveFavs.length" class="empty">
-          <p>还没有收藏的频道</p>
-          <p class="empty-sub">点频道右侧的 ⭐ 即可收藏常用频道</p>
+          <p>暂无收藏的频道</p>
+          <p class="empty-sub">可以点频道右侧的 ⭐ 收藏常用频道</p>
         </div>
         <!-- 频道列表 -->
         <template v-else>

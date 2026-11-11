@@ -114,7 +114,11 @@ function clearAll() {
         </div>
       </div>
     </div>
-    <div v-else class="empty">还没有播放记录</div>
+    <div v-else class="empty">
+      <p>暂无播放记录</p>
+      <p class="empty-sub">可以去「首页」挑一部开始观看</p>
+      <el-button type="primary" @click="router.push('/')">去首页</el-button>
+    </div>
   </div>
 </template>
 
@@ -196,6 +200,7 @@ function clearAll() {
   padding: 60px 24px;
   color: var(--dim);
 }
+.empty-sub { font-size: 13px; margin: 8px 0 14px; }
 
 /* ===== 移动端响应式 ===== */
 @media (max-width: 640px) {

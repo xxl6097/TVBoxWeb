@@ -39,7 +39,7 @@ function open(v: Vod) {
       @click="open"
     />
   </div>
-  <div v-else class="empty">暂无内容</div>
+  <div v-else class="empty">暂无内容，可以切换分类或站源</div>
 </template>
 
 <style scoped>

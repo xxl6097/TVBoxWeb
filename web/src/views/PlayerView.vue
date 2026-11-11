@@ -174,7 +174,7 @@ function syncEpLabel() {
 }
 
 onMounted(async () => {
-  const prefs = await api.prefs().catch(() => ({ qPref: 0, speedPref: 1, introSkip: 0, outroSkip: 0, tapSound: 1, tapVibrate: 1 }))
+  const prefs = await api.prefs().catch(() => ({ qPref: 0, speedPref: 1, volumePref: 1, introSkip: 0, outroSkip: 0, tapSound: 1, tapVibrate: 1 }))
   qCap = prefs.qPref || 0
   introSkipSec.value = prefs.introSkip || 0
   outroSkipSec.value = prefs.outroSkip || 0
@@ -183,10 +183,13 @@ onMounted(async () => {
   if (PLAYBACK_RATES.includes(sp)) {
     playbackRate.value = sp
   }
+  // 应用音量偏好（持久化，0=未设置用 1.0）
+  volume.value = Math.min(1, Math.max(0, prefs.volumePref || 1))
   syncEpLabel()
   await resolveUrl()
   resolving.value = false
   initPlayer()
+  if (videoEl.value) videoEl.value.volume = volume.value
 })
 
 onUnmounted(() => {
@@ -194,6 +197,7 @@ onUnmounted(() => {
   // 清理所有 timers
   if (saveTimer) clearTimeout(saveTimer)
   if (seekPendingTimer) clearTimeout(seekPendingTimer)
+  if (volSaveTimer) clearTimeout(volSaveTimer)
   // 页面卸载时确保最终进度被保存
   savePos()
   destroyPlayer()
@@ -678,6 +682,15 @@ function onProgressUp(e: PointerEvent) {
 // ---------- 音量滑块 ----------
 
 const volDragging = ref(false)
+let volSaveTimer = 0
+
+// 音量变化后防抖落盘，避免拖动时每帧都请求后端
+function persistVolume() {
+  if (volSaveTimer) clearTimeout(volSaveTimer)
+  volSaveTimer = window.setTimeout(() => {
+    api.setPrefs({ volumePref: Math.round(volume.value * 100) / 100 }).catch(() => {})
+  }, 500)
+}
 
 function setVolumeFromEvent(e: PointerEvent) {
   const el = e.currentTarget as HTMLElement
@@ -687,6 +700,7 @@ function setVolumeFromEvent(e: PointerEvent) {
   volume.value = r
   if (r > 0) muted.value = false
   if (videoEl.value) videoEl.value.volume = muted.value ? 0 : r
+  persistVolume()
   showVol.value = true
   if (volTimer) clearTimeout(volTimer)
   volTimer = window.setTimeout(() => (showVol.value = false), 1600)
@@ -876,6 +890,7 @@ function onTouchMove(e: TouchEvent) {
     volume.value = newVol
     if (newVol > 0) muted.value = false
     if (videoEl.value) videoEl.value.volume = muted.value ? 0 : newVol
+    persistVolume()
     showGestureHint(`音量 ${Math.round(newVol * 100)}%`)
   } else if (touchDir === 'vertical-left') {
     // 左半屏上下：模拟亮度（黑色遮罩，Web 无法调系统屏幕亮度）
@@ -948,6 +963,7 @@ function changeVolume(delta: number) {
   volume.value = v
   if (v > 0) muted.value = false
   if (videoEl.value) videoEl.value.volume = muted.value ? 0 : v
+  persistVolume()
   showVol.value = true
   if (volTimer) clearTimeout(volTimer)
   volTimer = window.setTimeout(() => (showVol.value = false), 1600)

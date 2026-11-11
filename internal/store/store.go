@@ -29,6 +29,7 @@ type Data struct {
 	LiveFavs     []model.Channel      `json:"liveFavs"` // 直播频道收藏
 	QPref        int                  `json:"qPref"`
 	SpeedPref    float64              `json:"speedPref"` // 播放倍速偏好（0=未设置，用 1.0）
+	VolumePref   float64              `json:"volumePref"` // 播放音量偏好（0=未设置，用 1.0）
 	IntroSkip    int                  `json:"introSkip"`
 	OutroSkip    int                  `json:"outroSkip"`
 	TapSound     int                  `json:"tapSound"`
@@ -743,6 +744,8 @@ func QPref() int            { return data.QPref }
 func SetQPref(v int)        { mu.Lock(); data.QPref = v; mu.Unlock(); flush() }
 func SpeedPref() float64    { if data.SpeedPref <= 0 { return 1.0 }; return data.SpeedPref }
 func SetSpeedPref(v float64) { mu.Lock(); data.SpeedPref = v; mu.Unlock(); flush() }
+func VolumePref() float64   { if data.VolumePref <= 0 { return 1.0 }; return data.VolumePref }
+func SetVolumePref(v float64) { mu.Lock(); data.VolumePref = v; mu.Unlock(); flush() }
 func IntroSkipSec() int     { return data.IntroSkip }
 func SetIntroSkipSec(v int) { mu.Lock(); data.IntroSkip = v; mu.Unlock(); flush() }
 func OutroSkipSec() int     { return data.OutroSkip }

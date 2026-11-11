@@ -251,10 +251,53 @@ func normalizeDepth(v any, depth int) any {
 	}
 }
 
+// ---------- 结构化错误码 ----------
+// 前端 humanizeApiError() 据此给出可操作的中文建议，而不是只显示 HTTP 状态码。
+const (
+	ErrBadRequest = "ERR_BAD_REQUEST"
+	ErrTimeout    = "ERR_TIMEOUT"
+	ErrUpstream   = "ERR_UPSTREAM"
+	ErrSite       = "ERR_SITE"
+	ErrAuth       = "ERR_AUTH"
+	ErrNotFound   = "ERR_NOT_FOUND"
+	ErrNetwork    = "ERR_NETWORK"
+	ErrInternal   = "ERR_INTERNAL"
+)
+
+// errCodeOf 根据 HTTP 状态与错误文案推断错误码，
+// 这样所有现存 fail() 调用点无需改动即可获得统一错误码。
+func errCodeOf(status int, msg string) string {
+	s := strings.ToLower(msg)
+	switch {
+	case strings.Contains(s, "timeout") || strings.Contains(s, "deadline") ||
+		strings.Contains(s, "timed out") || strings.Contains(s, "超时"):
+		return ErrTimeout
+	case strings.Contains(s, "站源") || strings.Contains(s, "site") ||
+		strings.Contains(s, "播放源") || strings.Contains(s, "订阅"):
+		return ErrSite
+	case status == 400:
+		return ErrBadRequest
+	case status == 401 || status == 403:
+		return ErrAuth
+	case status == 404:
+		return ErrNotFound
+	case status == 502 || status == 503 || status == 504:
+		return ErrUpstream
+	default:
+		return ErrInternal
+	}
+}
+
 func ok(w http.ResponseWriter, v any) { writeJSON(w, 200, v) }
 
-func fail(w http.ResponseWriter, code int, msg string) {
-	writeJSON(w, code, map[string]string{"error": msg})
+// fail 返回带错误码的 JSON 错误响应（全站统一）。
+func fail(w http.ResponseWriter, status int, msg string) {
+	failWith(w, status, errCodeOf(status, msg), msg)
+}
+
+// failWith 允许调用方显式指定错误码。
+func failWith(w http.ResponseWriter, status int, code, msg string) {
+	writeJSON(w, status, map[string]string{"error": msg, "code": code})
 }
 
 // CORS 跨域中间件（开发时前后端分离用），并兜底 panic 防止单站异常拖垮服务。
@@ -1050,7 +1093,7 @@ func hLiveChannels(w http.ResponseWriter, r *http.Request) {
 		u = store.LiveURL()
 	}
 	if u == "" {
-		fail(w, 400, "还没有配置直播源")
+		fail(w, 400, "暂无直播源，先去「设置 → 订阅」导入")
 		return
 	}
 	groups, err := live.Load(u, 25*time.Second)
@@ -1175,6 +1218,7 @@ func hPrefs(w http.ResponseWriter, r *http.Request) {
 		ok(w, map[string]any{
 			"qPref":      store.QPref(),
 			"speedPref":  store.SpeedPref(),
+			"volumePref": store.VolumePref(),
 			"introSkip":  store.IntroSkipSec(),
 			"outroSkip":  store.OutroSkipSec(),
 			"tapSound":   store.TapSound(),
@@ -1191,6 +1235,9 @@ func hPrefs(w http.ResponseWriter, r *http.Request) {
 		}
 		if v, ok := req["speedPref"]; ok {
 			store.SetSpeedPref(toFloat(v))
+		}
+		if v, ok := req["volumePref"]; ok {
+			store.SetVolumePref(toFloat(v))
 		}
 		if v, ok := req["introSkip"]; ok {
 			store.SetIntroSkipSec(int(toFloat(v)))
@@ -1375,17 +1422,17 @@ func hPrivacy(w http.ResponseWriter, r *http.Request) {
 func hProxy(w http.ResponseWriter, r *http.Request) {
 	target := q(r, "url")
 	if target == "" {
-		http.Error(w, "missing url", http.StatusBadRequest)
+		fail(w, http.StatusBadRequest, "缺少 url 参数")
 		return
 	}
 	if !strings.HasPrefix(target, "http://") && !strings.HasPrefix(target, "https://") {
-		http.Error(w, "invalid url", http.StatusBadRequest)
+		fail(w, http.StatusBadRequest, "url 必须以 http:// 或 https:// 开头")
 		return
 	}
 	auth := q(r, "auth")
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, target, nil)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		fail(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	req.Header.Set("User-Agent", httpc.WebUA)
@@ -1398,7 +1445,7 @@ func hProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := httpc.StreamClient.Do(req)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		fail(w, http.StatusBadGateway, "无法连接上游资源："+err.Error())
 		return
 	}
 	defer res.Body.Close()
