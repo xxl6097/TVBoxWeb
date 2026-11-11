@@ -55,6 +55,32 @@ export async function ensureSession(force = false): Promise<boolean> {
   }
 }
 
+/**
+ * 媒体令牌：给 <video>/MSE 这类「带不了 Cookie」的请求用。
+ *
+ * 会话 Cookie 在视频子资源请求上不会发送（没 crossorigin 就不走 CORS 凭证，
+ * 加了又要求 SameSite=None; Secure，HTTP 部署设不了 Secure）。
+ * 所以登录后额外拿一个令牌，拼进视频 URL 的 token 参数。
+ */
+const MEDIA_TOKEN_KEY = 'yz_media_token'
+
+export function getMediaToken(): string {
+  try {
+    return sessionStorage.getItem(MEDIA_TOKEN_KEY) || ''
+  } catch {
+    return ''
+  }
+}
+
+function setMediaToken(t: string): void {
+  try {
+    if (t) sessionStorage.setItem(MEDIA_TOKEN_KEY, t)
+    else sessionStorage.removeItem(MEDIA_TOKEN_KEY)
+  } catch {
+    /* 隐私模式忽略 */
+  }
+}
+
 /** 登录；失败时抛出带中文提示的 Error。 */
 export async function login(user: string, pass: string): Promise<void> {
   const res = await fetch('/api/login', {
@@ -73,6 +99,14 @@ export async function login(user: string, pass: string): Promise<void> {
     }
     throw new Error(msg)
   }
+  let mediaToken = ''
+  try {
+    const j = await res.json()
+    mediaToken = j?.mediaToken || ''
+  } catch {
+    /* 老版本后端没有这个字段，忽略 */
+  }
+  setMediaToken(mediaToken)
   await clearCaches()
   await ensureSession(true)
 }
@@ -87,6 +121,7 @@ export async function logout(): Promise<void> {
   authState.authed = !authState.needLogin
   authState.user = ''
   authState.checked = true
+  setMediaToken('')
   await clearCaches()
 }
 

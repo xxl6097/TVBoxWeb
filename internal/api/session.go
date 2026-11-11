@@ -215,7 +215,26 @@ func hLogin(w http.ResponseWriter, r *http.Request) {
 		Secure:   cookieSecure(r),
 		SameSite: http.SameSiteLaxMode,
 	})
-	ok(w, map[string]any{"ok": true, "user": sec.LoginUser})
+	// 同时返回一个「媒体令牌」给前端。
+	//
+	// 为什么不能只靠 Cookie：<video>/MSE 发起的子资源请求不会带 Cookie
+	// （没有 crossorigin 属性时不走 CORS 凭证，加了又要求 SameSite=None; Secure，
+	// 而 HTTP 部署设不了 Secure）。结果是「页面能正常用、唯独视频 401」，
+	// 浏览器再把 401 的 JSON 当视频解码，报成「文件无法播放」。
+	// 媒体令牌走 URL query，天然不受 Cookie 策略限制。
+	ok(w, map[string]any{"ok": true, "user": sec.LoginUser, "mediaToken": mediaToken()})
+}
+
+// mediaToken 返回给前端用的媒体令牌。
+//
+// 设计取舍：直接用当前会话签名串复用同一把 HMAC 密钥，但不等于会话 Cookie 的值——
+// 这样即使 URL 被日志/分享泄露，攻击者也拿不到可访问整个后台的会话 Cookie；
+// 而媒体令牌本身只能用于 /api/proxy 与 /api/remux 这类媒体转发端点（见 needsAuth 的放行逻辑）。
+func mediaToken() string {
+	if !loginEnabled() {
+		return ""
+	}
+	return signSession(sec.LoginUser, time.Now().Add(sessionTTL))
 }
 
 // cookieSecure 决定会话 Cookie 是否带 Secure（只在 HTTPS 下发送）。

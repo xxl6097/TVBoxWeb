@@ -219,8 +219,23 @@ func authOK(r *http.Request) bool {
 	if token == "" {
 		return false
 	}
-	if sec.AuthToken == "" {
-		return false
+	// 旧式访问口令（-token）
+	if sec.AuthToken != "" && subtle.ConstantTimeCompare([]byte(token), []byte(sec.AuthToken)) == 1 {
+		return true
 	}
-	return subtle.ConstantTimeCompare([]byte(token), []byte(sec.AuthToken)) == 1
+	// 登录会话派生的媒体令牌：只放行媒体转发端点。
+	// 这样即便视频 URL 进了日志/被分享，泄露的也只是「能看这个视频」，
+	// 不能拿去调 /api/status、改配置等管理接口。
+	if isMediaEndpoint(r.URL.Path) {
+		if user, okv := verifySession(token); okv && user != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// isMediaEndpoint 判断是否属于「浏览器子资源直接加载」的媒体转发端点。
+// 这类请求没法带自定义头，也是唯一允许用 URL 令牌换取访问权的地方。
+func isMediaEndpoint(path string) bool {
+	return path == "/api/proxy" || path == "/api/remux"
 }

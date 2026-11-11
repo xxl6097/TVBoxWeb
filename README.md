@@ -260,6 +260,41 @@ TVBoxWeb/
 
 ---
 
+## 🆕 v1.9.2 · 修复「登录后网盘视频播不了」
+
+这是**登录功能引入的回归**，不是网盘或播放器退化。
+
+### 原因：`<video>` 的请求带不了会话 Cookie
+
+启用 `-user/-pass` 后，`/api/proxy` 需要会话 Cookie 才能通过鉴权。但浏览器加载 `<video src="...">` 是子资源请求：
+
+- 没加 `crossorigin` → 不是 CORS 凭证请求，**不带 Cookie**
+- 加了 `crossorigin` 又要求 `SameSite=None; Secure`，而 HTTP 部署设不了 `Secure`
+
+于是：**页面本身一切正常（fetch 同源自动带 Cookie），唯独视频请求 401**。浏览器再把 401 返回的 JSON 当视频数据去解码，报成「这个文件无法直接播放」。
+
+### 修复：登录时下发「媒体令牌」
+
+- `POST /api/login` 响应增加 `mediaToken` 字段（与会话同源、同有效期，但值独立于 Cookie）。
+- 前端存进 `sessionStorage`，`proxied()` / `remuxed()` 统一经 `withToken()` 拼成 `&token=`。
+- 后端 `authOK` 接受该令牌，**但只对 `/api/proxy`、`/api/remux` 生效**——URL 泄露也只暴露「能看这个视频」，拿不到改配置、看历史等管理权限。
+- 未启用登录时不下发令牌；登出时清除。
+- 旧的 `-token` 访问口令仍然可用（两者取其一即可）。
+
+### 验证
+
+| 场景（不带 Cookie，模拟 `<video>`） | 结果 |
+|---|---|
+| MP4 + mediaToken | 206 `video/mp4` |
+| MKV + mediaToken（转封装） | 200 `video/mp4` |
+| 无 token | 401 |
+| 伪造 token | 401 |
+| mediaToken 调 `/api/status` | 401（被拒，符合预期） |
+
+新增 3 组单测（媒体令牌可用 / 不可越权 / 端点白名单最小化）+ 5 项前端检查。已验证：临时关掉媒体令牌分支时，测试精确失败在「应接受媒体令牌」。
+
+---
+
 ## 🆕 v1.9.1 · 修复进度条拖不动
 
 - **现象**：进度条按住拖动没反应，所有文件都这样（不只是 MKV）。

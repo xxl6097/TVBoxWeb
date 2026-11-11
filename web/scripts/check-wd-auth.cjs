@@ -82,5 +82,17 @@ if (px) {
   check(false, '找到 proxied() 实现')
 }
 
+// 登录会话下，视频 URL 必须带 mediaToken：<video> 的请求不带 Cookie，
+// 只拼旧口令会导致「页面正常、唯独视频 401」。
+console.log('\n[api.ts] 媒体令牌必须拼进视频 URL')
+const apiSrc = stripComments(read('src/api.ts'))
+check(/getMediaToken/.test(apiSrc), 'proxied/remuxed 使用了 getMediaToken')
+check(/mediaUrlToken/.test(apiSrc), '令牌优先级封装在 mediaUrlToken（媒体令牌 > 旧口令）')
+check(/withToken\(/.test(apiSrc), '两个构造函数都经过 withToken 统一拼接')
+
+const authTs = read('src/auth.ts')
+check(/mediaToken/.test(authTs), '登录响应的 mediaToken 被保存')
+check(/sessionStorage/.test(authTs), '媒体令牌存在 sessionStorage（关标签页即失效）')
+
 console.log(failed === 0 ? '\n全部通过' : `\n${failed} 项失败`)
 process.exit(failed === 0 ? 0 : 1)

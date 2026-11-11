@@ -1,5 +1,8 @@
 // API 客户端：统一封装对 Go 后端的请求。
 
+// auth.ts 内部对 api 的引用是动态 import()，因此这里静态导入不会形成循环依赖。
+import { getMediaToken } from './auth'
+
 import type {
   Site,
   SiteHealthStatus,
@@ -383,14 +386,29 @@ export function remuxed(rawUrl: string, auth?: string, seek = 0): string {
   let u = `/api/remux?url=${encodeURIComponent(rawUrl)}`
   if (auth) u += `&auth=${encodeURIComponent(auth)}`
   if (seek > 0) u += `&seek=${Math.floor(seek)}`
-  const t = getAuthToken()
+  return withToken(u)
+}
+
+/**
+ * 媒体请求用的 URL 令牌。
+ *
+ * 优先级：登录派生的媒体令牌 > 旧式访问口令。
+ * 为什么必须走 URL：<video>/MSE 发起的子资源请求带不了自定义头，
+ * 也不会带 Cookie（没 crossorigin 时不是 CORS 凭证请求）。账号密码登录
+ * 启用后只拼旧口令会导致视频 401 —— 这正是「登录后网盘视频播不了」的原因。
+ */
+function mediaUrlToken(): string {
+  return getMediaToken() || getAuthToken()
+}
+
+function withToken(u: string): string {
+  const t = mediaUrlToken()
   return t ? `${u}&token=${encodeURIComponent(t)}` : u
 }
 
 export function proxied(rawUrl: string, auth?: string): string {
   const u = `/api/proxy?url=${encodeURIComponent(rawUrl)}`
   const withAuth = auth ? `${u}&auth=${encodeURIComponent(auth)}` : u
-  // 视频分片由浏览器直接加载，无法带自定义头，口令走 query（后端会透传到 m3u8 内部地址）
-  const t = getAuthToken()
-  return t ? `${withAuth}&token=${encodeURIComponent(t)}` : withAuth
+  // 视频分片由浏览器直接加载，无法带自定义头，令牌走 query（后端会透传到 m3u8 内部地址）
+  return withToken(withAuth)
 }

@@ -303,3 +303,80 @@ func TestAuthExemptListIsMinimal(t *testing.T) {
 		}
 	}
 }
+
+// 「登录后网盘视频播不了」的回归测试。
+//
+// <video> 发起的子资源请求不带 Cookie，所以必须能用 URL 上的媒体令牌鉴权；
+// 但该令牌只能用于媒体端点，不能当通用会话用（否则等于把后台钥匙写进 URL）。
+func TestMediaTokenForVideoRequests(t *testing.T) {
+	SetSecurity(SecurityConfig{LoginUser: "u", LoginPass: "p"})
+	defer SetSecurity(SecurityConfig{})
+
+	// 登录拿 mediaToken
+	body := `{"user":"u","pass":"p"}`
+	req := httptest.NewRequest("POST", "/api/login", strings.NewReader(body))
+	req.RemoteAddr = "203.0.113.5:1"
+	rec := httptest.NewRecorder()
+	secured().ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("登录失败 %d", rec.Code)
+	}
+	var loginResp struct {
+		MediaToken string `json:"mediaToken"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &loginResp); err != nil {
+		t.Fatalf("解析登录响应失败: %v", err)
+	}
+	mt := loginResp.MediaToken
+	if mt == "" {
+		t.Fatal("登录响应必须返回 mediaToken（否则 <video> 无法鉴权）")
+	}
+
+	// ① 不带 Cookie、只用 URL 令牌访问媒体端点 → 应放行
+	for _, path := range []string{"/api/proxy", "/api/remux"} {
+		r := httptest.NewRequest("GET", path+"?url=http://example.com/a.mp4&token="+mt, nil)
+		if !authOK(r) {
+			t.Errorf("%s 应接受媒体令牌（video 请求带不了 Cookie）", path)
+		}
+	}
+
+	// ② 媒体令牌不能调管理接口
+	for _, path := range []string{"/api/status", "/api/sites", "/api/webdav/sources", "/api/prefs"} {
+		r := httptest.NewRequest("GET", path+"?token="+mt, nil)
+		if authOK(r) {
+			t.Errorf("%s 不应接受媒体令牌 —— 否则 URL 泄露等于交出后台权限", path)
+		}
+	}
+
+	// ③ 伪造令牌一律拒绝
+	forged := mt[:len(mt)-1] + "X"
+	r := httptest.NewRequest("GET", "/api/proxy?url=http://e.com/a.mp4&token="+forged, nil)
+	if authOK(r) {
+		t.Error("伪造的媒体令牌不应通过")
+	}
+}
+
+// 未启用登录时不应下发 mediaToken（否则等于凭空造了个凭证）。
+func TestMediaTokenEmptyWhenLoginDisabled(t *testing.T) {
+	SetSecurity(SecurityConfig{})
+	defer SetSecurity(SecurityConfig{})
+	if got := mediaToken(); got != "" {
+		t.Fatalf("未启用登录时 mediaToken 应为空，实际 %q", got)
+	}
+}
+
+// 媒体端点清单必须最小化：多放一个入口就等于多开一扇免 Cookie 的门。
+func TestIsMediaEndpointIsMinimal(t *testing.T) {
+	yes := []string{"/api/proxy", "/api/remux"}
+	no := []string{"/api/status", "/api/sites", "/api/webdav/list", "/api/login", "/ws", "/api/proxy2"}
+	for _, p := range yes {
+		if !isMediaEndpoint(p) {
+			t.Errorf("%s 应属于媒体端点", p)
+		}
+	}
+	for _, p := range no {
+		if isMediaEndpoint(p) {
+			t.Errorf("%s 不应属于媒体端点", p)
+		}
+	}
+}
