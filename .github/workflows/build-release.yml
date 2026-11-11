@@ -79,6 +79,10 @@ jobs:
           npm ci
           npm run build
 
+      - name: 前端回归检查（播放设置面板可见性）
+        working-directory: web
+        run: npm run check:panel
+
       - name: 交叉编译后端（内嵌前端）
         env:
           GOOS: ${{ matrix.os }}

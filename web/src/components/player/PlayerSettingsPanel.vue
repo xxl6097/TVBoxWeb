@@ -58,8 +58,10 @@ function delayLabel(d: number) {
 </script>
 
 <template>
-  <!-- 桌面端：居中浮层 -->
-  <div v-if="props.variant === 'desktop'" class="q-panel" @click.stop @click.self="close">
+  <!-- 桌面端：居中浮层。
+       可见性必须由 modelValue 决定 —— 之前这里只判断 variant，
+       父组件把 modelValue 置 false 后组件自身不接受，面板永远关不掉。 -->
+  <div v-if="props.modelValue && props.variant === 'desktop'" class="q-panel" @click.stop @click.self="close">
     <div class="q-content">
       <div class="q-title">播放设置</div>
       <div class="q-section">画质</div>
@@ -152,8 +154,8 @@ function delayLabel(d: number) {
     </div>
   </div>
 
-  <!-- 移动端：底部弹出 sheet -->
-  <div v-else class="m-q-mask" @click.self="close">
+  <!-- 移动端：底部弹出 sheet（同样受 modelValue 控制） -->
+  <div v-else-if="props.modelValue" class="m-q-mask" @click.self="close">
     <div class="m-q-sheet">
       <div class="m-q-handle"></div>
       <div class="m-q-title">播放设置</div>
