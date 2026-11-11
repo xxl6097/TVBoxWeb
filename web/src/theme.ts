@@ -34,3 +34,38 @@ export const T = {
 } as const
 
 export type ThemeT = typeof T
+
+// ===== 主题切换 =====
+export type ThemeMode = 'dark' | 'light' | 'system'
+const THEME_KEY = 'yz_theme'
+
+export function getTheme(): ThemeMode {
+  try {
+    const v = localStorage.getItem(THEME_KEY)
+    return v === 'light' || v === 'dark' || v === 'system' ? v : 'dark'
+  } catch { return 'dark' }
+}
+
+export function setTheme(mode: ThemeMode): void {
+  try { localStorage.setItem(THEME_KEY, mode) } catch { /* ignore */ }
+  applyTheme(mode)
+}
+
+export function applyTheme(mode: ThemeMode = getTheme()): void {
+  if (typeof document === 'undefined') return
+  const prefersDark = typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: dark)').matches
+  const dark = mode === 'dark' || (mode === 'system' && prefersDark)
+  const root = document.documentElement
+  root.classList.toggle('dark', dark)
+  root.classList.toggle('light', !dark)
+  document.querySelector('meta[name="theme-color"]')
+    ?.setAttribute('content', dark ? '#141218' : '#f7f6f8')
+}
+
+export function watchSystemTheme(): void {
+  if (typeof matchMedia !== 'function') return
+  const mq = matchMedia('(prefers-color-scheme: dark)')
+  const fn = () => { if (getTheme() === 'system') applyTheme('system') }
+  if (mq.addEventListener) mq.addEventListener('change', fn)
+  else mq.addListener(fn)
+}

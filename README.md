@@ -198,6 +198,38 @@ TVBoxWeb/
 
 ---
 
+---
+
+## 🆕 v1.5.0 · 三批加固与打磨
+
+**第四批（止血：可用性 / 安全 / 可靠性）**
+- **修复在线升级死链**：升级器原先找 `TVBoxWeb_<ver>_<os>_<arch>`，但 CI 产物是 `yezhen-<os>-<arch>`，v1.3.1 起在线升级一直报「未找到安装包」。现已统一产物名，并消费 Release 里的 `checksums.txt` 做 SHA256 校验、semver 只升不降、保留 `.backup` 到下次启动自检通过
+- 可选访问口令：`-token`（或 `tvbox.WithAuthToken`），`/api/*` 与 `/ws` 用 `X-Auth-Token`/`Bearer`/query 传递；口令会透传进 m3u8 分片地址。设置页「数据 → 访问口令」配置。默认关闭，兼容原有单机部署
+- CORS 由 `*` 收紧为同源 + 白名单；WebSocket 校验 Origin；`/api/proxy`、`/api/peek`、EPG、清晰度、WebDAV 等统一做 SSRF 校验（拒绝内网 / 云元数据 / 保留 IP，重定向逐跳复检），`-allow-private` 可放行家用 NAS；WebDAV 密码回显脱敏
+- `store.json` 改为「临时文件 + fsync + rename」原子写，保留 `.bak`；主文件损坏时启动自动回滚备份；读侧 RWMutex、写侧串行化
+- `http.Server` 显式超时 + SIGINT/SIGTERM 优雅退出；定时抓取改为常驻 ticker（原先只在启动时检查一次）；HTTP 连接池复用 + 文本响应 8MB 上限
+
+**第五批（状态一致性）**
+- 路由 `scrollBehavior` + 点播页把站点/分类/筛选/页码写进 URL，返回列表不再丢状态与滚动位置
+- 任何写操作成功后自动失效 IndexedDB / Service Worker / 内存缓存；相同 GET 并发去重；幂等 GET 网络抖动自动重试一次
+- 搜索真正透传 `AbortSignal`，快速连搜不再出现旧结果覆盖新结果
+- 播放页新增「选集」抽屉（可按集数/名称过滤，桌面与移动端均可进入）
+- 统一 `ErrorState` 错误占位与重试按钮（点播 / 详情）
+- 设置页新增整站备份导出 / 导入 / 恢复出厂（`/api/backup`、`/api/restore`、`/api/reset`）
+
+**第六批（体验与工程化）**
+- 浅色主题 / 深色 / 跟随系统（设置页「数据 → 外观」，持久化到 localStorage）；全局 `:focus-visible` 描边；导航与影片卡片支持键盘 Enter/Space
+- 大列表渐进渲染（首屏 60 张 + IntersectionObserver 追加 + `content-visibility`），点播/首页/收藏/搜索不再一次性挂载上千 DOM
+- 移动端全屏统一走 CSS 状态并尝试锁定横屏；修复 VodCard 点击态选择器、LiveView WebSocket 回调泄漏、连播倒计时与投屏监听未清理
+- 单测覆盖升级校验 / SSRF / 鉴权 / m3u8 口令透传 / store 原子写与并发落盘（`go test -race ./...` 全通过）；CI 新增 vet + race 测试 job；API 请求日志带 requestID / 状态码 / 耗时，panic 打印堆栈
+- 版本号统一为 v1.5.0（源码 / Dockerfile / build.sh）；Docker 镜像改为非 root 并声明 `VOLUME /app/data`
+
+**验证**：`go build ./...`、`go vet ./...`、`go test -race ./...`、`npm run build`（含 `vue-tsc --noEmit`）全部通过。
+
+**公网部署建议**：务必加 `-token <口令>`；需要访问内网订阅/网盘源时才加 `-allow-private`；跨域调试用 `-origins https://your-dev-host`；用 Docker 时挂载 `-v $(pwd)/data:/app/data`。
+
+---
+
 ## 🚀 开发
 
 ```bash

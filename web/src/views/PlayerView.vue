@@ -160,7 +160,25 @@ async function toggleCast() {
 const playerEl = ref<HTMLElement>()
 const isFullscreen = ref(false)
 
+function tryLockLandscape() {
+  try {
+    const p = (screen as any)?.orientation?.lock?.('landscape')
+    if (p?.catch) p.catch(() => {})
+  } catch { /* 部分浏览器不支持，忽略 */ }
+}
+
+function tryUnlockOrientation() {
+  try { (screen as any)?.orientation?.unlock?.() } catch { /* ignore */ }
+}
+
 function toggleFullscreen() {
+  // 移动端统一走 CSS 全屏类，避免原生 Fullscreen API 与 isFullscreen 状态不同步
+  if (isMobile.value) {
+    isFullscreen.value = !isFullscreen.value
+    if (isFullscreen.value) tryLockLandscape()
+    else tryUnlockOrientation()
+    return
+  }
   const el = playerEl.value
   if (!el) return
   const doc = document as any
@@ -178,6 +196,7 @@ function toggleFullscreen() {
       (el as any).mozRequestFullScreen ||
       (el as any).msRequestFullscreen
     req?.call(el)
+    tryLockLandscape()
   }
 }
 
@@ -220,8 +239,11 @@ onMounted(async () => {
   // 监听投屏连接状态（Remote Playback API）
   const remote = remoteApi()
   if (remote) {
-    remote.addEventListener?.('connect', () => { castConnected.value = true; app.showTip('已连接投屏设备') })
-    remote.addEventListener?.('disconnect', () => { castConnected.value = false; app.showTip('投屏已断开') })
+    const onConnect = () => { castConnected.value = true; app.showTip('已连接投屏设备') }
+    const onDisconnect = () => { castConnected.value = false; app.showTip('投屏已断开') }
+    remote.addEventListener?.('connect', onConnect)
+    remote.addEventListener?.('disconnect', onDisconnect)
+    castHandlers = { onConnect, onDisconnect }
     castConnected.value = remote.state === 'connected'
   }
 })
@@ -234,6 +256,14 @@ onUnmounted(() => {
   if (volSaveTimer) clearTimeout(volSaveTimer)
   removeExternalSub()
   if (subStyleEl) { subStyleEl.remove(); subStyleEl = null }
+  if (autoplayTimer) { clearInterval(autoplayTimer); autoplayTimer = 0 }
+  if (castHandlers) {
+    const remote = remoteApi()
+    remote?.removeEventListener?.('connect', castHandlers.onConnect)
+    remote?.removeEventListener?.('disconnect', castHandlers.onDisconnect)
+    castHandlers = null
+  }
+  tryUnlockOrientation()
   // 页面卸载时确保最终进度被保存
   savePos()
   destroyPlayer()
@@ -465,12 +495,14 @@ function bindVideoEvents(vid: HTMLVideoElement) {
       // 自动连播：3 秒倒计时后切下一集
       let countdown = 3
       hint.value = `即将播放下一集（${countdown}s）`
-      const countdownTimer = setInterval(() => {
+      if (autoplayTimer) clearInterval(autoplayTimer)
+      autoplayTimer = window.setInterval(() => {
         countdown--
         if (countdown > 0) {
           hint.value = `即将播放下一集（${countdown}s）`
         } else {
-          clearInterval(countdownTimer)
+          clearInterval(autoplayTimer)
+          autoplayTimer = 0
           hint.value = ''
           switchEpisode(1)
         }
@@ -1127,6 +1159,8 @@ function toggleMute() {
 
 // ===== 选集抽屉 =====
 const showEps = ref(false)
+let autoplayTimer = 0
+let castHandlers: { onConnect: () => void; onDisconnect: () => void } | null = null
 const epKeyword = ref('')
 const filteredEps = computed(() => {
   const k = epKeyword.value.trim().toLowerCase()
@@ -1237,6 +1271,7 @@ function destroyPlayer() {
   }
   if (skipTimer) clearInterval(skipTimer)
   if (flashTimer) clearTimeout(flashTimer)
+  if (autoplayTimer) { clearInterval(autoplayTimer); autoplayTimer = 0 }
   playFlash.value = ''
 }
 

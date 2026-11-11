@@ -4,6 +4,7 @@ import { useRouter, useRoute } from 'vue-router'
 import { api } from '@/api'
 import { useAppStore } from '@/stores/app'
 import { isOffline } from '@/pwa'
+import { applyTheme, watchSystemTheme } from '@/theme'
 import TipToast from '@/components/TipToast.vue'
 import PrivacyPanel from '@/components/PrivacyPanel.vue'
 
@@ -55,6 +56,8 @@ function onTouchEnd(e: TouchEvent) {
 }
 
 onMounted(async () => {
+  applyTheme()
+  watchSystemTheme()
   await app.loadStatus()
   try {
     const p = await api.privacy()

@@ -19,6 +19,34 @@
   --radius-pill: 28px;
 }
 
+
+/* ===== 亮色主题（覆盖同名的深色设计令牌）===== */
+html.light {
+  --bg: #f7f6f8;
+  --surface: #ffffff;
+  --surface-2: #eeeef2;
+  --border: #d9d8de;
+  --txt: #1a1820;
+  --sub: rgba(0, 0, 0, 0.68);
+  --dim: rgba(0, 0, 0, 0.46);
+  --selected: #f5c400;
+  --accent: #1a1820;
+  --card: rgba(0, 0, 0, 0.04);
+  --card-hi: rgba(0, 0, 0, 0.09);
+  --white-15: rgba(0, 0, 0, 0.06);
+  --white-30: rgba(0, 0, 0, 0.14);
+  --warn: #b3261e;
+  --live: #d32f2f;
+}
+html.light body { background: var(--bg); color: var(--txt); }
+
+/* 键盘可达：所有可交互元素聚焦时有清晰描边 */
+:focus-visible {
+  outline: 2px solid var(--selected);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
 html,
 body,
 #app {

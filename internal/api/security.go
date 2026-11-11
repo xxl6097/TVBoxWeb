@@ -3,6 +3,7 @@ package api
 
 import (
 	"crypto/subtle"
+	"fmt"
 	"log"
 	"net/http"
 	"net/url"
@@ -41,47 +42,87 @@ func SetSecurity(c SecurityConfig) {
 	})
 }
 
-// Secure 是完整的外层中间件：CORS 收紧 + 可选口令鉴权 + panic 恢复 + 指标。
+// statusRecorder 只用于普通 API 响应；视频流 / WebSocket 直接用原生
+// ResponseWriter，避免破坏 Hijack / Flush / 流式转发。
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	if s.status == 0 {
+		s.status = code
+	}
+	s.ResponseWriter.WriteHeader(code)
+}
+func (s *statusRecorder) Write(b []byte) (int, error) {
+	if s.status == 0 {
+		s.status = 200
+	}
+	return s.ResponseWriter.Write(b)
+}
+func (s *statusRecorder) Flush() {
+	if f, ok := s.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Secure 是完整的外层中间件：CORS 收紧 + 可选口令鉴权 + panic 恢复 + 请求日志 + 指标。
 func Secure(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		isAPI := strings.HasPrefix(r.URL.Path, "/api/")
+		requestID := fmt.Sprintf("%x", start.UnixNano())
+		lg := sec.Logger
+		if lg == nil {
+			lg = log.Default()
+		}
+		var rw http.ResponseWriter = w
+		var recorder *statusRecorder
+		if isAPI && r.URL.Path != "/api/proxy" {
+			recorder = &statusRecorder{ResponseWriter: w}
+			rw = recorder
+			w.Header().Set("X-Request-ID", requestID)
+		}
 
 		defer func() {
-			if rec := recover(); rec != nil {
-				lg := sec.Logger
-				if lg == nil {
-					lg = log.Default()
-				}
-				lg.Printf("PANIC %s %s: %v\n%s", r.Method, r.URL.Path, rec, debug.Stack())
+			status := 200
+			if recorder != nil && recorder.status != 0 {
+				status = recorder.status
+			}
+			if panicVal := recover(); panicVal != nil {
+				lg.Printf("PANIC %s %s: %v\n%s", r.Method, r.URL.Path, panicVal, debug.Stack())
 				metrics.RecordError()
-				failWith(w, 500, ErrInternal, "内部错误")
+				failWith(rw, 500, ErrInternal, "内部错误")
+				status = 500
 			}
 			if isAPI {
-				metrics.Record(r.URL.Path, time.Since(start).Milliseconds())
+				ms := time.Since(start).Milliseconds()
+				metrics.Record(r.URL.Path, ms)
+				lg.Printf("[%s] %s %s %d %dms", requestID, r.Method, r.URL.Path, status, ms)
 			}
 		}()
 
 		// --- CORS：同源放行，白名单放行，其余不返回 CORS 头 ---
 		origin := r.Header.Get("Origin")
 		if origin != "" && originAllowed(origin, r.Host) {
-			w.Header().Set("Access-Control-Allow-Origin", origin)
+			rw.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
 		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Auth-Token, Range")
 		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
+			rw.WriteHeader(http.StatusNoContent)
 			return
 		}
 
 		// --- 可选访问口令（只保护 API 与 WebSocket，静态资源必须能匿名加载）---
 		if sec.AuthToken != "" && needsAuth(r.URL.Path) && !authOK(r) {
-			failWith(w, 401, ErrAuth, "需要访问口令，请在「设置 → 访问口令」中配置")
+			failWith(rw, 401, ErrAuth, "需要访问口令，请在「设置 → 访问口令」中配置")
 			return
 		}
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(rw, r)
 	})
 }
 

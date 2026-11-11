@@ -28,7 +28,7 @@ COPY . .
 COPY --from=web-builder /build/dist ./dist
 
 # 编译：禁用 CGO、Linux 目标，注入版本信息
-ARG APP_VERSION=v1.1.2
+ARG APP_VERSION=v1.5.0
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
     -trimpath -ldflags="-s -w -X github.com/xxl6097/TVBoxWeb/internal/api.AppVersion=${APP_VERSION} -X github.com/xxl6097/TVBoxWeb/internal/api.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%S)" \
     -o /tmp/app ./cmd/tvbox
@@ -43,6 +43,11 @@ WORKDIR /app
 
 # 仅复制构建产物，不包含源代码和 node_modules
 COPY --from=go-builder /tmp/app ./app
+
+# 非 root 运行 + 数据卷（容器重启不丢 store.json）
+RUN addgroup -S app && adduser -S app -G app && chown -R app:app /app
+USER app
+VOLUME ["/app/data"]
 
 # 设置时区
 ENV TZ=Asia/Shanghai

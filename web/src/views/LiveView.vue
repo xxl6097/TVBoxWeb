@@ -78,17 +78,20 @@ onMounted(async () => {
   // 加载收藏的直播频道
   liveFavs.value = await api.liveFavs().catch(() => [])
 
-  // 订阅 WebSocket 健康度更新
+  // 订阅 WebSocket 健康度更新（保存引用，卸载时才能精确移除）
   const ws = getWSClient()
-  ws.onHealth((update: HealthUpdate) => {
-    siteHealthStatus.value.set(update.siteKey, update)
-  })
+  ws.onHealth(onHealthUpdate)
 })
 
 onUnmounted(() => {
   const ws = getWSClient()
-  ws.offHealth(() => {}) // 简单方案：移除所有回调；生产环境可保存回调引用
+  ws.offHealth(onHealthUpdate)
 })
+
+// 与 onMounted/onUnmounted 共用同一个引用，避免反复进出页面导致回调累积
+const onHealthUpdate = (update: HealthUpdate) => {
+  siteHealthStatus.value.set(update.siteKey, update)
+}
 
 async function loadChannels() {
   if (!currentUrl.value) return

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # 夜帧影视 · 跨平台打包脚本
-# 用法：./build.sh [版本号]   （默认 v1.1.0）
+# 用法：./build.sh [版本号]   （默认与 internal/api.AppVersion 保持一致）
 # 产出：release/<版本号>/ 下各平台二进制 + 压缩包
 set -euo pipefail
 
 cd "$(dirname "$0")"
 
-VERSION="${1:-v1.1.0}"
+VERSION="${1:-v1.5.0}"
 RELEASE="release/${VERSION}"
 rm -rf "$RELEASE"
 mkdir -p "$RELEASE"

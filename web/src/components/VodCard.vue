@@ -20,7 +20,15 @@ const firstChar = computed(() => (props.vod.name ? props.vod.name.trim()[0] || '
 </script>
 
 <template>
-  <div class="vod-card" @click="emit('click', vod)">
+  <div
+    class="vod-card"
+    role="button"
+    tabindex="0"
+    :aria-label="`打开 ${vod.name}`"
+    @click="emit('click', vod)"
+    @keydown.enter="emit('click', vod)"
+    @keydown.space.prevent="emit('click', vod)"
+  >
     <div class="poster">
       <img v-if="!failed && vod.pic" :src="vod.pic" :alt="vod.name" loading="lazy" @error="onErr" />
       <div v-else class="placeholder">
@@ -131,7 +139,7 @@ const firstChar = computed(() => (props.vod.name ? props.vod.name.trim()[0] || '
 
 /* ===== 移动端：触摸替代 hover ===== */
 @media (max-width: 640px) {
-  .card:active .poster {
+  .vod-card:active .poster {
     border-color: #fff;
     transform: scale(0.97);
   }

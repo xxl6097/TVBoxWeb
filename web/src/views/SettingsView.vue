@@ -2,6 +2,7 @@
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { api, humanizeApiError, getAuthToken, setAuthToken } from '@/api'
+import { getTheme, setTheme, type ThemeMode } from '@/theme'
 import { useAppStore } from '@/stores/app'
 import type { Site, WebdavSource } from '@/types'
 import TopBar from '@/components/TopBar.vue'
@@ -12,6 +13,12 @@ const router = useRouter()
 
 // ===== 访问口令（服务端 -token 开启后必须一致）=====
 const authTokenInput = ref(getAuthToken())
+const themeMode = ref<ThemeMode>(getTheme())
+function changeTheme(m: ThemeMode) {
+  themeMode.value = m
+  setTheme(m)
+  app.showTip('外观已切换')
+}
 function saveAuthToken() {
   setAuthToken(authTokenInput.value.trim())
   app.showTip('访问口令已保存，刷新页面后生效')
@@ -561,6 +568,19 @@ async function clearHistory() {
               <el-button size="small" type="primary" @click="saveAuthToken">保存</el-button>
             </div>
             <div class="sdiv"></div>
+            <div class="srow">
+              <span class="srow-title">外观</span>
+              <span class="theme-chips">
+                <span
+                  v-for="t in ([{ k: 'dark', n: '深色' }, { k: 'light', n: '浅色' }, { k: 'system', n: '跟随系统' }] as const)"
+                  :key="t.k"
+                  class="chip"
+                  :class="{ active: themeMode === t.k }"
+                  @click="changeTheme(t.k)"
+                >{{ t.n }}</span>
+              </span>
+            </div>
+            <div class="sdiv"></div>
             <div class="srow srow-clickable" @click="exportBackup">
               <span class="srow-title">导出备份</span>
               <span class="srow-val">配置 / 收藏 / 历史 / 偏好</span>
@@ -911,4 +931,7 @@ async function clearHistory() {
   .site-meta { max-width: none; }
   .site-row { padding: 10px 14px; }
 }
+.theme-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.theme-chips .chip { cursor: pointer; }
+.theme-chips .chip.active { background: var(--selected); color: #000; }
 </style>

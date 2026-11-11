@@ -58,7 +58,13 @@ function navigate(path: string) {
         :key="n.name"
         class="nav-item"
         :class="{ active: active(n.path) }"
+        role="button"
+        tabindex="0"
+        :aria-label="`前往${n.label}`"
+        :aria-current="active(n.path) ? 'page' : undefined"
         @click="navigate(n.path)"
+        @keydown.enter="navigate(n.path)"
+        @keydown.space.prevent="navigate(n.path)"
       >
         {{ n.label }}
       </span>
@@ -79,7 +85,12 @@ function navigate(path: string) {
         :key="n.name"
         class="mobile-nav-item"
         :class="{ active: active(n.path) }"
+        role="button"
+        tabindex="0"
+        :aria-label="`前往${n.label}`"
         @click="navigate(n.path)"
+        @keydown.enter="navigate(n.path)"
+        @keydown.space.prevent="navigate(n.path)"
       >
         {{ n.label }}
       </span>
