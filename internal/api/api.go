@@ -34,7 +34,7 @@ import (
 
 // 版本信息（通过 ldflags -X 注入，默认值兜底）。
 var (
-	AppVersion = "v1.6.1"
+	AppVersion = "v1.6.2"
 	BuildTime  = "unknown"
 )
 
@@ -1417,15 +1417,8 @@ func hWdSources(w http.ResponseWriter, r *http.Request) {
 		if !guardSourceURL(w, src.URL) {
 			return
 		}
-		// 前端回传掩码时保留服务端已存的真实密码，避免「查看即清空密码」
-		if src.Pass == maskedPassword {
-			for _, old := range store.WebdavSources() {
-				if old.ID == src.ID {
-					src.Pass = old.Pass
-					break
-				}
-			}
-		}
+		// 掩码或留空都表示「沿用已存密码」，避免「查看即清空密码」或存成星号
+		resolveWdPass(&src)
 		store.SaveWebdavSource(src)
 		RefreshTrustedHosts()
 		ok(w, map[string]any{"ok": true})
@@ -1433,6 +1426,38 @@ func hWdSources(w http.ResponseWriter, r *http.Request) {
 		store.RemoveWebdavSource(q(r, "id"))
 		RefreshTrustedHosts()
 		ok(w, map[string]any{"ok": true})
+	}
+}
+
+// resolveWdPass 把「掩码」和「空」都解释成「沿用已保存的密码」。
+//
+// 背景：GET /api/webdav/sources 出于安全不回显密码，返回的是 maskedPassword。
+// 前端把这个值回填进表单后再点「测试连接」，就会拿 "******" 当密码去认证 → 401。
+// 保存时同理会把真实密码覆盖成星号。这里统一在服务端兜底：
+//   - 传了掩码或留空 → 按 id（其次按 url+user）找回已存的密码；
+//   - 找不到对应的已存源（属于新增）→ 保持原样，空密码即匿名访问。
+func resolveWdPass(src *model.WebdavSource) {
+	if src.Pass != "" && src.Pass != maskedPassword {
+		return
+	}
+	stored := store.WebdavSources()
+	norm := func(s string) string { return strings.ToLower(strings.TrimRight(strings.TrimSpace(s), "/")) }
+
+	for _, old := range stored {
+		if src.ID != "" && old.ID == src.ID {
+			src.Pass = old.Pass
+			return
+		}
+	}
+	// 前端新增/编辑时可能没带 id，按地址 + 用户名兜底
+	for _, old := range stored {
+		if norm(old.URL) == norm(src.URL) && old.User == src.User {
+			src.Pass = old.Pass
+			if src.ID == "" {
+				src.ID = old.ID
+			}
+			return
+		}
 	}
 }
 
@@ -1445,6 +1470,8 @@ func hWdProbe(w http.ResponseWriter, r *http.Request) {
 	if !guardSourceURL(w, src.URL) {
 		return
 	}
+	// 前端可能传来掩码密码，先还原成真实密码再认证
+	resolveWdPass(&src)
 	n, err := webdav.ProbeCtx(r.Context(), src)
 	if err != nil {
 		fail(w, 400, err.Error())
@@ -1462,6 +1489,8 @@ func hWdList(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "参数错误")
 		return
 	}
+	// 前端传的是列表接口返回的掩码对象，先用服务端存的真实密码还原
+	resolveWdPass(&req.Src)
 	if req.Path == "" {
 		req.Path = webdav.MountHref(req.Src)
 	}
@@ -1489,6 +1518,7 @@ func hWdScan(w http.ResponseWriter, r *http.Request) {
 	if req.MaxDepth > 8 {
 		req.MaxDepth = 8
 	}
+	resolveWdPass(&req.Src)
 	vods := webdav.ScanCtx(r.Context(), req.Src, req.MaxDepth, nil)
 	if req.Src.ID != "" {
 		store.SaveWebdavScan(req.Src.ID, vods)

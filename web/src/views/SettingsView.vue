@@ -115,6 +115,8 @@ const wdForm     = ref<WebdavSource>({ id: '', name: '', url: '', user: '', pass
 const wdMsg      = ref('')
 const wdMsgOk    = ref(false)
 const wdTesting  = ref(false)
+// 编辑已有挂载时，服务端只回显掩码；用它提示「留空 = 沿用已保存密码」
+const wdHasSavedPass = ref(false)
 
 // ===== 数据 =====
 const confirmClear = ref(false)
@@ -288,12 +290,17 @@ function speedOk(key: string): boolean | null {
 // ---------- 网盘 ----------
 function openWdAdd() {
   wdForm.value = { id: '', name: '', url: '', user: '', pass: '', root: '' }
+  wdHasSavedPass.value = false
   wdMsg.value = ''
   wdEditOpen.value = true
 }
 
 function openWdEdit(s: WebdavSource) {
-  wdForm.value = { ...s }
+  // 列表接口不回显真实密码（拿到的是 ******）。不能把掩码填进密码框：
+  // 一是看起来像「密码自己变成了星号」，二是原样提交/测试连接会用 ****** 去认证，必然 401。
+  // 这里留空，并把「已有密码」告诉用户；留空提交时由服务端沿用已存密码。
+  wdForm.value = { ...s, pass: '' }
+  wdHasSavedPass.value = !!s.pass
   wdMsg.value = ''
   wdEditOpen.value = true
 }
@@ -677,7 +684,15 @@ async function clearHistory() {
       <el-input v-model="wdForm.name" placeholder="名称（可留空，默认取域名）" clearable class="wd-input" />
       <el-input v-model="wdForm.url" placeholder="服务器地址，如 https://dav.example.com/dav" clearable class="wd-input" />
       <el-input v-model="wdForm.user" placeholder="用户名（匿名可留空）" clearable class="wd-input" />
-      <el-input v-model="wdForm.pass" placeholder="密码" type="password" show-password clearable class="wd-input" />
+      <el-input
+        v-model="wdForm.pass"
+        :placeholder="wdHasSavedPass ? '密码（留空 = 沿用已保存的密码）' : '密码'"
+        type="password"
+        show-password
+        clearable
+        class="wd-input"
+      />
+      <p v-if="wdHasSavedPass" class="wd-hint">密码已保存在服务端，留空即不修改；要清空请删掉挂载后重新添加。</p>
       <el-input v-model="wdForm.root" placeholder="挂载根路径，如 /影视（可留空 = 根目录）" clearable class="wd-input" />
       <p v-if="wdMsg" class="wd-msg" :class="{ ok: wdMsgOk }">{{ wdMsg }}</p>
     </div>
@@ -856,6 +871,7 @@ async function clearHistory() {
 .wd-input { }
 .wd-msg { font-size: 13px; color: var(--warn); margin: 0; }
 .wd-msg.ok { color: #b7f0bc; }
+.wd-hint { font-size: 12px; color: var(--dim); margin: -2px 0 0; line-height: 1.5; }
 .wd-footer { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 
 /* ===== 订阅行（两段布局：名称行 + 输入行） ===== */

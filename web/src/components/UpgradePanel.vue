@@ -89,14 +89,15 @@
     <!-- 升级完成 -->
     <div v-else-if="upgraded" class="up-row up-row-done">
       <span class="up-row-icon">✓</span>
-      <span>{{ doneMessage || '升级完成，请重启服务生效' }}</span>
+      <span>{{ doneMessage || '升级完成' }}</span>
+      <span class="up-done-hint">正在刷新界面…（重启服务后新版本生效）</span>
     </div>
 
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 
 const currentVersion = ref('…')
 const buildTime = ref('…')
@@ -126,6 +127,10 @@ const progressPct = ref(0)
 const showPct = computed(() => stageName.value !== '' && progressPct.value > 0)
 
 onMounted(loadVersion)
+onUnmounted(() => {
+  if (reloadTimer) clearTimeout(reloadTimer)
+  if (confirmTimer) clearTimeout(confirmTimer)
+})
 
 async function loadVersion() {
   try {
@@ -214,8 +219,7 @@ async function runUpgrade() {
   }
 }
 
-function handleSSE(raw: string) {
-  let event = 'message'
+function handleSSE(raw: string) {  let event = 'message'
   let data = ''
   for (const line of raw.split('\n')) {
     if (line.startsWith('event:')) event = line.slice(6).trim()
@@ -230,7 +234,8 @@ function handleSSE(raw: string) {
     case 'done':
       upgrading.value = false
       upgraded.value = true
-      doneMessage.value = payload.message || '升级完成，请重启服务生效'
+      doneMessage.value = payload.message || '升级完成'
+      scheduleReload()
       break
     case 'error':
       upgrading.value = false
@@ -239,8 +244,7 @@ function handleSSE(raw: string) {
   }
 }
 
-function applyProgress(p: any) {
-  // 阶段归一化：正常是 "downloading" 这样的名字；v1.6.1 及更早的服务端
+function applyProgress(p: any) {  // 阶段归一化：正常是 "downloading" 这样的名字；v1.6.1 及更早的服务端
   // 直接推数字码（1），不处理的话界面上会孤零零显示一个「1」，
   // 而且下面的 stage === 'downloading' 判断全部失效，进度条永远不动。
   const key = normalizeStage(p.stage)
@@ -289,6 +293,18 @@ function fmtSize(bytes: number): string {
   let i = 0, n = bytes
   while (n >= 1024 && i < u.length - 1) { n /= 1024; i++ }
   return n.toFixed(1) + ' ' + u[i]
+}
+
+// 升级写入磁盘后自动刷新界面，让版本号/更新状态重新拉取。
+// 注意：替换的是可执行文件，当前进程仍在跑旧代码，
+// 所以刷新只解决「界面信息停留在旧状态」，新版本要重启服务后才真正生效。
+let reloadTimer = 0
+function scheduleReload() {
+  if (reloadTimer) return
+  reloadTimer = window.setTimeout(() => {
+    reloadTimer = 0
+    window.location.reload()
+  }, 1600)
 }
 
 function fmtDate(iso: string): string {
@@ -418,6 +434,7 @@ function formatMarkdown(text: string): string {
 .up-row-icon { font-size: 16px; flex-shrink: 0; }
 .up-row-ok   { color: #7ee787; border-color: rgba(126, 231, 135, 0.3); background: rgba(126, 231, 135, 0.06); }
 .up-row-done { color: #7ee787; border-color: rgba(126, 231, 135, 0.3); background: rgba(126, 231, 135, 0.06); }
+.up-done-hint { margin-left: auto; font-size: 12px; color: var(--dim); }
 .up-row-error { color: var(--warn); border-color: rgba(255, 180, 171, 0.3); background: rgba(255, 180, 171, 0.06); }
 
 /* ======== 新版本通知 ======== */
