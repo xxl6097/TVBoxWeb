@@ -3,6 +3,7 @@ package upgrade
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -454,5 +455,49 @@ func TestPrunePartsKeepsCurrent(t *testing.T) {
 	}
 	if _, err := os.Stat(other); err != nil {
 		t.Fatal("非 .part 文件不应被清理")
+	}
+}
+
+// ---------- 进度序列化 ----------
+
+// 关键回归：SSE 里的阶段必须是 "downloading" 这样的名字。
+// 之前用 int 序列化，前端按字符串查表查不到，界面上直接显示一个「1」，
+// 并且 stage === 'downloading' 恒为 false，进度条完全不动。
+func TestStageMarshalsAsName(t *testing.T) {
+	cases := map[UpgradeStage]string{
+		StageChecking:    `"checking"`,
+		StageDownloading: `"downloading"`,
+		StageVerifying:   `"verifying"`,
+		StageReplacing:   `"replacing"`,
+		StageDone:        `"done"`,
+	}
+	for st, want := range cases {
+		b, err := json.Marshal(st)
+		if err != nil {
+			t.Fatalf("Marshal(%v) 出错: %v", st, err)
+		}
+		if string(b) != want {
+			t.Errorf("阶段序列化应为 %s，实际 %s", want, b)
+		}
+	}
+
+	p := UpgradeProgress{Stage: StageDownloading, Loaded: 100, Total: 400, Message: "已下载 25.0%"}
+	b, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"stage":"downloading"`) {
+		t.Fatalf("进度 JSON 应含字符串阶段，实际 %s", b)
+	}
+}
+
+func TestStageUnmarshalAcceptsNameAndLegacyInt(t *testing.T) {
+	var st UpgradeStage
+	if err := json.Unmarshal([]byte(`"verifying"`), &st); err != nil || st != StageVerifying {
+		t.Fatalf("应能从名字还原，得到 %v err=%v", st, err)
+	}
+	// 兼容旧版本推送的数字码（v1.6.1 及更早）
+	if err := json.Unmarshal([]byte(`1`), &st); err != nil || st != StageDownloading {
+		t.Fatalf("应能从数字还原，得到 %v err=%v", st, err)
 	}
 }

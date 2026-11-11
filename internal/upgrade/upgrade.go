@@ -137,6 +137,43 @@ func (s UpgradeStage) String() string {
 	}
 }
 
+// MarshalJSON 让阶段以名字（"downloading"）而不是数字码（1）出现在 JSON 里。
+// encoding/json 不会自动调用 String()，不加这个方法的话
+// SSE 推的是 {"stage":1}，前端按字符串查表查不到，界面上会直接显示一个「1」。
+func (s UpgradeStage) MarshalJSON() ([]byte, error) {
+	return json.Marshal(s.String())
+}
+
+// UnmarshalJSON 支持从名字还原（库使用者解码历史/手工构造的进度时对称可用）。
+func (s *UpgradeStage) UnmarshalJSON(b []byte) error {
+	var name string
+	if err := json.Unmarshal(b, &name); err == nil {
+		for st, n := range stageNames {
+			if n == name {
+				*s = st
+				return nil
+			}
+		}
+		*s = StageChecking
+		return nil
+	}
+	// 兼容旧版本推送的数字码
+	var n int
+	if err := json.Unmarshal(b, &n); err != nil {
+		return fmt.Errorf("无法解析升级阶段：%w", err)
+	}
+	*s = UpgradeStage(n)
+	return nil
+}
+
+var stageNames = map[UpgradeStage]string{
+	StageChecking:    "checking",
+	StageDownloading: "downloading",
+	StageVerifying:   "verifying",
+	StageReplacing:   "replacing",
+	StageDone:        "done",
+}
+
 // UpgradeProgress 升级进度信息
 type UpgradeProgress struct {
 	Stage   UpgradeStage `json:"stage"`

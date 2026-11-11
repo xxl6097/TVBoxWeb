@@ -75,12 +75,15 @@
     <div v-else-if="upgrading" class="up-progress">
       <div class="up-progress-head">
         <span class="up-progress-label">{{ stageText }}</span>
-        <span v-if="loaded > 0 || total > 0" class="up-progress-size">{{ fmtSize(loaded) }}{{ total > 0 ? ' / ' + fmtSize(total) : '' }}</span>
+        <span class="up-progress-meta">
+          <span v-if="showPct" class="up-progress-pct">{{ progressPct }}%</span>
+          <span v-if="loaded > 0 || total > 0" class="up-progress-size">{{ fmtSize(loaded) }}{{ total > 0 ? ' / ' + fmtSize(total) : '' }}</span>
+        </span>
       </div>
-      <div class="up-bar">
+      <div class="up-bar" role="progressbar" :aria-valuenow="progressPct" aria-valuemin="0" aria-valuemax="100">
         <div class="up-bar-fill" :style="{ width: progressPct + '%' }"></div>
       </div>
-      <p v-if="progressMsg" class="up-progress-msg">{{ progressMsg }}</p>
+      <p v-if="progressMsg && !showPct" class="up-progress-msg">{{ progressMsg }}</p>
     </div>
 
     <!-- 升级完成 -->
@@ -93,7 +96,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 
 const currentVersion = ref('…')
 const buildTime = ref('…')
@@ -114,10 +117,13 @@ let confirmTimer = 0
 const upgraded = ref(false)
 const doneMessage = ref('')
 const stageText = ref('')
+const stageName = ref('')
 const progressMsg = ref('')
 const loaded = ref(0)
 const total = ref(0)
 const progressPct = ref(0)
+// 有明确百分比时才显示数字，避免「校验文件…」阶段顶个 0%
+const showPct = computed(() => stageName.value !== '' && progressPct.value > 0)
 
 onMounted(loadVersion)
 
@@ -234,24 +240,47 @@ function handleSSE(raw: string) {
 }
 
 function applyProgress(p: any) {
-  const stageMap: Record<string, string> = {
-    checking: '检查版本…',
-    downloading: '下载中…',
-    verifying: '校验 sha256…',
-    replacing: '替换文件…',
-    done: '升级完成',
-  }
-  stageText.value = stageMap[p.stage] || p.stage || '处理中…'
-  if (p.stage === 'downloading') {
+  // 阶段归一化：正常是 "downloading" 这样的名字；v1.6.1 及更早的服务端
+  // 直接推数字码（1），不处理的话界面上会孤零零显示一个「1」，
+  // 而且下面的 stage === 'downloading' 判断全部失效，进度条永远不动。
+  const key = normalizeStage(p.stage)
+  stageName.value = key
+  stageText.value = STAGE_TEXT[key] || '处理中…'
+
+  if (key === 'downloading') {
     loaded.value = p.loaded || 0
     total.value = p.total || 0
-    if (p.total > 0) progressPct.value = Math.min(95, Math.round((p.loaded / p.total) * 100))
-  } else if (p.stage === 'verifying') {
+    if (total.value > 0) {
+      progressPct.value = Math.min(95, Math.round((loaded.value / total.value) * 100))
+    }
+  } else if (key === 'verifying') {
     progressPct.value = 97
-  } else if (p.stage === 'replacing' || p.stage === 'done') {
+  } else if (key === 'replacing' || key === 'done') {
     progressPct.value = 100
   }
   progressMsg.value = p.message || ''
+}
+
+const STAGE_ORDER = ['checking', 'downloading', 'verifying', 'replacing', 'done'] as const
+const STAGE_TEXT: Record<string, string> = {
+  checking: '检查版本…',
+  downloading: '下载中…',
+  verifying: '校验文件…',
+  replacing: '替换文件…',
+  done: '升级完成'
+}
+
+function normalizeStage(raw: unknown): string {
+  if (typeof raw === 'number' && raw >= 0 && raw < STAGE_ORDER.length) {
+    return STAGE_ORDER[raw]
+  }
+  if (typeof raw === 'string') {
+    if (STAGE_TEXT[raw]) return raw
+    // 兼容被 JSON 序列化成字符串的数字码（"1"）
+    const n = Number(raw)
+    if (Number.isInteger(n) && n >= 0 && n < STAGE_ORDER.length) return STAGE_ORDER[n]
+  }
+  return ''
 }
 
 function fmtSize(bytes: number): string {
@@ -485,7 +514,16 @@ function formatMarkdown(text: string): string {
   font-size: 14px;
 }
 .up-progress-label { font-weight: 500; }
-.up-progress-size  { font-size: 12px; color: var(--dim); font-variant-numeric: tabular-nums; }
+.up-progress-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
+.up-progress-pct { color: var(--txt); font-weight: 600; }
+.up-progress-size { font-size: 12px; color: var(--dim); font-variant-numeric: tabular-nums; }
 
 .up-bar {
   height: 4px;

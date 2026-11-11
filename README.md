@@ -238,6 +238,14 @@ TVBoxWeb/
 
 ## 🆕 v1.6.1 · 修复内网 NAS 无法挂载 WebDAV（SSRF 策略分级）
 
+### 顺带修掉：升级进度显示成一个「1」，进度条根本不动
+
+- **原因**：`UpgradeStage` 是 `int`，虽然实现了 `String()`，但 `encoding/json` 不认它，SSE 推的是 `{"stage":1}`。前端查表 `stageMap[1]` 落空，退回渲染原始值 → 界面上孤零零一个「1」；同时 `stage === 'downloading'` 恒为 false，**已下载字节与进度条从未更新过**，你看到的「已下载 28.0%」只是后端塞在 message 里的文字。
+- **后端**：给 `UpgradeStage` 加 `MarshalJSON`/`UnmarshalJSON`，阶段以名字（`"downloading"`）出现在 JSON 里；反序列化同时兼容旧版数字码，库使用者不受影响。
+- **前端**：加阶段归一化，数字码 / 数字字符串 / 名字三种写法都能识别（旧服务端配新前端也不会退化成数字）；未知阶段显示「处理中…」而不是原始值。
+- **顺带把进度区做完整**：标题行左边阶段、右边「28% · 4.2 MB / 15.1 MB」，百分比用后端 `loaded/total` 真实计算；下载阶段不再重复显示「已下载 xx%」的 message，校验/替换阶段才显示文字说明；进度条补 `role="progressbar"` 与 `aria-valuenow`。
+
+
 - **问题**：家里 NAS 的公网域名在内网会被 DNS 解析出一个 ULA 内网 IPv6（如 `fd4f:eb21:d3dc::1`）和一个公网 IPv4。v1.6.0 的 SSRF 校验遍历全部解析结果，只要有一条是私网就拒绝，于是保存 WebDAV 源直接报「目标地址不安全」。地址和密码本身没问题（PROPFIND 返回 207）。
 - **修复**：把校验拆成两级策略，而不是一个全局开关：
   - `netguard.Check`（严格）：只用于内容回显型接口 `/api/proxy`、`/api/quality/master`；
