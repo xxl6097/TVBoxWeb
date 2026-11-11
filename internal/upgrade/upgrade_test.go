@@ -3,13 +3,16 @@ package upgrade
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestIsNewerVersion(t *testing.T) {
@@ -55,14 +58,14 @@ func TestFetchChecksum(t *testing.T) {
 	defer srv.Close()
 
 	u := &GitHubUpgrader{}
-	got, err := u.fetchChecksum(context.Background(), srv.URL, "yezhen-linux-amd64")
+	got, err := u.fetchChecksum(context.Background(), assetSources("", srv.URL), "yezhen-linux-amd64")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got != sum {
 		t.Fatalf("checksum = %q, want %q", got, sum)
 	}
-	if _, err := u.fetchChecksum(context.Background(), srv.URL, "not-exist"); err == nil {
+	if _, err := u.fetchChecksum(context.Background(), assetSources("", srv.URL), "not-exist"); err == nil {
 		t.Fatal("缺少目标文件时应返回错误")
 	}
 }
@@ -89,5 +92,134 @@ func TestVerifyFileRejectsMismatch(t *testing.T) {
 	}
 	if err := u.verifyFile(tmp, rel); err == nil {
 		t.Fatal("空文件应被拒绝")
+	}
+}
+
+func TestAssetSourcesOrder(t *testing.T) {
+	s := assetSources("https://api.github.com/x", "https://github.com/x")
+	if len(s) != 2 || !s[0].api || s[1].api {
+		t.Fatalf("API 通道必须排第一位且标记 api=true: %+v", s)
+	}
+	if s[0].url != "https://api.github.com/x" || s[1].url != "https://github.com/x" {
+		t.Fatalf("顺序错误: %+v", s)
+	}
+	if got := assetSources("", "https://github.com/x"); len(got) != 1 || got[0].api {
+		t.Fatalf("无 API 通道时应只剩直链: %+v", got)
+	}
+	if got := assetSources("u", "u"); len(got) != 1 {
+		t.Fatalf("相同地址应去重: %+v", got)
+	}
+	if got := assetSources("", ""); len(got) != 0 {
+		t.Fatalf("空地址应为空列表: %+v", got)
+	}
+}
+
+func TestAPIAssetURL(t *testing.T) {
+	u := &GitHubUpgrader{owner: "xxl6097", repo: "TVBoxWeb"}
+	want := "https://api.github.com/repos/xxl6097/TVBoxWeb/releases/assets/733906936"
+	if got := u.apiAssetURL(733906936); got != want {
+		t.Fatalf("apiAssetURL = %q, want %q", got, want)
+	}
+}
+
+func TestOpenAssetPrefersAPIChannel(t *testing.T) {
+	acceptCh := make(chan string, 1)
+	var fallbackHits atomic.Int32
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		acceptCh <- r.Header.Get("Accept")
+		_, _ = w.Write([]byte("api-channel"))
+	}))
+	defer primary.Close()
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fallbackHits.Add(1)
+		_, _ = w.Write([]byte("fallback"))
+	}))
+	defer fallback.Close()
+
+	resp, err := openAsset(context.Background(),
+		[]downloadSource{{url: primary.URL, api: true}, {url: fallback.URL}}, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	if string(b) != "api-channel" {
+		t.Fatalf("应优先使用 API 通道，得到 %q", b)
+	}
+	if got := <-acceptCh; got != "application/octet-stream" {
+		t.Fatalf("API 通道必须带 Accept: application/octet-stream，得到 %q", got)
+	}
+	if n := fallbackHits.Load(); n != 0 {
+		t.Fatalf("primary 成功时不应回退，命中 %d 次", n)
+	}
+}
+
+func TestOpenAssetFallsBackOn502(t *testing.T) {
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte("CONNECT tunnel failed"))
+	}))
+	defer primary.Close()
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("fallback-ok"))
+	}))
+	defer fallback.Close()
+
+	resp, err := openAsset(context.Background(),
+		[]downloadSource{{url: primary.URL, api: true}, {url: fallback.URL}}, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	if string(b) != "fallback-ok" {
+		t.Fatalf("502 时应自动回退直链，得到 %q", b)
+	}
+}
+
+func TestOpenAssetAllFail(t *testing.T) {
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer primary.Close()
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer fallback.Close()
+
+	_, err := openAsset(context.Background(),
+		[]downloadSource{{url: primary.URL, api: true}, {url: fallback.URL}}, 5*time.Second)
+	if err == nil {
+		t.Fatal("全部失败时应返回错误")
+	}
+	if !strings.Contains(err.Error(), primary.URL) || !strings.Contains(err.Error(), fallback.URL) {
+		t.Fatalf("错误信息应列出两个尝试过的地址: %v", err)
+	}
+}
+
+func TestFetchChecksumPrefersAPIChannel(t *testing.T) {
+	const apiSum = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+	var fallbackHits atomic.Int32
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "%s  yezhen-linux-amd64\n", apiSum)
+	}))
+	defer primary.Close()
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fallbackHits.Add(1)
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer fallback.Close()
+
+	u := &GitHubUpgrader{}
+	got, err := u.fetchChecksum(context.Background(),
+		assetSources(primary.URL, fallback.URL), "yezhen-linux-amd64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != apiSum {
+		t.Fatalf("checksum = %q, want %q", got, apiSum)
+	}
+	if n := fallbackHits.Load(); n != 0 {
+		t.Fatalf("API 通道成功时不应请求直链，命中 %d 次", n)
 	}
 }

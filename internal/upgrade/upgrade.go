@@ -27,8 +27,75 @@ type Release struct {
 	Size        int64  `json:"size"`
 
 	// 内部字段：不暴露给前端，仅用于下载后做 SHA256 完整性校验
-	assetName   string
-	checksumURL string
+	assetName      string
+	checksumURL    string // browser_download_url（回退通道）
+	checksumAPIURL string // api.github.com releases/assets/<id>（优先通道）
+	downloadAPIURL string // 裸二进制的 API asset 通道
+}
+
+// downloadSource 描述一个可尝试的下载地址。
+// api=true 表示这是 GitHub API asset 通道，需要带 Accept: application/octet-stream
+// 才会返回二进制内容（否则 API 默认返回 JSON 元数据）。
+type downloadSource struct {
+	url string
+	api bool
+}
+
+// assetSources 按「API 通道优先、直链回退」组装候选地址。
+// 国内网络/部分代理下 github.com/.../releases/download/... 常被网关拦截（502），
+// 而 api.github.com + Accept: application/octet-stream 通常可达。
+func assetSources(apiURL, browserURL string) []downloadSource {
+	var out []downloadSource
+	if apiURL != "" {
+		out = append(out, downloadSource{url: apiURL, api: true})
+	}
+	if browserURL != "" && browserURL != apiURL {
+		out = append(out, downloadSource{url: browserURL})
+	}
+	return out
+}
+
+func (u *GitHubUpgrader) apiAssetURL(id int64) string {
+	return fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/assets/%d", u.owner, u.repo, id)
+}
+
+// openAsset 依次尝试候选下载地址，返回第一个成功（HTTP 200）的响应。
+// 调用方负责关闭 resp.Body。
+func openAsset(ctx context.Context, sources []downloadSource, timeout time.Duration) (*http.Response, error) {
+	if len(sources) == 0 {
+		return nil, fmt.Errorf("缺少下载地址")
+	}
+	client := &http.Client{Timeout: timeout}
+	var errs []string
+	for _, s := range sources {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.url, nil)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", s.url, err))
+			continue
+		}
+		if s.api {
+			req.Header.Set("Accept", "application/octet-stream")
+		}
+		req.Header.Set("User-Agent", "yezhen-upgrader")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", s.url, err))
+			continue
+		}
+		if resp.StatusCode == http.StatusOK {
+			return resp, nil
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+		resp.Body.Close()
+		detail := strings.TrimSpace(string(body))
+		if detail != "" {
+			errs = append(errs, fmt.Sprintf("%s: HTTP %d %s", s.url, resp.StatusCode, detail))
+		} else {
+			errs = append(errs, fmt.Sprintf("%s: HTTP %d", s.url, resp.StatusCode))
+		}
+	}
+	return nil, fmt.Errorf("所有下载地址均失败：%s", strings.Join(errs, "；"))
 }
 
 // UpgradeStage 升级阶段
@@ -136,6 +203,7 @@ func (u *GitHubUpgrader) Check(ctx context.Context) (*Release, error) {
 		PublishedAt string `json:"published_at"`
 		HTMLURL     string `json:"html_url"`
 		Assets      []struct {
+			ID                 int64  `json:"id"`
 			Name               string `json:"name"`
 			BrowserDownloadURL string `json:"browser_download_url"`
 			Size               int64  `json:"size"`
@@ -154,6 +222,7 @@ func (u *GitHubUpgrader) Check(ctx context.Context) (*Release, error) {
 	// 查找当前平台的裸二进制（CI 产物名 yezhen-<os>-<arch>）
 	assetName := u.getAssetName()
 	var downloadURL, checksumURL string
+	var downloadAPIURL, checksumAPIURL string
 	var size int64
 
 	for _, asset := range ghRelease.Assets {
@@ -161,8 +230,14 @@ func (u *GitHubUpgrader) Check(ctx context.Context) (*Release, error) {
 		case assetName:
 			downloadURL = asset.BrowserDownloadURL
 			size = asset.Size
+			if asset.ID > 0 {
+				downloadAPIURL = u.apiAssetURL(asset.ID)
+			}
 		case "checksums.txt":
 			checksumURL = asset.BrowserDownloadURL
+			if asset.ID > 0 {
+				checksumAPIURL = u.apiAssetURL(asset.ID)
+			}
 		}
 	}
 
@@ -174,14 +249,16 @@ func (u *GitHubUpgrader) Check(ctx context.Context) (*Release, error) {
 	}
 
 	return &Release{
-		Version:     ghRelease.TagName,
-		Notes:       ghRelease.Body,
-		PublishedAt: ghRelease.PublishedAt,
-		PageURL:     ghRelease.HTMLURL,
-		DownloadURL: downloadURL,
-		Size:        size,
-		assetName:   assetName,
-		checksumURL: checksumURL,
+		Version:        ghRelease.TagName,
+		Notes:          ghRelease.Body,
+		PublishedAt:    ghRelease.PublishedAt,
+		PageURL:        ghRelease.HTMLURL,
+		DownloadURL:    downloadURL,
+		Size:           size,
+		assetName:      assetName,
+		checksumURL:    checksumURL,
+		checksumAPIURL: checksumAPIURL,
+		downloadAPIURL: downloadAPIURL,
 	}, nil
 }
 
@@ -200,7 +277,7 @@ func (u *GitHubUpgrader) Upgrade(ctx context.Context, rel *Release, onProgress f
 		Message: fmt.Sprintf("正在下载 %s", rel.Version),
 	})
 
-	tmpFile, err := u.downloadRelease(ctx, rel.DownloadURL, func(loaded, total int64) {
+	tmpFile, err := u.downloadRelease(ctx, assetSources(rel.downloadAPIURL, rel.DownloadURL), func(loaded, total int64) {
 		report(UpgradeProgress{
 			Stage:   StageDownloading,
 			Loaded:  loaded,
@@ -241,23 +318,13 @@ func (u *GitHubUpgrader) Upgrade(ctx context.Context, rel *Release, onProgress f
 	return nil
 }
 
-// downloadRelease 下载 Release 文件
-func (u *GitHubUpgrader) downloadRelease(ctx context.Context, url string, onProgress func(int64, int64)) (string, error) {
-	client := &http.Client{Timeout: 5 * time.Minute}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return "", err
-	}
-
-	resp, err := client.Do(req)
+// downloadRelease 下载 Release 文件，优先 GitHub API asset 通道，失败回退直链。
+func (u *GitHubUpgrader) downloadRelease(ctx context.Context, sources []downloadSource, onProgress func(int64, int64)) (string, error) {
+	resp, err := openAsset(ctx, sources, 5*time.Minute)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("下载失败，HTTP 状态码: %d", resp.StatusCode)
-	}
 
 	// 创建临时文件
 	tmpFile, err := os.CreateTemp("", "tvboxweb-upgrade-*")
@@ -325,11 +392,15 @@ func (u *GitHubUpgrader) verifyFile(path string, rel *Release) error {
 	if info.Size() == 0 {
 		return fmt.Errorf("下载的文件为空")
 	}
-	if rel == nil || rel.checksumURL == "" || rel.assetName == "" {
+	if rel == nil || rel.assetName == "" {
+		return fmt.Errorf("缺少校验信息，拒绝替换可执行文件")
+	}
+	checksumSources := assetSources(rel.checksumAPIURL, rel.checksumURL)
+	if len(checksumSources) == 0 {
 		return fmt.Errorf("缺少校验信息，拒绝替换可执行文件")
 	}
 
-	want, err := u.fetchChecksum(context.Background(), rel.checksumURL, rel.assetName)
+	want, err := u.fetchChecksum(context.Background(), checksumSources, rel.assetName)
 	if err != nil {
 		return err
 	}
@@ -352,20 +423,13 @@ func (u *GitHubUpgrader) verifyFile(path string, rel *Release) error {
 }
 
 // fetchChecksum 下载 checksums.txt 并取出指定文件的 sha256。
-func (u *GitHubUpgrader) fetchChecksum(ctx context.Context, url, assetName string) (string, error) {
-	client := &http.Client{Timeout: 20 * time.Second}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return "", err
-	}
-	res, err := client.Do(req)
+// 与二进制下载一致，优先 API asset 通道、失败回退 browser_download_url。
+func (u *GitHubUpgrader) fetchChecksum(ctx context.Context, sources []downloadSource, assetName string) (string, error) {
+	res, err := openAsset(ctx, sources, 20*time.Second)
 	if err != nil {
 		return "", fmt.Errorf("下载 checksums.txt 失败：%w", err)
 	}
 	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("下载 checksums.txt 失败，HTTP %d", res.StatusCode)
-	}
 	b, err := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 	if err != nil {
 		return "", err

@@ -230,6 +230,18 @@ TVBoxWeb/
 
 ---
 
+## 🆕 v1.5.1 · 在线升级下载通道加固
+
+- **修复**：v1.5.0 虽已能正确找到安装包，但校验文件与二进制都走 `github.com/.../releases/download/...` 直链；该域名在部分网络（尤其国内代理）会被网关拦截返回 502，导致升级卡在下载阶段
+- 升级器改为**双通道**：优先 `api.github.com/repos/<owner>/<repo>/releases/assets/<id>`（带 `Accept: application/octet-stream`，公开仓库无需 token），失败自动回退 `browser_download_url`；`Check()` 解析 Release 时保留 asset id
+- 二进制与 `checksums.txt` 两个下载点共用同一套双通道逻辑；全部通道失败时错误信息会列出所有尝试过的地址，便于排障
+- 新增 6 个单测：通道顺序与去重、API URL 构造、Accept 头、502 自动回退、全失败错误聚合、校验和优先通道
+- 真实链路验证：模拟 v1.4.0 客户端检查 → 经 API 通道下载 `yezhen-darwin-arm64`（9,064,898 B）→ SHA256 与 `checksums.txt` 一致；Go 客户端跟随 302 到 `release-assets.githubusercontent.com` 成功
+
+**说明**：断点续传仍未实现；GitHub 未认证 API 限流 60 次/小时，单次升级仅 2 个请求，正常无影响。
+
+---
+
 ## 🚀 开发
 
 ```bash

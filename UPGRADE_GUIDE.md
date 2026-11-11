@@ -8,7 +8,7 @@ TVBoxWeb v1.3.1 实现了完整的基于 GitHub Release 的自动升级功能，
 
 - ✅ 自动检测 GitHub 最新 Release
 - ✅ 多平台支持（Linux/macOS/Windows，amd64/arm64）
-- ⚠️ 断点续传下载（暂未实现，弱网络建议重试；详见文末 v1.5.0 变更）
+- ⚠️ 断点续传下载（暂未实现，弱网络建议重试；详见文末版本变更说明）
 - ✅ 下载进度实时推送（SSE）
 - ✅ 自动备份和恢复
 - ✅ 平台架构自动匹配
@@ -335,3 +335,17 @@ TVBoxWeb_{version}_{os}_{arch}[.exe]
 - 版本比较改为 semver 数字比较，只升不降
 - 替换前保留 `<exe>.backup`；新版本下次启动成功后才清理，起不来可直接用它手工回滚
 - 说明：目前完整性校验已覆盖，**断点续传暂未实现**，弱网络下建议重试
+
+---
+
+## v1.5.1 升级器变更（下载通道加固）
+
+v1.5.0 发布后的真实链路验证发现：虽然资产名已对齐、能正确找到安装包，但 `checksums.txt` 与二进制都通过 `browser_download_url`（`https://github.com/.../releases/download/...`）下载。该域名在部分网络环境（尤其国内代理）会被网关拦截，稳定返回 `502 Bad Gateway`（`CONNECT tunnel failed`），升级会卡在下载阶段。
+
+- 改为**双通道下载**：优先 `https://api.github.com/repos/<owner>/<repo>/releases/assets/<id>`，请求头带 `Accept: application/octet-stream`；公开仓库无需 token，API 返回 302 到 `release-assets.githubusercontent.com`，Go 标准客户端自动跟随即可拿到二进制
+- 若 API 通道失败（网络错误、限流、非 200），自动回退原来的 `browser_download_url`；全部失败时错误文案会列出所有尝试过的地址
+- `Check()` 解析 Release assets 时新增读取 `id`，为裸二进制和 `checksums.txt` 分别生成 API 通道地址；如果 Release 没有 asset id，行为退化为原来的单直链下载
+- 二进制下载与校验文件下载共用这套逻辑，**SHA256 强校验策略不变**，校验不通过仍拒绝替换可执行文件
+- 约束：GitHub 未认证 API 限流 60 次/小时，单次升级只发 2 个请求；断点续传仍未实现
+
+**已验证**：模拟 v1.4.0 客户端 → `Check()` 找到 v1.5.0 / `yezhen-darwin-arm64` → 经 API 通道下载 9,064,898 字节 → SHA256 `15aed403…c335` 与 `checksums.txt` 完全一致。
