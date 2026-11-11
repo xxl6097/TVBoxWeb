@@ -100,8 +100,25 @@ func WithLogger(l *log.Logger) Option {
 	return func(o *Options) { o.Logger = l }
 }
 
+// 升级相关类型的公开别名，允许外部包实现 Upgrader 接口（同 v1.3.x 兼容层）。
+type (
+	Release         = upgrade.Release
+	UpgradeProgress = upgrade.UpgradeProgress
+	UpgradeStage    = upgrade.UpgradeStage
+	Upgrader        = upgrade.Upgrader
+)
+
+// 升级阶段常量
+const (
+	StageChecking    = upgrade.StageChecking
+	StageDownloading = upgrade.StageDownloading
+	StageVerifying   = upgrade.StageVerifying
+	StageReplacing   = upgrade.StageReplacing
+	StageDone        = upgrade.StageDone
+)
+
 // WithUpgrader 注入在线升级实现（复刻 gofs.WithUpgrader）。
-func WithUpgrader(u upgrade.Upgrader) Option {
+func WithUpgrader(u Upgrader) Option {
 	return func(o *Options) { o.Upgrader = u }
 }
 
