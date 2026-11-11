@@ -152,6 +152,9 @@ func Handler() *http.ServeMux {
 
 	mux.HandleFunc("/api/direct", hDirect)
 	mux.HandleFunc("/api/privacy", hPrivacy)
+	mux.HandleFunc("/api/backup", hBackup)
+	mux.HandleFunc("/api/restore", hRestore)
+	mux.HandleFunc("/api/reset", hReset)
 
 	mux.HandleFunc("/api/proxy", hProxy)
 	return mux
@@ -303,6 +306,55 @@ func failWith(w http.ResponseWriter, status int, code, msg string) {
 }
 
 const maskedPassword = "******"
+
+// hBackup 导出整站数据（收藏 / 历史 / 配置 / 偏好 / 网盘源）。
+func hBackup(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		fail(w, http.StatusMethodNotAllowed, "只支持 GET")
+		return
+	}
+	b, err := store.Snapshot()
+	if err != nil {
+		fail(w, 500, "导出备份失败："+err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="yezhen-backup.json"`)
+	w.WriteHeader(200)
+	_, _ = w.Write(b)
+}
+
+// hRestore 导入备份（整体替换）。
+func hRestore(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		fail(w, http.StatusMethodNotAllowed, "只支持 POST")
+		return
+	}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, 32<<20))
+	if err != nil {
+		fail(w, 400, "读取备份文件失败："+err.Error())
+		return
+	}
+	if len(raw) > 32<<20-1 {
+		fail(w, 400, "备份文件过大（上限 32MB）")
+		return
+	}
+	if err := store.Restore(raw); err != nil {
+		fail(w, 400, err.Error())
+		return
+	}
+	ok(w, map[string]any{"ok": true})
+}
+
+// hReset 恢复出厂设置。
+func hReset(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		fail(w, http.StatusMethodNotAllowed, "只支持 POST")
+		return
+	}
+	store.Reset()
+	ok(w, map[string]any{"ok": true})
+}
 
 // guardURL 对所有「客户端可指定上游地址」的接口做统一 SSRF 校验。
 // 校验失败时写入结构化错误并返回 false，调用方直接 return。

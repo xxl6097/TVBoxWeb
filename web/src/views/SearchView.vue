@@ -72,16 +72,24 @@ async function doSearch(k?: string) {
   sugg.value = []
   searching.value = true
   searched.value = true
+  // 取消上一次未完成的搜索，避免旧结果覆盖新结果
+  if (searchAbort) searchAbort.abort()
+  const ctrl = new AbortController()
+  searchAbort = ctrl
   try {
-    const r = await api.search(word)
+    const r = await api.search(word, ctrl.signal)
     // 相关性排序：最相关的排前面
     results.value = rankResults(r.list, word)
     siteInfo.value = `${r.sites}/${r.total} 个站源有响应`
     keywords.value = await api.pushKeyword(word)
   } catch (e: any) {
+    if (e?.name === 'AbortError') return
     app.showTip('搜索失败：' + humanizeApiError(e))
   } finally {
-    searching.value = false
+    if (searchAbort === ctrl) {
+      searchAbort = null
+      searching.value = false
+    }
   }
 }
 
@@ -103,9 +111,10 @@ async function removeKeyword(k: string) {
   keywords.value = await api.removeKeyword(k)
 }
 
-// 实时联想
+// 实时联想 / 搜索竞态控制
 let suggTimer = 0
 let suggAbort: AbortController | null = null
+let searchAbort: AbortController | null = null
 
 function onInput() {
   const w = kw.value.trim()
@@ -120,7 +129,7 @@ function onInput() {
     const ctrl = new AbortController()
     suggAbort = ctrl
     try {
-      sugg.value = await api.suggest(w)
+      sugg.value = await api.suggest(w, ctrl.signal)
     } catch (e: any) {
       if (e?.name !== 'AbortError') sugg.value = []
     } finally {

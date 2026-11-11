@@ -6,6 +6,7 @@ import { useAppStore } from '@/stores/app'
 import type { Site, Category, VodPage, FilterGroup } from '@/types'
 import TopBar from '@/components/TopBar.vue'
 import VodGrid from '@/components/VodGrid.vue'
+import ErrorState from '@/components/ErrorState.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -21,6 +22,7 @@ const selectedChild = ref('')
 const filters = ref<FilterGroup[]>([])
 const filterVals = ref<Record<string, string>>({})
 const loading = ref(false)
+const loadError = ref('')
 
 const currentSite = computed(() => sites.value.find((s) => s.key === siteKey.value))
 
@@ -28,43 +30,63 @@ const currentSite = computed(() => sites.value.find((s) => s.key === siteKey.val
 const topCats = computed(() => categories.value.filter((c) => c.pid === '' && c.id !== ''))
 const childrenOf = (tid: string) => categories.value.filter((c) => c.pid === tid)
 
+// 初始化期间 siteKey 的首次赋值不算「用户切换站点」，不能清空刚恢复的筛选
+let restoring = true
+
 onMounted(async () => {
+  // 从 URL 恢复筛选/页码，返回列表时不会丢失状态
+  curPage.value = Math.max(1, Number(route.query.page) || 1)
+  if (route.query.f) {
+    try { filterVals.value = JSON.parse(route.query.f as string) } catch { /* ignore */ }
+  }
   const list = await api.sites()
   sites.value = list.filter((s) => s.usable)
   if (!siteKey.value && sites.value.length) siteKey.value = sites.value[0].key
   if (siteKey.value) {
     await loadCategories()
-    // 从 URL 读分类参数（首页分类导航跳转），自动选中
     applyTidFromQuery()
   }
+  restoring = false
 })
+
+// 把站点 / 分类 / 筛选 / 页码同步进 URL，返回时由 scrollBehavior + query 完整还原
+function syncQuery() {
+  const q: Record<string, string> = { ...(route.query as Record<string, string>) }
+  q.site = siteKey.value
+  const tid = currentTid()
+  if (tid) q.tid = tid; else delete q.tid
+  if (curPage.value > 1) q.page = String(curPage.value); else delete q.page
+  const fv = Object.fromEntries(Object.entries(filterVals.value).filter(([, v]) => v !== ''))
+  if (Object.keys(fv).length) q.f = JSON.stringify(fv); else delete q.f
+  router.replace({ query: q })
+}
 
 // 从 URL query 的 tid 参数选中对应分类
 function applyTidFromQuery() {
   const tid = (route.query.tid as string) || ''
-  if (!tid) return
-  const cat = categories.value.find((c) => c.id === tid)
-  if (!cat) return
-  if (cat.pid === '') {
-    selectedParent.value = tid
-    selectedChild.value = ''
-  } else {
-    selectedParent.value = cat.pid
-    selectedChild.value = tid
+  const cat = tid ? categories.value.find((c) => c.id === tid) : null
+  if (cat) {
+    if (cat.pid === '') {
+      selectedParent.value = tid
+      selectedChild.value = ''
+    } else {
+      selectedParent.value = cat.pid
+      selectedChild.value = tid
+    }
   }
-  curPage.value = 1
   load()
 }
 
-watch(siteKey, () => {
-  if (route.query.site !== siteKey.value) {
-    router.replace({ query: { ...route.query, site: siteKey.value } })
-  }
+watch(siteKey, async () => {
+  if (restoring) return
   selectedParent.value = ''
   selectedChild.value = ''
   filterVals.value = {}
   filters.value = [] // 清空旧站源的筛选选项，等新站源分类加载后重建
-  loadCategories()
+  curPage.value = 1
+  syncQuery()
+  await loadCategories()
+  load()
 })
 
 async function loadCategories() {
@@ -76,8 +98,6 @@ async function loadCategories() {
   } finally {
     loading.value = false
   }
-  // 分类就绪后，加载默认「全部」分类的影片列表
-  load()
 }
 
 function selectParent(tid: string) {
@@ -85,6 +105,7 @@ function selectParent(tid: string) {
   selectedChild.value = ''
   filterVals.value = {}
   curPage.value = 1
+  syncQuery()
   load()
   // 更新筛选
   if (currentSite.value) {
@@ -95,6 +116,7 @@ function selectParent(tid: string) {
 function selectChild(tid: string) {
   selectedChild.value = tid
   curPage.value = 1
+  syncQuery()
   load()
 }
 
@@ -113,10 +135,12 @@ function currentChildren(): string {
 async function load() {
   if (!siteKey.value) return
   loading.value = true
+  loadError.value = ''
   try {
     const ext = buildExt()
     page.value = await api.vodList(siteKey.value, currentTid(), curPage.value, ext, currentChildren())
   } catch (e: any) {
+    loadError.value = humanizeApiError(e)
     app.showTip('列表加载失败：' + humanizeApiError(e))
   } finally {
     loading.value = false
@@ -132,6 +156,7 @@ function buildExt(): string {
 function applyFilter(key: string, v: string) {
   filterVals.value[key] = v
   curPage.value = 1
+  syncQuery()
   load()
 }
 
@@ -142,6 +167,7 @@ function setFilterVal(key: string, v: string) {
 function goto(p: number) {
   if (p < 1 || p > page.value.pageCount) return
   curPage.value = p
+  syncQuery()
   load()
 }
 
@@ -232,8 +258,9 @@ function parseFilters(ext: string, tid: string): FilterGroup[] {
     </div>
 
     <div>
-      <VodGrid :vods="page.items" :loading="loading" />
-      <div v-if="!loading && !page.items.length" class="vod-empty">
+      <ErrorState v-if="loadError" :message="loadError" @retry="load" />
+      <VodGrid v-else :vods="page.items" :loading="loading" />
+      <div v-if="!loading && !loadError && !page.items.length" class="vod-empty">
         <p>暂无内容</p>
         <p class="hint">可以切换分类或站源，或到「设置 → 订阅」重新导入</p>
       </div>

@@ -17,6 +17,54 @@ function saveAuthToken() {
   app.showTip('访问口令已保存，刷新页面后生效')
 }
 
+// ===== 整站备份 / 恢复 / 出厂重置 =====
+const confirmReset = ref(false)
+
+async function exportBackup() {
+  try {
+    const data = await api.backup()
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `yezhen-backup-${new Date().toISOString().slice(0, 10)}.json`
+    a.click()
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+    app.showTip('备份已导出')
+  } catch (e) {
+    app.showTip('导出失败：' + humanizeApiError(e))
+  }
+}
+
+async function importBackup(e: Event) {
+  const input = e.target as HTMLInputElement
+  const f = input.files?.[0]
+  if (!f) return
+  try {
+    const data = JSON.parse(await f.text())
+    await api.restore(data)
+    app.showTip('备份已恢复，刷新页面后生效')
+  } catch (err) {
+    app.showTip('导入失败：' + humanizeApiError(err))
+  }
+  input.value = ''
+}
+
+async function resetAll() {
+  if (!confirmReset.value) {
+    confirmReset.value = true
+    window.setTimeout(() => (confirmReset.value = false), 4000)
+    return
+  }
+  confirmReset.value = false
+  try {
+    await api.reset()
+    app.showTip('已恢复出厂设置，刷新页面后生效')
+  } catch (e) {
+    app.showTip('重置失败：' + humanizeApiError(e))
+  }
+}
+
 // ===== 导航 =====
 type NavKey = 'source' | 'update' | 'webdav' | 'sites' | 'data' | 'about'
 const navKey = ref<NavKey>('source')
@@ -511,6 +559,26 @@ async function clearHistory() {
                 style="max-width: 260px"
               />
               <el-button size="small" type="primary" @click="saveAuthToken">保存</el-button>
+            </div>
+            <div class="sdiv"></div>
+            <div class="srow srow-clickable" @click="exportBackup">
+              <span class="srow-title">导出备份</span>
+              <span class="srow-val">配置 / 收藏 / 历史 / 偏好</span>
+              <span class="arrow">›</span>
+            </div>
+            <div class="sdiv"></div>
+            <label class="srow srow-clickable" style="cursor:pointer">
+              <span class="srow-title">导入备份</span>
+              <span class="srow-val">整体替换当前数据</span>
+              <span class="arrow">›</span>
+              <input type="file" accept="application/json,.json" style="display:none" @change="importBackup" />
+            </label>
+            <div class="sdiv"></div>
+            <div class="srow srow-clickable" :class="{ warn: confirmReset }" @click="resetAll">
+              <span class="srow-title" :class="{ warn: confirmReset }">
+                {{ confirmReset ? '再次点击确认恢复出厂' : '恢复出厂设置' }}
+              </span>
+              <span class="arrow">›</span>
             </div>
             <div class="sdiv"></div>
             <div class="srow srow-clickable" :class="{ warn: confirmClear }" @click="clearHistory">

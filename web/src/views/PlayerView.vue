@@ -1125,6 +1125,22 @@ function toggleMute() {
   volTimer = window.setTimeout(() => (showVol.value = false), 1600)
 }
 
+// ===== 选集抽屉 =====
+const showEps = ref(false)
+const epKeyword = ref('')
+const filteredEps = computed(() => {
+  const k = epKeyword.value.trim().toLowerCase()
+  const list = player.eps.map((e, i) => ({ ep: e, i }))
+  if (!k) return list
+  return list.filter((x) => x.ep.name.toLowerCase().includes(k) || String(x.i + 1) === k)
+})
+
+async function jumpToEpisode(i: number) {
+  if (i === player.idx) { showEps.value = false; return }
+  await switchEpisode(i - player.idx)
+  showEps.value = false
+}
+
 async function switchEpisode(delta: number) {
   if (!player.count) {
     app.showTip(isLive ? '当前分组没有其他频道' : '当前没有可切换的剧集')
@@ -1432,6 +1448,7 @@ onUnmounted(() => {
             <div class="vol-track"><div class="vol-fill" :style="{ width: (muted ? 0 : volume * 100) + '%' }"></div></div>
           </div>
           <button class="ctl" @click="showQ = !showQ">画质</button>
+          <button v-if="!isLive && player.count > 1" class="ctl" @click="showEps = true">选集</button>
           <button v-if="supportsCast()" class="ctl" :class="{ primary: castConnected }" @click="toggleCast">{{ castConnected ? '断开投屏' : '投屏' }}</button>
           <button class="ctl" @click="switchEpisode(1)">{{ isLive ? '下一台' : '下一集' }}</button>
           <button class="ctl fullscreen-btn" :title="isFullscreen ? '退出全屏 (F)' : '全屏 (F)'" @click="toggleFullscreen">
@@ -1633,6 +1650,10 @@ onUnmounted(() => {
           <span class="m-aux-icon">⚙</span>
           <span>画质</span>
         </button>
+        <button v-if="!isLive && player.count > 1" class="m-aux-btn" @click="showEps = true">
+          <span class="m-aux-icon">☷</span>
+          <span>选集</span>
+        </button>
         <button v-if="supportsCast()" class="m-aux-btn" @click="toggleCast">
           <span class="m-aux-icon">⧉</span>
           <span>{{ castConnected ? '断开投屏' : '投屏' }}</span>
@@ -1699,6 +1720,21 @@ onUnmounted(() => {
         <div class="m-q-close"><el-button size="small" @click="showQ = false" style="width:100%">关闭</el-button></div>
       </div>
     </div>
+
+    <!-- 选集抽屉 -->
+    <el-dialog v-model="showEps" :title="`选集 · ${player.vodTitle || ''}（${player.count} 集）`" width="620px" append-to-body>
+      <el-input v-model="epKeyword" size="small" clearable placeholder="输入集数或名称快速定位" />
+      <div class="ep-grid">
+        <button
+          v-for="x in filteredEps"
+          :key="x.i"
+          class="ep-cell"
+          :class="{ on: x.i === player.idx }"
+          @click="jumpToEpisode(x.i)"
+        >{{ x.ep.name || `第 ${x.i + 1} 集` }}</button>
+      </div>
+      <div v-if="!filteredEps.length" class="ep-none">暂无匹配剧集，可以换个关键词</div>
+    </el-dialog>
   </div>
 </template>
 
@@ -2257,4 +2293,29 @@ onUnmounted(() => {
   z-index: 5;
   transition: opacity 0.1s;
 }
+
+/* ===== 选集抽屉 ===== */
+.ep-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+  max-height: 52vh;
+  overflow-y: auto;
+}
+.ep-cell {
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--sub);
+  border-radius: var(--radius-sm);
+  padding: 8px 6px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ep-cell:hover { color: var(--txt); border-color: var(--sub); }
+.ep-cell.on { background: var(--selected); color: #000; border-color: var(--selected); font-weight: 600; }
+.ep-none { text-align: center; color: var(--dim); font-size: 13px; padding: 24px; }
 </style>

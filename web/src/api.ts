@@ -19,7 +19,7 @@ import type {
   WebdavEntry,
   WebdavVod
 } from '@/types'
-import { idbGet, idbSet } from '@/idb'
+import { idbGet, idbSet, idbDelete, idbKeys } from '@/idb'
 
 const BASE = '/api'
 
@@ -35,6 +35,38 @@ export function setAuthToken(token: string): void {
     if (token) localStorage.setItem(AUTH_KEY, token)
     else localStorage.removeItem(AUTH_KEY)
   } catch { /* 隐私模式下 localStorage 不可用，忽略 */ }
+}
+
+// ===== 写后失效 + 并发去重 =====
+// 任何写操作成功后清掉 GET 缓存（IndexedDB / Service Worker / 内存），
+// 避免「收藏后返回详情页仍显示旧数据」。
+const inflight = new Map<string, Promise<unknown>>()
+
+export function invalidateApiCache(): void {
+  inflight.clear()
+  idbKeys()
+    .then((keys) => keys.forEach((k) => { if (k.startsWith('api:')) idbDelete(k) }))
+    .catch(() => {})
+  if (typeof caches !== 'undefined') {
+    caches.keys().then((names) => Promise.all(names.map(async (name) => {
+      const c = await caches.open(name)
+      const reqs = await c.keys()
+      await Promise.all(reqs
+        .filter((r) => { try { return new URL(r.url).pathname.startsWith('/api/') } catch { return false } })
+        .map((r) => c.delete(r)))
+    }))).catch(() => {})
+  }
+}
+
+// 相同 GET 在 5s 内复用同一个 Promise：跨页面来回切换不再重复打后端。
+function cachedGet<T>(key: string, run: () => Promise<T>): Promise<T> {
+  const hit = inflight.get(key)
+  if (hit) return hit as Promise<T>
+  const p = run()
+  inflight.set(key, p as Promise<unknown>)
+  const done = () => { if (inflight.get(key) === p) inflight.delete(key) }
+  p.then(done, done)
+  return p
 }
 
 function authHeaders(): Record<string, string> {
@@ -112,6 +144,29 @@ export function humanizeApiError(e: unknown): string {
 }
 
 async function request<T>(path: string, opts: RequestInit = {}): Promise<T> {
+  // 带 signal 的请求必须独占（可取消），其余 GET 做并发去重
+  if (isGet(opts) && !opts.signal) {
+    return cachedGet('GET ' + path, () => withRetry(() => doRequest<T>(path, opts)))
+  }
+  return doRequest<T>(path, opts)
+}
+
+// 幂等 GET 遇到网络抖动 / 5xx 自动重试一次（400ms 退避），4xx 不重试。
+async function withRetry<T>(run: () => Promise<T>): Promise<T> {
+  try {
+    return await run()
+  } catch (e) {
+    if ((e as Error)?.name === 'AbortError') throw e
+    const status = (e as { status?: number })?.status
+    if (status === 0 || (status !== undefined && status >= 500)) {
+      await new Promise((r) => setTimeout(r, 400))
+      return run()
+    }
+    throw e
+  }
+}
+
+async function doRequest<T>(path: string, opts: RequestInit = {}): Promise<T> {
   const cacheable = isGet(opts) && isCacheable(path)
 
   // 命中 IndexedDB 缓存则秒回（离线第二层兜底）
@@ -135,7 +190,9 @@ async function request<T>(path: string, opts: RequestInit = {}): Promise<T> {
         ...(opts.headers as Record<string, string> | undefined || {})
       }
     })
-  } catch {
+  } catch (e) {
+    // 主动取消不能被包装成「网络失败」，否则调用方无法区分竞态取消
+    if ((e as Error)?.name === 'AbortError') throw e
     throw new ApiError('网络连接失败', 'ERR_NETWORK', 0, ERROR_HINTS.ERR_NETWORK)
   }
   if (!res.ok) {
@@ -170,6 +227,9 @@ async function request<T>(path: string, opts: RequestInit = {}): Promise<T> {
 
   const data = (await res.json()) as T
 
+  // 写操作成功后立即失效所有只读缓存，保证跨页面数据一致
+  if (!isGet(opts)) invalidateApiCache()
+
   // 缓存成功响应（IndexedDB）
   if (cacheable) {
     const cacheKey = 'api:' + path
@@ -194,9 +254,9 @@ async function refreshCache(path: string, cacheKey: string): Promise<void> {
   }
 }
 
-const get = <T>(path: string) => request<T>(path)
-const post = <T>(path: string, body?: unknown) =>
-  request<T>(path, { method: 'POST', body: body === undefined ? undefined : JSON.stringify(body) })
+const get = <T>(path: string, signal?: AbortSignal) => request<T>(path, signal ? { signal } : {})
+const post = <T>(path: string, body?: unknown, signal?: AbortSignal) =>
+  request<T>(path, { method: 'POST', body: body === undefined ? undefined : JSON.stringify(body), ...(signal ? { signal } : {}) })
 const del = <T>(path: string) => request<T>(path, { method: 'DELETE' })
 
 export const api = {
@@ -221,8 +281,8 @@ export const api = {
     ),
   vodDetail: (site: string, id: string) =>
     get<Vod>(`/vod/detail?site=${encodeURIComponent(site)}&id=${encodeURIComponent(id)}`),
-  search: (kw: string) => get<{ list: Vod[]; sites: number; total: number }>(`/search?kw=${encodeURIComponent(kw)}`),
-  suggest: (kw: string) => get<string[]>(`/suggest?kw=${encodeURIComponent(kw)}`),
+  search: (kw: string, signal?: AbortSignal) => get<{ list: Vod[]; sites: number; total: number }>(`/search?kw=${encodeURIComponent(kw)}`, signal),
+  suggest: (kw: string, signal?: AbortSignal) => get<string[]>(`/suggest?kw=${encodeURIComponent(kw)}`, signal),
   resolve: (url: string) => post<{ url: string; header: Record<string, string>; via: string; ok: boolean }>('/resolve', { url }),
 
   history: () => get<HistItem[]>('/history'),
@@ -291,6 +351,10 @@ export const api = {
   pushDirect: (url: string) => post('/direct', { url }),
   privacy: () => get<{ agreed: boolean; guideDone: boolean }>('/privacy'),
   setPrivacy: (agree?: boolean, guide?: boolean) => post('/privacy', { agree, guide }),
+
+  backup: () => get<Record<string, unknown>>('/backup'),
+  restore: (data: unknown) => post('/restore', data),
+  reset: () => post('/reset'),
 
   pinyinAbbr: (word: string) => get<{ abbrs: string[] }>(`/pinyin/abbr?word=${encodeURIComponent(word)}`)
 }

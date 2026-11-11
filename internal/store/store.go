@@ -159,6 +159,46 @@ func ensureMaps() {
 
 func save() { flush() }
 
+// Snapshot 导出当前完整数据（供设置页备份下载）。
+func Snapshot() ([]byte, error) {
+	mu.RLock()
+	defer mu.RUnlock()
+	return json.MarshalIndent(data, "", "  ")
+}
+
+// Restore 用备份文件整体替换当前数据，并原子落盘。
+func Restore(raw []byte) error {
+	d := &Data{}
+	if err := json.Unmarshal(raw, d); err != nil {
+		return fmt.Errorf("备份文件不是合法 JSON：%w", err)
+	}
+	if d.WebdavScan == nil {
+		d.WebdavScan = map[string][]model.WebdavVod{}
+	}
+	if d.SiteHealth == nil {
+		d.SiteHealth = map[string]SiteHealthStat{}
+	}
+	mu.Lock()
+	data = d
+	mu.Unlock()
+	flush()
+	return nil
+}
+
+// Reset 恢复出厂：清空所有配置/收藏/历史/偏好（保留到 .bak 可回滚）。
+func Reset() {
+	mu.Lock()
+	data = &Data{
+		WebdavScan: map[string][]model.WebdavVod{},
+		SiteHealth: map[string]SiteHealthStat{},
+	}
+	siteList = nil
+	parseList = nil
+	rawSites = 0
+	mu.Unlock()
+	flush()
+}
+
 // flush 线程安全地把当前 data 序列化写入磁盘。
 // 快照在 RLock 内生成，落盘由 writeMu 串行化，避免多 goroutine 交叉覆盖。
 func flush() {

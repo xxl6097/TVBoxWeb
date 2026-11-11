@@ -7,6 +7,7 @@ import { usePlayerStore } from '@/stores/player'
 import { splitLines } from '@/utils/lines'
 import type { Vod, Line } from '@/types'
 import TopBar from '@/components/TopBar.vue'
+import ErrorState from '@/components/ErrorState.vue'
 import SkeletonList from '@/components/SkeletonList.vue'
 
 const route = useRoute()
@@ -25,6 +26,7 @@ const expanded = ref(false)
 const isFav = ref(false)
 const reverse = ref(false)
 const loading = ref(true)
+const loadError = ref('')
 
 // 上次看到的集（用于定位）
 const watchedEp = ref(-1)
@@ -34,7 +36,9 @@ const watchedEps = ref<Set<number>>(new Set())
 const histPos = ref(0)
 const posterFailed = ref(false)
 
-onMounted(async () => {
+async function loadDetail() {
+  loading.value = true
+  loadError.value = ''
   try {
     const detail = await api.vodDetail(siteKey, vodId)
     vod.value = detail
@@ -45,10 +49,15 @@ onMounted(async () => {
       curLine.value = dIdx >= 0 ? dIdx : 0
     }
   } catch (e: any) {
+    loadError.value = humanizeApiError(e)
     app.showTip('详情加载失败：' + humanizeApiError(e))
   } finally {
     loading.value = false
   }
+}
+
+onMounted(async () => {
+  await loadDetail()
   try {
     const favs = await api.favorites()
     isFav.value = favs.some((f) => f.siteKey === siteKey && f.vodId === vodId)
@@ -176,6 +185,8 @@ function resumePlay() {
     </div>
 
     <!-- 详情内容 -->
+    <ErrorState v-else-if="loadError" :message="loadError" @retry="loadDetail" />
+
     <div v-else-if="vod" class="detail">
       <div class="left">
         <div class="poster">
