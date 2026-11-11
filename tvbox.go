@@ -76,6 +76,12 @@ type Options struct {
 	// 默认空（兼容原有单机部署）。
 	AuthToken string
 
+	// LoginUser / LoginPass 账号密码登录。两者都非空时启用登录页：
+	// 前端路由会先跳到 /login，登录成功后拿到 HttpOnly 会话 Cookie。
+	// 与 AuthToken 可以同时使用（任一通过即放行），都为空则不鉴权。
+	LoginUser string
+	LoginPass string
+
 	// AllowedOrigins 额外允许的 CORS / WebSocket 来源（同源始终允许）。
 	AllowedOrigins []string
 
@@ -132,6 +138,19 @@ func WithAuthToken(token string) Option {
 	return func(o *Options) { o.AuthToken = strings.TrimSpace(token) }
 }
 
+// WithLogin 开启账号密码登录。
+// 用户名与密码都非空才生效；任一项为空视为不启用，避免半配置导致「永远登不进去」。
+func WithLogin(user, pass string) Option {
+	return func(o *Options) {
+		u, p := strings.TrimSpace(user), pass
+		if u == "" || p == "" {
+			o.LoginUser, o.LoginPass = "", ""
+			return
+		}
+		o.LoginUser, o.LoginPass = u, p
+	}
+}
+
 // WithAllowedOrigins 设置额外的 CORS / WebSocket 允许来源。
 func WithAllowedOrigins(origins ...string) Option {
 	return func(o *Options) { o.AllowedOrigins = origins }
@@ -181,6 +200,8 @@ func New(opts ...Option) (*Server, error) {
 	// 安全配置必须在任何请求进来之前注入
 	api.SetSecurity(api.SecurityConfig{
 		AuthToken:             o.AuthToken,
+		LoginUser:             o.LoginUser,
+		LoginPass:             o.LoginPass,
 		AllowedOrigins:        o.AllowedOrigins,
 		AllowPrivateUpstreams: o.AllowPrivateUpstreams,
 		AllowedHosts:          o.AllowedHosts,

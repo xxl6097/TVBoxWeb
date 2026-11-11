@@ -34,7 +34,7 @@ import (
 
 // 版本信息（通过 ldflags -X 注入，默认值兜底）。
 var (
-	AppVersion = "v1.6.3"
+	AppVersion = "v1.7.0"
 	BuildTime  = "unknown"
 )
 
@@ -87,6 +87,10 @@ func SetUpgrader(u upgrade.Upgrader) {
 func Handler() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", hHealth)
+	// 登录（账号密码由上层库通过 tvbox.WithLogin 注入）
+	mux.HandleFunc("/api/session", hSession)
+	mux.HandleFunc("/api/login", hLogin)
+	mux.HandleFunc("/api/logout", hLogout)
 	mux.HandleFunc("/api/status", hStatus)
 	mux.HandleFunc("/api/metrics", hMetrics)
 	mux.HandleFunc("/api/version", hVersion)

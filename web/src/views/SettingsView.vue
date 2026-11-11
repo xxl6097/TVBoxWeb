@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import { api, humanizeApiError, getAuthToken, setAuthToken } from '@/api'
 import { getTheme, setTheme, type ThemeMode } from '@/theme'
 import { useAppStore } from '@/stores/app'
+import { authState, logout } from '@/auth'
 import type { Site, WebdavSource } from '@/types'
 import TopBar from '@/components/TopBar.vue'
 import UpgradePanel from '@/components/UpgradePanel.vue'
@@ -285,6 +286,12 @@ function speedText(key: string) {
 function speedOk(key: string): boolean | null {
   const r = speedResults.value[key]
   return r ? r.ok : null
+}
+
+// ---------- 账号 ----------
+async function doLogout() {
+  await logout()
+  router.replace({ name: 'login' })
 }
 
 // ---------- 网盘 ----------
@@ -635,6 +642,18 @@ async function clearHistory() {
               <span class="srow-title">平台架构</span>
               <span class="srow-dim">{{ osArch }}</span>
             </div>
+            <template v-if="authState.needLogin">
+              <div class="sdiv"></div>
+              <div class="srow">
+                <span class="srow-title">当前账号</span>
+                <span class="srow-val">{{ authState.user || '已登录' }}</span>
+              </div>
+              <div class="sdiv"></div>
+              <div class="srow srow-clickable" @click="doLogout">
+                <span class="srow-title">退出登录</span>
+                <span class="srow-val warn-text">退出</span>
+              </div>
+            </template>
             <div class="sdiv"></div>
             <div class="srow srow-clickable" @click="showPrivacy = !showPrivacy">
               <span class="srow-title">隐私政策</span>
@@ -869,6 +888,7 @@ async function clearHistory() {
 /* ===== 网盘弹窗 ===== */
 .wd-form { display: flex; flex-direction: column; gap: 10px; }
 .wd-input { }
+.warn-text { color: var(--warn); }
 .wd-msg { font-size: 13px; color: var(--warn); margin: 0; }
 .wd-msg.ok { color: #b7f0bc; }
 .wd-hint { font-size: 12px; color: var(--dim); margin: -2px 0 0; line-height: 1.5; }

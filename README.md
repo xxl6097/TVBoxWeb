@@ -63,6 +63,26 @@ http.Handle("/", srv.Handler())
 log.Fatal(http.ListenAndServe(":8090", nil))
 ```
 
+### 账号密码登录（v1.7.0）
+
+上层库可以自己决定账号密码，**不配置就保持原来的免登录行为**：
+
+```go
+srv, err := tvbox.New(
+	tvbox.WithDataDir("./mydata"),
+	// 用户名与密码都非空才启用；任一项为空视为不启用
+	tvbox.WithLogin("admin", os.Getenv("YEZHEN_PASS")),
+)
+```
+
+启用后：
+
+- 访问 `/api/*` 与 `/ws` 必须先 `POST /api/login {user, pass}` 换取会话 Cookie（`yz_session`，HttpOnly + SameSite=Lax，7 天有效）；
+- 前端会自动跳到 `/#/login`，登录成功回跳到原页面；任意接口返回 401 会自动踢回登录页；
+- 会话签名密钥每个进程随机生成，**重启后需重新登录**（密钥不落盘）；
+- 同一 IP 10 分钟内失败 8 次会临时锁定，防暴力破解；
+- 与旧的访问口令 `WithAuthToken` 可以并存，任一凭证通过即放行。
+
 ### 嵌入自定义 mux / 框架
 
 `srv.Handler()` 返回标准 `http.Handler`，可挂到任意路由、套中间件，或嵌入 Gin / Echo 等框架：
@@ -130,6 +150,8 @@ go build -o yezhen ./cmd/tvbox
 |------|------|------|
 | `-addr` | `:8090` | 监听地址 |
 | `-data` | `data` | 数据目录（存 `store.json`） |
+| `-user` | 空 | 登录用户名（与 `-pass` 同时设置才启用登录页；也可用环境变量 `YZ_USER`） |
+| `-pass` | 空 | 登录密码（与 `-user` 同时设置才启用登录页；也可用环境变量 `YZ_PASS`） |
 
 ### 跨平台打包
 
@@ -204,6 +226,7 @@ TVBoxWeb/
 
 **第四批（止血：可用性 / 安全 / 可靠性）**
 - **修复在线升级死链**：升级器原先找 `TVBoxWeb_<ver>_<os>_<arch>`，但 CI 产物是 `yezhen-<os>-<arch>`，v1.3.1 起在线升级一直报「未找到安装包」。现已统一产物名，并消费 Release 里的 `checksums.txt` 做 SHA256 校验、semver 只升不降、保留 `.backup` 到下次启动自检通过
+- 可选账号密码登录：`-user` / `-pass`（或 `tvbox.WithLogin`），启用后未登录会被路由守卫拦到登录页
 - 可选访问口令：`-token`（或 `tvbox.WithAuthToken`），`/api/*` 与 `/ws` 用 `X-Auth-Token`/`Bearer`/query 传递；口令会透传进 m3u8 分片地址。设置页「数据 → 访问口令」配置。默认关闭，兼容原有单机部署
 - CORS 由 `*` 收紧为同源 + 白名单；WebSocket 校验 Origin；`/api/proxy`、`/api/peek`、EPG、清晰度、WebDAV 等统一做 SSRF 校验（拒绝内网 / 云元数据 / 保留 IP，重定向逐跳复检），`-allow-private` 可放行家用 NAS；WebDAV 密码回显脱敏
 - `store.json` 改为「临时文件 + fsync + rename」原子写，保留 `.bak`；主文件损坏时启动自动回滚备份；读侧 RWMutex、写侧串行化
@@ -233,6 +256,18 @@ TVBoxWeb/
 - **内容回显类**接口（`/api/proxy`、m3u8 解析）默认拒绝内网，避免把内网暴露成开放代理；
 - 例外是**你保存过的源域名**：即使它解析到内网（家里 NAS 的公网域名在内网被 DNS 解成 ULA `fd00::/8` 或 `192.168.x.x` 很常见），也会被自动加入可信列表并放行，所以 NAS 上的视频能正常经 `/api/proxy` 播放。
 - 只有「临时用一次、没配置成源」的内网地址才需要 `-allow-private` 兜底。
+
+---
+
+## 🆕 v1.7.0 · 账号密码登录
+
+- **新增登录页**：`/#/login`，深色极简风格（光晕 + 网格底纹 + 玻璃卡片刻度），跟随现有主题令牌，亮色主题同样适配；移动端单独调过间距。
+- **没登录进不去首页**：路由守卫在每次跳转前确认会话，未登录一律重定向到登录页并带上 `?redirect=`，登录后回跳原页面；任意接口返回 401 也会自动踢回登录页。
+- **账号密码由上层决定**：`tvbox.WithLogin(user, pass)`，命令行对应 `-user` / `-pass`（也认 `YZ_USER` / `YZ_PASS`）。**两项都非空才启用**，不配置时行为与之前完全一致（免登录）。
+- **会话**：`POST /api/login` 校验后下发 HttpOnly Cookie `yz_session`（HMAC-SHA256 签名，7 天有效）。密钥每进程随机，重启即失效，不落盘；密码只做等时比较，不写日志、不回显。
+- **防爆破**：同一 IP 10 分钟内失败 8 次临时锁定（429）。
+- **与旧口令并存**：`WithAuthToken` 仍然有效，任一凭证通过即放行。
+- **设置页**：启用登录后，「关于」里显示当前账号并提供「退出登录」。
 
 ---
 

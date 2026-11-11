@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, watch, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { api } from '@/api'
 import { useAppStore } from '@/stores/app'
 import { isOffline } from '@/pwa'
 import { applyTheme, watchSystemTheme } from '@/theme'
+import { authState, ensureSession } from '@/auth'
 import TipToast from '@/components/TipToast.vue'
 import PrivacyPanel from '@/components/PrivacyPanel.vue'
 
@@ -12,9 +13,33 @@ const app = useAppStore()
 const router = useRouter()
 const route = useRoute()
 
-const checking = ref(true)
+const booting = ref(true)
 const agreed = ref(false)
 const refused = ref(false)
+
+// 已登录后才拉业务数据（未登录时这些接口会 401，没必要打）
+async function loadAuthedData() {
+  try {
+    await app.loadStatus()
+  } catch {
+    /* 状态接口失败不阻塞界面 */
+  }
+  try {
+    const p = await api.privacy()
+    agreed.value = p.agreed
+  } catch {
+    // 取不到隐私设置时不拦人，直接放行
+    agreed.value = true
+  }
+}
+
+// 登录成功后再补一次数据加载（onMounted 那次因为未登录跳过了）
+watch(
+  () => authState.authed,
+  async (authed) => {
+    if (authed) await loadAuthedData()
+  }
+)
 
 // ===== 移动端左滑返回手势 =====
 let edgeStartX = 0
@@ -58,14 +83,10 @@ function onTouchEnd(e: TouchEvent) {
 onMounted(async () => {
   applyTheme()
   watchSystemTheme()
-  await app.loadStatus()
-  try {
-    const p = await api.privacy()
-    agreed.value = p.agreed
-  } catch {
-    agreed.value = true
-  }
-  checking.value = false
+  // 先确认登录态：未登录时不打业务接口，直接交给路由守卫跳到登录页
+  const authed = await ensureSession()
+  if (authed) await loadAuthedData()
+  booting.value = false
   // 全局左滑返回手势
   window.addEventListener('touchstart', onTouchStart, { passive: true })
   window.addEventListener('touchmove', onTouchMove, { passive: false })
@@ -94,11 +115,12 @@ function disagree() {
 </script>
 
 <template>
-  <div v-if="checking" class="boot-loading">
+  <div v-if="booting" class="boot-loading">
     <span>加载中…</span>
   </div>
 
-  <PrivacyPanel v-else-if="!agreed && !refused" @agree="agree" @disagree="disagree" />
+  <!-- 隐私政策：只在已登录、且尚未同意时拦一层，避免压住登录页 -->
+  <PrivacyPanel v-else-if="authState.authed && !agreed && !refused" @agree="agree" @disagree="disagree" />
 
   <div v-else-if="refused" class="boot-loading">
     <p>你需要同意隐私政策后才能使用本应用</p>

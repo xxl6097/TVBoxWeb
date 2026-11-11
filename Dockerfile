@@ -28,7 +28,7 @@ COPY . .
 COPY --from=web-builder /build/dist ./dist
 
 # 编译：禁用 CGO、Linux 目标，注入版本信息
-ARG APP_VERSION=v1.6.3
+ARG APP_VERSION=v1.7.0
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
     -trimpath -ldflags="-s -w -X github.com/xxl6097/TVBoxWeb/internal/api.AppVersion=${APP_VERSION} -X github.com/xxl6097/TVBoxWeb/internal/api.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%S)" \
     -o /tmp/app ./cmd/tvbox

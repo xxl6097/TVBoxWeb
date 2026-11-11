@@ -9,6 +9,8 @@ import router from './router'
 import './styles/main.css'
 import { initWS } from './ws'
 import { initPWA } from './pwa'
+import { setUnauthorizedHandler } from './api'
+import { markUnauthorized } from './auth'
 
 const app = createApp(App)
 
@@ -35,6 +37,15 @@ document.addEventListener(
 app.use(createPinia())
 app.use(router)
 app.use(ElementPlus)
+
+// 会话失效（任意 API 返回 401）时统一跳登录页，并带上当前路径方便登录后回跳
+setUnauthorizedHandler(() => {
+  markUnauthorized()
+  const cur = router.currentRoute.value
+  if (cur.name === 'login') return
+  router.replace({ name: 'login', query: cur.fullPath !== '/' ? { redirect: cur.fullPath } : {} })
+})
+
 app.mount('#app')
 
 // 初始化 WebSocket 连接（非阻塞）

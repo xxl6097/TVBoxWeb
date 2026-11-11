@@ -27,6 +27,11 @@ type SecurityConfig struct {
 	AllowPrivateUpstreams bool
 	// AllowedHosts 上游域名白名单，为空表示不限制（仍拒绝内网 IP）。
 	AllowedHosts []string
+	// LoginUser / LoginPass 账号密码登录。两者都非空时启用：
+	// /api/* 与 /ws 需要先 POST /api/login 换取会话 Cookie。
+	// 未设置时行为与旧版本一致（不启用登录页）。
+	LoginUser string
+	LoginPass string
 	// Logger 用于记录 panic 堆栈，nil 时用标准日志。
 	Logger *log.Logger
 }
@@ -117,10 +122,18 @@ func Secure(next http.Handler) http.Handler {
 			return
 		}
 
-		// --- 可选访问口令（只保护 API 与 WebSocket，静态资源必须能匿名加载）---
-		if sec.AuthToken != "" && needsAuth(r.URL.Path) && !authOK(r) {
-			failWith(rw, 401, ErrAuth, "需要访问口令，请在「设置 → 访问口令」中配置")
-			return
+		// --- 可选鉴权（只保护 API 与 WebSocket，静态资源必须能匿名加载）---
+		// 两种方式并存：旧的访问口令（-token / Bearer / X-Auth-Token），
+		// 以及新的账号密码登录（会话 Cookie）。
+		if needsAuth(r.URL.Path) && !authOK(r) {
+			if loginEnabled() && sessionUser(r) == "" {
+				failWith(rw, 401, ErrAuth, "请先登录")
+				return
+			}
+			if !loginEnabled() && sec.AuthToken != "" {
+				failWith(rw, 401, ErrAuth, "需要访问口令，请在「设置 → 访问口令」中配置")
+				return
+			}
 		}
 		next.ServeHTTP(rw, r)
 	})
@@ -163,12 +176,26 @@ func hostOnly(h string) string {
 }
 
 func needsAuth(path string) bool {
+	// 登录相关端点必须匿名可达，否则拿不到会话
+	switch path {
+	case "/api/health", "/api/login", "/api/logout", "/api/session":
+		return false
+	}
 	return strings.HasPrefix(path, "/api/") || strings.HasPrefix(path, "/ws")
 }
 
+// authOK 判断请求是否已通过鉴权：口令正确，或持有有效的登录会话。
+// 未启用任何鉴权时恒为 true。
 func authOK(r *http.Request) bool {
 	// 健康检查不鉴权，保证容器 HEALTHCHECK 可用
 	if r.URL.Path == "/api/health" {
+		return true
+	}
+	// 已登录（会话 Cookie 有效）
+	if sessionUser(r) != "" {
+		return true
+	}
+	if sec.AuthToken == "" && !loginEnabled() {
 		return true
 	}
 	token := ""
@@ -184,6 +211,9 @@ func authOK(r *http.Request) bool {
 		token = r.URL.Query().Get("token")
 	}
 	if token == "" {
+		return false
+	}
+	if sec.AuthToken == "" {
 		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(token), []byte(sec.AuthToken)) == 1

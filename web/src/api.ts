@@ -24,6 +24,14 @@ import { idbGet, idbSet, idbDelete, idbKeys } from '@/idb'
 
 const BASE = '/api'
 
+// ===== 401 统一处理 =====
+// api 层不直接依赖路由，由 main.ts 注入「跳登录页」的动作，避免循环依赖。
+let unauthorizedHandler: (() => void) | null = null
+
+export function setUnauthorizedHandler(fn: () => void): void {
+  unauthorizedHandler = fn
+}
+
 // ===== 可选访问口令（服务端 -token 开启时才需要）=====
 const AUTH_KEY = 'yz_auth_token'
 
@@ -185,6 +193,7 @@ async function doRequest<T>(path: string, opts: RequestInit = {}): Promise<T> {
   try {
     res = await fetch(BASE + path, {
       ...opts,
+      credentials: 'same-origin',
       headers: {
         'Content-Type': 'application/json',
         ...authHeaders(),
@@ -197,6 +206,8 @@ async function doRequest<T>(path: string, opts: RequestInit = {}): Promise<T> {
     throw new ApiError('网络连接失败', 'ERR_NETWORK', 0, ERROR_HINTS.ERR_NETWORK)
   }
   if (!res.ok) {
+    // 会话过期/未登录：交给上层跳登录页
+    if (res.status === 401) unauthorizedHandler?.()
     let msg = `请求失败 (${res.status})`
     let code = ''
     try {
