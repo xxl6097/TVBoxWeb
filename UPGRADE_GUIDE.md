@@ -8,7 +8,7 @@ TVBoxWeb v1.3.1 实现了完整的基于 GitHub Release 的自动升级功能，
 
 - ✅ 自动检测 GitHub 最新 Release
 - ✅ 多平台支持（Linux/macOS/Windows，amd64/arm64）
-- ✅ 断点续传下载
+- ⚠️ 断点续传下载（暂未实现，弱网络建议重试；详见文末 v1.5.0 变更）
 - ✅ 下载进度实时推送（SSE）
 - ✅ 自动备份和恢复
 - ✅ 平台架构自动匹配
@@ -48,7 +48,7 @@ GET /api/upgrade/check
     "notes": "Release notes in markdown...",
     "publishedAt": "2024-11-10T00:00:00Z",
     "pageUrl": "https://github.com/xxl6097/TVBoxWeb/releases/tag/v1.3.2",
-    "downloadUrl": "https://github.com/xxl6097/TVBoxWeb/releases/download/v1.3.2/TVBoxWeb_1.3.2_darwin_arm64",
+    "downloadUrl": "https://github.com/xxl6097/TVBoxWeb/releases/download/v1.3.2/yezhen-darwin-arm64",
     "size": 12582912
   }
 }
