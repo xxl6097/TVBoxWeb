@@ -2,6 +2,7 @@
 
 import type {
   Site,
+  SiteHealthStatus,
   Category,
   Vod,
   VodPage,
@@ -269,6 +270,8 @@ export const api = {
   sites: () => get<Site[]>('/sites'),
   setEnabled: (keys: string[]) => post('/sites/enabled', { keys }),
   sitesSpeed: () => get<{ key: string; name: string; ms: number; ok: boolean }[]>('/sites/speed'),
+  sitesHealth: () =>
+    get<{ statuses: SiteHealthStatus[]; time: number }>('/sites/health').catch(() => ({ statuses: [], time: 0 })),
   loadConfig: (source: string) => post<{ count: number }>('/config', { source }),
   subscribe: (source: string) => post<{ name: string; sites: number; lives: number }>('/subscription', { source }),
 

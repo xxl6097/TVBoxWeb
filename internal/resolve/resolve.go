@@ -2,6 +2,7 @@
 package resolve
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"time"
@@ -27,6 +28,11 @@ type parseResp struct {
 
 // Resolve 解析播放地址：直链直接返回，否则轮询前 8 个 type=1 解析接口。
 func Resolve(raw string, rules []model.ParseRule) Resolved {
+	return ResolveCtx(context.Background(), raw, rules)
+}
+
+// ResolveCtx 与 Resolve 相同，ctx 可取消（逐个尝试解析接口时会及时放弃）。
+func ResolveCtx(ctx context.Context, raw string, rules []model.ParseRule) Resolved {
 	r := Resolved{URL: raw}
 	if raw == "" {
 		r.Via = "空地址"
@@ -42,10 +48,14 @@ func Resolve(raw string, rules []model.ParseRule) Resolved {
 		limit = 8
 	}
 	for i := 0; i < limit; i++ {
+		if ctx.Err() != nil {
+			r.Via = "已取消"
+			return r
+		}
 		rule := rules[i]
 		cands := []string{rule.URL + raw, rule.URL + urlEncode(raw)}
 		for _, cand := range cands {
-			txt, err := httpc.Text(cand, nil, 6*time.Second)
+			txt, err := httpc.TextCtx(ctx, cand, nil, 6*time.Second)
 			if err != nil {
 				continue
 			}

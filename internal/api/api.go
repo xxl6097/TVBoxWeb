@@ -34,7 +34,7 @@ import (
 
 // 版本信息（通过 ldflags -X 注入，默认值兜底）。
 var (
-	AppVersion = "v1.5.1"
+	AppVersion = "v1.6.0"
 	BuildTime  = "unknown"
 )
 
@@ -577,7 +577,7 @@ func hSitesSpeed(w http.ResponseWriter, r *http.Request) {
 			u := c.APIURL("ac=list")
 			t0 := time.Now()
 			ok := false
-			if _, err := httpc.Text(u, nil, 8*time.Second); err == nil {
+			if _, err := httpc.TextCtx(r.Context(), u, nil, 8*time.Second); err == nil {
 				ok = true
 			}
 			ms := int(time.Since(t0).Milliseconds())
@@ -617,7 +617,7 @@ func hConfig(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "参数错误")
 		return
 	}
-	n, err := crawler.LoadConfig(req.Source)
+	n, err := crawler.LoadConfigCtx(r.Context(), req.Source)
 	if err != nil {
 		fail(w, 400, err.Error())
 		return
@@ -634,7 +634,7 @@ func hSubscription(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "参数错误")
 		return
 	}
-	res, err := crawler.LoadSubscription(req.Source)
+	res, err := crawler.LoadSubscriptionCtx(r.Context(), req.Source)
 	if err != nil {
 		fail(w, 400, err.Error())
 		return
@@ -659,7 +659,7 @@ func hCategories(w http.ResponseWriter, r *http.Request) {
 	}
 	c := cms.New(*site)
 	t0 := time.Now()
-	cats, err := c.Categories()
+	cats, err := c.CategoriesCtx(r.Context())
 	ms := int(time.Since(t0).Milliseconds())
 	store.RecordSiteRequest(siteKey, err == nil, ms)
 	if err != nil {
@@ -699,9 +699,9 @@ func hVod(w http.ResponseWriter, r *http.Request) {
 				ids = append(ids, id)
 			}
 		}
-		pg, err = c.ListMerged(ids, page)
+		pg, err = c.ListMergedCtx(r.Context(), ids, page)
 	} else {
-		pg, err = c.List(tid, page)
+		pg, err = c.ListCtx(r.Context(), tid, page)
 	}
 	ms := int(time.Since(t0).Milliseconds())
 	store.RecordSiteRequest(siteKey, err == nil, ms)
@@ -722,7 +722,7 @@ func hVodDetail(w http.ResponseWriter, r *http.Request) {
 	id := q(r, "id")
 	c := cms.New(*site)
 	t0 := time.Now()
-	v, err := c.Detail(id)
+	v, err := c.DetailCtx(r.Context(), id)
 	ms := int(time.Since(t0).Milliseconds())
 	store.RecordSiteRequest(siteKey, err == nil, ms)
 	if err != nil {
@@ -760,7 +760,7 @@ func hSearch(w http.ResponseWriter, r *http.Request) {
 		go func(s model.Site) {
 			defer func() { <-sem }()
 			c := cms.New(s)
-			ch <- result{s, c.Search(kw)}
+			ch <- result{s, c.SearchCtx(r.Context(), kw)}
 		}(s)
 	}
 	var list []model.Vod
@@ -861,7 +861,7 @@ func hResolve(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "参数错误")
 		return
 	}
-	ok(w, resolve.Resolve(req.URL, store.Parses()))
+	ok(w, resolve.ResolveCtx(r.Context(), req.URL, store.Parses()))
 }
 
 func hPinyinAbbr(w http.ResponseWriter, r *http.Request) {
@@ -1122,7 +1122,7 @@ func hLiveEpg(w http.ResponseWriter, r *http.Request) {
 	if !guardURL(w, u) {
 		return
 	}
-	res, err := live.FetchEPG(u, q(r, "name"))
+	res, err := live.FetchEPGCtx(r.Context(), u, q(r, "name"))
 	if err != nil {
 		status, code := 502, ErrUpstream
 		if strings.Contains(err.Error(), "尚未配置") || strings.Contains(err.Error(), "缺少频道") {
@@ -1161,7 +1161,7 @@ func hLiveChannels(w http.ResponseWriter, r *http.Request) {
 	if !guardURL(w, u) {
 		return
 	}
-	groups, err := live.Load(u, 25*time.Second)
+	groups, err := live.LoadCtx(r.Context(), u, 25*time.Second)
 	if err != nil {
 		fail(w, 500, err.Error())
 		return
@@ -1229,7 +1229,7 @@ func hPeek(w http.ResponseWriter, r *http.Request) {
 	if !guardURL(w, u) {
 		return
 	}
-	alive := live.Probe(u, 2500*time.Millisecond)
+	alive := live.ProbeCtx(r.Context(), u, 2500*time.Millisecond)
 	ok(w, map[string]any{"alive": alive})
 }
 
@@ -1275,7 +1275,7 @@ func hQualityMaster(w http.ResponseWriter, r *http.Request) {
 	if !guardURL(w, req.URL) {
 		return
 	}
-	txt, err := httpc.Text(req.URL, nil, 6*time.Second)
+	txt, err := httpc.TextCtx(r.Context(), req.URL, nil, 6*time.Second)
 	if err != nil {
 		ok(w, []quality.QLevel{})
 		return
@@ -1399,7 +1399,7 @@ func hWdProbe(w http.ResponseWriter, r *http.Request) {
 	if !guardURL(w, src.URL) {
 		return
 	}
-	n, err := webdav.Probe(src)
+	n, err := webdav.ProbeCtx(r.Context(), src)
 	if err != nil {
 		fail(w, 400, err.Error())
 		return
@@ -1419,7 +1419,7 @@ func hWdList(w http.ResponseWriter, r *http.Request) {
 	if req.Path == "" {
 		req.Path = webdav.MountHref(req.Src)
 	}
-	entries, err := webdav.List(req.Src, req.Path)
+	entries, err := webdav.ListCtx(r.Context(), req.Src, req.Path)
 	if err != nil {
 		fail(w, 400, err.Error())
 		return
@@ -1443,7 +1443,7 @@ func hWdScan(w http.ResponseWriter, r *http.Request) {
 	if req.MaxDepth > 8 {
 		req.MaxDepth = 8
 	}
-	vods := webdav.Scan(req.Src, req.MaxDepth, nil)
+	vods := webdav.ScanCtx(r.Context(), req.Src, req.MaxDepth, nil)
 	if req.Src.ID != "" {
 		store.SaveWebdavScan(req.Src.ID, vods)
 	}

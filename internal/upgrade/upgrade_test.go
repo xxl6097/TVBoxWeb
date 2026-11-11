@@ -1,6 +1,7 @@
 package upgrade
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -9,7 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -83,14 +86,14 @@ func TestVerifyFileRejectsMismatch(t *testing.T) {
 	}
 	u := &GitHubUpgrader{}
 	rel := &Release{Size: 5, assetName: "payload", checksumURL: srv.URL}
-	if err := u.verifyFile(tmp, rel); err == nil || !strings.Contains(err.Error(), "SHA256 不匹配") {
+	if err := u.verifyFile(context.Background(), tmp, rel); err == nil || !strings.Contains(err.Error(), "SHA256 不匹配") {
 		t.Fatalf("篡改文件应被拒绝，得到: %v", err)
 	}
 	// 空文件也必须拒绝
 	if err := os.WriteFile(tmp, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := u.verifyFile(tmp, rel); err == nil {
+	if err := u.verifyFile(context.Background(), tmp, rel); err == nil {
 		t.Fatal("空文件应被拒绝")
 	}
 }
@@ -221,5 +224,235 @@ func TestFetchChecksumPrefersAPIChannel(t *testing.T) {
 	}
 	if n := fallbackHits.Load(); n != 0 {
 		t.Fatalf("API 通道成功时不应请求直链，命中 %d 次", n)
+	}
+}
+
+// ---------- 断点续传 ----------
+
+// isolateCache 把断点续传缓存目录重定向到测试临时目录，避免污染真实用户目录。
+func isolateCache(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(dir, ".cache"))
+	t.Setenv("LocalAppData", dir)
+	return dir
+}
+
+// rangeServer 模拟一个支持 HTTP Range 的文件服务器。
+// truncateFirst > 0 时，第 1 个请求只写 truncateFirst 字节并强制断连，用来模拟网络中断。
+func rangeServer(payload []byte, truncateFirst int) (*httptest.Server, *[]int64) {
+	var mu sync.Mutex
+	var ranges []int64
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&calls, 1)
+		var start int64
+		if rg := r.Header.Get("Range"); rg != "" {
+			if s, ok := contentRangeStart(strings.Replace(rg, "bytes=", "bytes ", 1)); ok {
+				start = s
+			}
+		}
+		mu.Lock()
+		ranges = append(ranges, start)
+		mu.Unlock()
+
+		body := payload[start:]
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		if start > 0 {
+			w.Header().Set("Content-Range",
+				fmt.Sprintf("bytes %d-%d/%d", start, len(payload)-1, len(payload)))
+			w.WriteHeader(http.StatusPartialContent)
+		} else {
+			w.WriteHeader(http.StatusOK)
+		}
+		if n == 1 && truncateFirst > 0 && truncateFirst < len(body) {
+			_, _ = w.Write(body[:truncateFirst])
+			// 强行断开连接，让客户端读到 unexpected EOF
+			if hj, ok := w.(http.Hijacker); ok {
+				if conn, _, err := hj.Hijack(); err == nil {
+					_ = conn.Close()
+				}
+			}
+			return
+		}
+		_, _ = w.Write(body)
+	}))
+	return srv, &ranges
+}
+
+func TestContentRangeStart(t *testing.T) {
+	cases := []struct {
+		in    string
+		want  int64
+		valid bool
+	}{
+		{"bytes 1024-2047/2048", 1024, true},
+		{"bytes   0-99/100", 0, true},
+		{"bytes */100", 0, false},
+		{"", 0, false},
+		{"items 1-2/3", 0, false},
+	}
+	for _, c := range cases {
+		got, ok := contentRangeStart(c.in)
+		if ok != c.valid || (ok && got != c.want) {
+			t.Errorf("contentRangeStart(%q) = (%d,%v), want (%d,%v)", c.in, got, ok, c.want, c.valid)
+		}
+	}
+}
+
+func TestDownloadResumesAfterInterruption(t *testing.T) {
+	isolateCache(t)
+	payload := bytes.Repeat([]byte("0123456789abcdef"), 8000) // 128KB
+	const firstChunk = 40000
+
+	srv, ranges := rangeServer(payload, firstChunk)
+	defer srv.Close()
+
+	u := &GitHubUpgrader{}
+	rel := &Release{Version: "v9.9.9", assetName: "yezhen-test", Size: int64(len(payload))}
+
+	part, err := u.downloadRelease(context.Background(), rel,
+		[]downloadSource{{url: srv.URL}}, nil)
+	if err != nil {
+		t.Fatalf("续传下载应成功: %v", err)
+	}
+	got, err := os.ReadFile(part)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("续传后内容不一致：得到 %d 字节，期望 %d 字节", len(got), len(payload))
+	}
+	if len(*ranges) < 2 {
+		t.Fatalf("应发生续传（至少 2 次请求），实际 %d 次", len(*ranges))
+	}
+	if (*ranges)[0] != 0 {
+		t.Fatalf("首次请求不应带 Range，得到 offset=%d", (*ranges)[0])
+	}
+	if (*ranges)[1] == 0 {
+		t.Fatal("第二次请求必须带 Range 从中断处续传，实际又从 0 开始")
+	}
+	if got := (*ranges)[1]; got != firstChunk {
+		t.Fatalf("续传起点应为中断处 %d，实际 %d", firstChunk, got)
+	}
+}
+
+func TestDownloadReusesCompletedPartFile(t *testing.T) {
+	isolateCache(t)
+	payload := []byte(strings.Repeat("x", 4096))
+
+	srv, ranges := rangeServer(payload, 0)
+	defer srv.Close()
+
+	u := &GitHubUpgrader{}
+	rel := &Release{Version: "v9.9.8", assetName: "yezhen-test", Size: int64(len(payload))}
+
+	// 预置一个「已下载完整」的 .part 文件
+	part, err := partialPath(rel.Version, rel.assetName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(part, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := u.downloadRelease(context.Background(), rel,
+		[]downloadSource{{url: srv.URL}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(*ranges) != 0 {
+		t.Fatalf("已完整的 .part 不应再发起下载，实际请求 %d 次", len(*ranges))
+	}
+	if got != part {
+		t.Fatalf("应复用同一个 .part 路径，得到 %q，期望 %q", got, part)
+	}
+}
+
+func TestDownloadRestartsWhenServerIgnoresRange(t *testing.T) {
+	isolateCache(t)
+	payload := []byte(strings.Repeat("y", 8192))
+
+	// 服务端永远忽略 Range，直接回 200 全量
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(payload)
+	}))
+	defer srv.Close()
+
+	u := &GitHubUpgrader{}
+	rel := &Release{Version: "v9.9.7", assetName: "yezhen-test", Size: int64(len(payload))}
+
+	// 预置脏的半个文件
+	part, err := partialPath(rel.Version, rel.assetName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(part, []byte("garbage"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := u.downloadRelease(context.Background(), rel,
+		[]downloadSource{{url: srv.URL}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(b, payload) {
+		t.Fatalf("服务端不支持 Range 时应从头覆盖，得到 %d 字节（前 8 字节 %q）", len(b), string(b[:min(8, len(b))]))
+	}
+}
+
+func TestDownloadDiscardsOversizedPartFile(t *testing.T) {
+	isolateCache(t)
+	payload := []byte("small")
+
+	srv, ranges := rangeServer(payload, 0)
+	defer srv.Close()
+
+	u := &GitHubUpgrader{}
+	rel := &Release{Version: "v9.9.6", assetName: "yezhen-test", Size: int64(len(payload))}
+
+	part, _ := partialPath(rel.Version, rel.assetName)
+	if err := os.WriteFile(part, bytes.Repeat([]byte("z"), 100), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := u.downloadRelease(context.Background(), rel, []downloadSource{{url: srv.URL}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(got)
+	if string(b) != "small" {
+		t.Fatalf("超过目标的脏缓存应被丢弃重下，得到 %q", b)
+	}
+	if len(*ranges) == 0 || (*ranges)[0] != 0 {
+		t.Fatalf("丢弃脏缓存后应从头请求，实际 %v", *ranges)
+	}
+}
+
+func TestPrunePartsKeepsCurrent(t *testing.T) {
+	dir := t.TempDir()
+	keep := filepath.Join(dir, "v1.0.0-keep.part")
+	old := filepath.Join(dir, "v0.9.0-old.part")
+	other := filepath.Join(dir, "notes.txt")
+	for _, p := range []string{keep, old, other} {
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pruneParts(dir, keep)
+	if _, err := os.Stat(keep); err != nil {
+		t.Fatal("当前版本的 .part 不应被清理")
+	}
+	if _, err := os.Stat(old); err == nil {
+		t.Fatal("其他版本的 .part 应被清理")
+	}
+	if _, err := os.Stat(other); err != nil {
+		t.Fatal("非 .part 文件不应被清理")
 	}
 }

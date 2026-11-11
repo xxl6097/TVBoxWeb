@@ -6,6 +6,10 @@ import { useAppStore } from '@/stores/app'
 import { usePlayerStore } from '@/stores/player'
 import { fmtMs } from '@/utils/format'
 import { fromHlsLevels, labelOfLevel, labelOf, AUTO, TOP, QLevel } from '@/utils/quality'
+import { usePlayerSubtitles } from '@/composables/usePlayerSubtitles'
+import { usePlayerGestures } from '@/composables/usePlayerGestures'
+import PlayerSettingsPanel from '@/components/player/PlayerSettingsPanel.vue'
+import EpisodeDrawer from '@/components/player/EpisodeDrawer.vue'
 
 // hls.js 动态加载（410KB → 只在进播放页时才请求）
 let Hls: any = null
@@ -70,16 +74,32 @@ const introSkipSec = ref(0)
 const outroSkipSec = ref(0)
 // ===== 连续播放 =====
 const autoPlayNext = ref(true)  // 自动连播开关，默认开启
-// ===== 字幕支持 =====
-interface Subtitle {
-  lang: string
-  label: string
-  url: string
-  default?: boolean
-}
-const subtitles = ref<Subtitle[]>([])
-const currentSubIdx = ref(-1)  // -1 表示不加载字幕
-const subDelay = ref(0)        // 字幕延迟，单位毫秒
+// ===== 字幕支持（usePlayerSubtitles 组合式函数，见 composables/usePlayerSubtitles.ts）=====
+const {
+  subtitles,
+  currentSubIdx,
+  subDelay,
+  subFontSize,
+  subLabel,
+  externalSubActive,
+  loadSubtitlesFromHls,
+  switchSubtitle,
+  applySubStyle,
+  setSubFontSize,
+  removeExternalSub,
+  setExternalSub,
+  onSubFile,
+  promptSubUrl,
+  setSubDelay,
+  disposeSubtitles
+} = usePlayerSubtitles({
+  videoEl,
+  getHls: () => hls,
+  tip: (m: string) => app.showTip(m),
+  proxy: (u: string) => proxied(u)
+})
+void switchSubtitle // 内嵌字幕轨道切换，保留给将来 UI 使用
+
 // ===== 倍速播放 =====
 const playbackRate = ref(1.0)
 const PLAYBACK_RATES = [0.5, 0.75, 1, 1.25, 1.5, 2]
@@ -255,7 +275,7 @@ onUnmounted(() => {
   if (seekPendingTimer) clearTimeout(seekPendingTimer)
   if (volSaveTimer) clearTimeout(volSaveTimer)
   removeExternalSub()
-  if (subStyleEl) { subStyleEl.remove(); subStyleEl = null }
+  disposeSubtitles()
   if (autoplayTimer) { clearInterval(autoplayTimer); autoplayTimer = 0 }
   if (castHandlers) {
     const remote = remoteApi()
@@ -411,7 +431,7 @@ async function initPlayer() {
           applyInitialLevel()
         }
         // 尝试从 m3u8 中加载字幕轨道
-        loadSubtitlesFromHls(h, src)
+        loadSubtitlesFromHls(h)
       })
       h.on(HlsCls.Events.ERROR, (_e: any, data: any) => {
         if (!data.fatal) return
@@ -799,189 +819,6 @@ function seekBy(dir: number) {
   popOsd()
 }
 
-// ===== 字幕支持 =====
-
-// 从 HLS m3u8 中提取字幕轨道
-function loadSubtitlesFromHls(hls: any, m3u8Url: string) {
-  subtitles.value = []
-  currentSubIdx.value = -1
-  if (!hls.media) return
-  
-  // 尝试从 hls.js 的子轨列表提取
-  try {
-    // hls.js 通常会将字幕信息存储在 hls.subtitleTracks 数组中
-    if (hls.subtitleTracks && Array.isArray(hls.subtitleTracks)) {
-      for (let i = 0; i < hls.subtitleTracks.length; i++) {
-        const track = hls.subtitleTracks[i]
-        if (track) {
-          subtitles.value.push({
-            lang: track.lang || `track_${i}`,
-            label: track.name || `字幕 ${i + 1}`,
-            url: track.url || '',
-            default: track.default || false
-          })
-        }
-      }
-    }
-  } catch (e) {
-    /* ignore */
-  }
-}
-
-// 切换字幕
-function switchSubtitle(idx: number) {
-  if (idx === -1) {
-    currentSubIdx.value = -1
-    if (hls && hls.media && hls.media.textTracks) {
-      for (let i = 0; i < hls.media.textTracks.length; i++) {
-        hls.media.textTracks[i].mode = 'hidden'
-      }
-    }
-    app.showTip('已关闭字幕')
-    return
-  }
-  if (idx < 0 || idx >= subtitles.value.length) return
-  currentSubIdx.value = idx
-  if (hls && hls.media && hls.media.textTracks) {
-    for (let i = 0; i < hls.media.textTracks.length; i++) {
-      hls.media.textTracks[i].mode = i === idx ? 'showing' : 'hidden'
-    }
-  }
-  const sub = subtitles.value[idx]
-  app.showTip(`已激活字幕：${sub.label}`)
-}
-
-// ===== 外挂字幕（SRT / VTT / ASS）=====
-const subFontSize = ref(20)
-const subLabel = ref('')
-const externalSubActive = ref(false)
-let extTrack: HTMLTrackElement | null = null
-let extTrackUrl = ''
-let subStyleEl: HTMLStyleElement | null = null
-const cueOrigins = new WeakMap<any, { s: number; e: number }>()
-
-// SRT → WebVTT：时间码逗号改句点，去掉纯数字序号行
-function srtToVtt(text: string): string {
-  const clean = text.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n')
-  if (/\[Script Info\]/i.test(clean)) return assToVtt(clean)
-  if (/^\s*WEBVTT/i.test(clean)) return clean
-  const body = clean
-    .replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2')
-    .replace(/^\s*\d+\s*$/gm, '')
-  return 'WEBVTT\n\n' + body.trim() + '\n'
-}
-
-function assTime(t: string): string {
-  const m = t.trim().match(/^(\d+):(\d{2}):(\d{2})(?:\.(\d{1,2}))?$/)
-  if (!m) return ''
-  return `${m[1].padStart(2, '0')}:${m[2]}:${m[3]}.${(m[4] || '0').padEnd(3, '0')}`
-}
-
-// ASS 只抽取对白文本（忽略特效标签），基础可用
-function assToVtt(text: string): string {
-  const cues: string[] = ['WEBVTT', '']
-  for (const line of text.split('\n')) {
-    if (!/^Dialogue:/i.test(line)) continue
-    const p = line.replace(/^Dialogue:\s*/i, '').split(',')
-    if (p.length < 10) continue
-    const st = assTime(p[1])
-    const sp = assTime(p[2])
-    const body = p.slice(9).join(',').replace(/\{[^}]*\}/g, '').replace(/\\[Nn]/g, '\n').trim()
-    if (st && sp && body) cues.push(`${st} --> ${sp}\n${body}\n`)
-  }
-  return cues.join('\n') + '\n'
-}
-
-// ::cue 无法被 scoped 样式命中，动态注入一条全局规则
-function applySubStyle() {
-  if (!subStyleEl) {
-    subStyleEl = document.createElement('style')
-    subStyleEl.id = 'yz-sub-style'
-    document.head.appendChild(subStyleEl)
-  }
-  subStyleEl.textContent = `video::cue { font-size: ${subFontSize.value}px; color: #fff; text-shadow: 0 1px 3px #000, 0 0 6px #000; }`
-}
-
-function setSubFontSize(px: number) {
-  subFontSize.value = px
-  applySubStyle()
-  app.showTip(`字幕字号 ${px}px`)
-}
-
-function removeExternalSub() {
-  if (extTrack) { extTrack.remove(); extTrack = null }
-  if (extTrackUrl) { URL.revokeObjectURL(extTrackUrl); extTrackUrl = '' }
-  externalSubActive.value = false
-  subLabel.value = ''
-}
-
-function setExternalSub(text: string, label: string) {
-  const vid = videoEl.value
-  if (!vid) { app.showTip('播放器尚未就绪'); return }
-  removeExternalSub()
-  const url = URL.createObjectURL(new Blob([srtToVtt(text)], { type: 'text/vtt' }))
-  const track = document.createElement('track')
-  track.kind = 'subtitles'
-  track.label = label
-  track.srclang = 'zh'
-  track.src = url
-  track.default = true
-  vid.appendChild(track)
-  track.addEventListener('load', () => { if (track.track) track.track.mode = 'showing' })
-  window.setTimeout(() => { if (track.track) track.track.mode = 'showing' }, 300)
-  extTrack = track
-  extTrackUrl = url
-  externalSubActive.value = true
-  subLabel.value = label
-  applySubStyle()
-}
-
-async function onSubFile(e: Event) {
-  const input = e.target as HTMLInputElement
-  const f = input.files?.[0]
-  if (!f) return
-  try {
-    setExternalSub(await f.text(), f.name)
-    app.showTip('字幕已加载：' + f.name)
-  } catch {
-    app.showTip('字幕读取失败，请检查文件编码')
-  }
-  input.value = ''
-}
-
-async function promptSubUrl() {
-  const u = window.prompt('输入字幕文件地址（SRT / VTT / ASS）')
-  if (!u || !u.trim()) return
-  try {
-    const res = await fetch(proxied(u.trim()))
-    if (!res.ok) throw new Error('HTTP ' + res.status)
-    setExternalSub(await res.text(), u.split('/').pop() || '网络字幕')
-    app.showTip('字幕已加载')
-  } catch (e) {
-    app.showTip('字幕加载失败：' + humanizeApiError(e))
-  }
-}
-
-// 调整字幕延迟：基于原始时间重算，避免多次调整累积漂移
-function setSubDelay(ms: number) {
-  subDelay.value = ms
-  const tracks = videoEl.value?.textTracks
-  if (tracks) {
-    for (let i = 0; i < tracks.length; i++) {
-      const cues = tracks[i].cues
-      if (!cues) continue
-      for (let j = 0; j < cues.length; j++) {
-        const cue: any = cues[j]
-        if (!cueOrigins.has(cue)) cueOrigins.set(cue, { s: cue.startTime, e: cue.endTime })
-        const o = cueOrigins.get(cue)!
-        cue.startTime = Math.max(0, o.s + ms / 1000)
-        cue.endTime = Math.max(0, o.e + ms / 1000)
-      }
-    }
-  }
-  app.showTip(`字幕延迟 ${ms > 0 ? '+' : ''}${(ms / 1000).toFixed(1)}s`)
-}
-
 // ===== 倍速播放 =====
 
 function setPlaybackRate(rate: number) {
@@ -1004,128 +841,23 @@ function togglePlaySpeed() {
   setPlaybackRate(PLAYBACK_RATES[nextIdx])
 }
 
-// ===== 移动端手势 =====
-let touchStartX = 0
-let touchStartY = 0
-let touchStartVol = 0
-let touchStartMs = 0
-let touchDir: 'horizontal' | 'vertical-left' | 'vertical-right' | '' = ''
-let touchLastTap = 0
-let touchTapTimer = 0
-const gestureHint = ref('')
-let gestureTimer = 0
-// 模拟亮度：遮罩不透明度 0~0.7（Web 无法调系统亮度，用黑色遮罩模拟）
-const brightness = ref(0)
-let touchStartBrightness = 0
-
-function showGestureHint(msg: string) {
-  gestureHint.value = msg
-  if (gestureTimer) clearTimeout(gestureTimer)
-  gestureTimer = window.setTimeout(() => (gestureHint.value = ''), 1200)
-}
-
-function onTouchStart(e: TouchEvent) {
-  if (e.touches.length !== 1) return
-  const t = e.touches[0]
-  touchStartX = t.clientX
-  touchStartY = t.clientY
-  touchStartVol = volume.value
-  touchStartMs = curMs.value
-  touchStartBrightness = brightness.value
-  touchDir = ''
-}
-
-function onTouchMove(e: TouchEvent) {
-  if (e.touches.length !== 1) return
-  const t = e.touches[0]
-  const dx = t.clientX - touchStartX
-  const dy = t.clientY - touchStartY
-  const adx = Math.abs(dx)
-  const ady = Math.abs(dy)
-
-  if (!touchDir && (adx > 8 || ady > 8)) {
-    // 判断滑动方向：横向 or 纵向（左半屏亮度，右半屏音量）
-    if (adx > ady * 1.5) {
-      touchDir = 'horizontal'
-    } else {
-      const isRightHalf = touchStartX > window.innerWidth / 2
-      touchDir = isRightHalf ? 'vertical-right' : 'vertical-left'
-    }
-  }
-
-  if (touchDir === 'horizontal') {
-    // 横向滑动：快进退（1px = 约 0.5s，最大 ±90s）
-    if (isLive || durMs.value <= 0) return
-    e.preventDefault()
-    const seekDelta = (dx / window.innerWidth) * 90000 // 90s range
-    const newMs = Math.max(0, Math.min(durMs.value, touchStartMs + seekDelta))
-    const diff = Math.round((newMs - touchStartMs) / 1000)
-    const sign = diff >= 0 ? '+' : ''
-    showGestureHint(`${sign}${diff}s → ${fmtMs(newMs)}`)
-  } else if (touchDir === 'vertical-right') {
-    // 右半屏上下：音量
-    e.preventDefault()
-    const delta = -dy / 200 // 上划增大
-    const newVol = Math.min(1, Math.max(0, touchStartVol + delta))
-    volume.value = newVol
-    if (newVol > 0) muted.value = false
-    if (videoEl.value) videoEl.value.volume = muted.value ? 0 : newVol
-    persistVolume()
-    showGestureHint(`音量 ${Math.round(newVol * 100)}%`)
-  } else if (touchDir === 'vertical-left') {
-    // 左半屏上下：模拟亮度（黑色遮罩，Web 无法调系统屏幕亮度）
-    e.preventDefault()
-    const delta = -dy / 300 // 上划变亮（遮罩变淡）
-    const newB = Math.min(0.7, Math.max(0, touchStartBrightness + delta))
-    brightness.value = newB
-    const pct = Math.round((1 - newB / 0.7) * 100)
-    showGestureHint(`亮度 ${pct}%`)
-  }
-}
-
-function onTouchEnd(e: TouchEvent) {
-  if (!touchDir) {
-    // 无方向滑动 = 点击
-    const now = Date.now()
-    const t = e.changedTouches[0]
-    if (now - touchLastTap < 300) {
-      // 双击：左侧 -10s，右侧 +10s
-      clearTimeout(touchTapTimer)
-      const isRight = t.clientX > window.innerWidth / 2
-      if (!isLive && durMs.value > 0) {
-        seekBy(isRight ? 1 : -1)
-        flashPlay(isRight ? 'play' : 'pause')
-        showGestureHint(isRight ? '+10s' : '-10s')
-      } else {
-        togglePlay()
-      }
-      touchLastTap = 0
-    } else {
-      touchLastTap = now
-      touchTapTimer = window.setTimeout(() => {
-        // 单击：切换 OSD
-        touchLastTap = 0
-        if (!showOsd.value) popOsd()
-        else showOsd.value = false
-      }, 280)
-    }
-    return
-  }
-
-  // 横向滑动结束：实际 seek
-  if (touchDir === 'horizontal' && !isLive && durMs.value > 0) {
-    const dx = e.changedTouches[0].clientX - touchStartX
-    const seekDelta = (dx / window.innerWidth) * 90000
-    const newMs = Math.max(0, Math.min(durMs.value, touchStartMs + seekDelta))
-    if (videoEl.value) {
-      videoEl.value.currentTime = newMs / 1000
-      curMs.value = newMs
-    }
-    app.showTip('已跳到 ' + fmtMs(newMs))
-  }
-  touchDir = ''
-  gestureHint.value = ''
-}
+// ===== 移动端手势（usePlayerGestures 组合式函数）=====
+const { gestureHint, brightness, onTouchStart, onTouchMove, onTouchEnd, disposeGestures } =
+  usePlayerGestures({
+    videoEl,
+    volume,
+    muted,
+    curMs,
+    durMs,
+    showOsd,
+    isLive: () => isLive,
+    seekBy,
+    togglePlay,
+    flashPlay,
+    popOsd,
+    persistVolume,
+    tip: (m: string) => app.showTip(m)
+  })
 
 function seekToRatio(ratio: number) {
   const vid = videoEl.value
@@ -1161,13 +893,6 @@ function toggleMute() {
 const showEps = ref(false)
 let autoplayTimer = 0
 let castHandlers: { onConnect: () => void; onDisconnect: () => void } | null = null
-const epKeyword = ref('')
-const filteredEps = computed(() => {
-  const k = epKeyword.value.trim().toLowerCase()
-  const list = player.eps.map((e, i) => ({ ep: e, i }))
-  if (!k) return list
-  return list.filter((x) => x.ep.name.toLowerCase().includes(k) || String(x.i + 1) === k)
-})
 
 async function jumpToEpisode(i: number) {
   if (i === player.idx) { showEps.value = false; return }
@@ -1495,58 +1220,36 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- 画质面板 -->
-    <div v-if="showQ" class="q-panel" @click.stop @click.self="showQ = false">
-      <div class="q-content">
-        <div class="q-title">播放设置</div>
-        <div class="q-section">画质</div>
-        <div class="q-chips">
-          <span class="chip" :class="{ active: qCap === AUTO }" @click="chooseLevel(AUTO)">自动</span>
-          <span class="chip" :class="{ active: qCap >= TOP }" @click="chooseLevel(TOP)">原画</span>
-          <span v-for="(lv, i) in levels" :key="i" class="chip" :class="{ active: qCap > 0 && qCap < TOP && levelIdx === i }" @click="chooseLevel(lv.height > 0 ? lv.height : TOP)">{{ labelOfLevel(lv) }}</span>
-        </div>
-        <div v-if="!levels.length" class="q-hint">源只提供这一档清晰度。</div>
-        <!-- 直播线路切换 -->
-        <template v-if="isLive && player.current && player.current.urls.length > 1">
-          <div class="q-section">线路</div>
-          <div class="q-chips">
-            <span
-              v-for="(u, i) in player.current.urls"
-              :key="'line' + i"
-              class="chip"
-              :class="{ active: u === rawUrl }"
-              @click="switchLine(u)"
-            >线路 {{ i + 1 }}</span>
-          </div>
-        </template>
-        <div class="q-section">外挂字幕</div>
-        <div class="q-chips">
-          <label class="chip" style="cursor:pointer">本地字幕
-            <input type="file" accept=".srt,.vtt,.ass,.ssa" style="display:none" @change="onSubFile" />
-          </label>
-          <span class="chip" @click="promptSubUrl">网络字幕</span>
-          <span v-if="externalSubActive" class="chip" @click="removeExternalSub">移除字幕</span>
-          <span v-for="d in [-500, 0, 500]" :key="'sd' + d" class="chip" :class="{ active: subDelay === d }" @click="setSubDelay(d)">{{ d === 0 ? '同步' : (d > 0 ? '+' : '') + (d / 1000).toFixed(1) + 's' }}</span>
-          <span v-for="s in [16, 20, 26, 32]" :key="'sf' + s" class="chip" :class="{ active: subFontSize === s }" @click="setSubFontSize(s)">{{ s }}px</span>
-        </div>
-        <div class="q-hint">{{ subLabel || '支持 SRT / VTT / ASS，文件仅在本机解析' }}</div>
-        <div class="q-section">画面比例</div>
-        <div class="q-chips">
-          <span v-for="(n, i) in scaleNames" :key="'sc' + i" class="chip" :class="{ active: scaleMode === i }" @click="setScale(i)">{{ n }}</span>
-        </div>
-        <div class="q-section">跳过片头</div>
-        <div class="q-chips">
-          <span v-for="s in SKIP_PRESETS" :key="'i' + s" class="chip" :class="{ active: introSkipSec === s }" @click="setIntroSkip(s)">{{ s === 0 ? '关' : s + ' 秒' }}</span>
-          <span class="chip" @click="markSkip('intro')">标当前</span>
-        </div>
-        <div class="q-section">跳过片尾</div>
-        <div class="q-chips">
-          <span v-for="s in SKIP_PRESETS" :key="'o' + s" class="chip" :class="{ active: outroSkipSec === s }" @click="setOutroSkip(s)">{{ s === 0 ? '关' : s + ' 秒' }}</span>
-          <span class="chip" @click="markSkip('outro')">标当前</span>
-        </div>
-        <div class="q-footer"><el-button size="small" @click="showQ = false">关闭</el-button></div>
-      </div>
-    </div>
+    <!-- 画质面板（桌面浮层，结构见 PlayerSettingsPanel） -->
+    <PlayerSettingsPanel
+      v-model="showQ"
+      variant="desktop"
+      :is-live="isLive"
+      :levels="levels"
+      :q-cap="qCap"
+      :level-idx="levelIdx"
+      :lines="player.current?.urls || []"
+      :raw-url="rawUrl"
+      :sub-delay="subDelay"
+      :sub-font-size="subFontSize"
+      :external-sub-active="externalSubActive"
+      :sub-label="subLabel"
+      :scale-names="scaleNames"
+      :scale-mode="scaleMode"
+      :intro-skip-sec="introSkipSec"
+      :outro-skip-sec="outroSkipSec"
+      @choose-level="chooseLevel"
+      @switch-line="switchLine"
+      @sub-file="onSubFile"
+      @sub-url="promptSubUrl"
+      @remove-sub="removeExternalSub"
+      @sub-delay="setSubDelay"
+      @sub-size="setSubFontSize"
+      @scale="setScale"
+      @intro-skip="setIntroSkip"
+      @outro-skip="setOutroSkip"
+      @mark-skip="markSkip"
+    />
   </div>
 
   <!-- 移动端：视频 + 控制面板垂直流式布局 -->
@@ -1704,72 +1407,45 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- 画质面板（移动端底部弹出） -->
-    <div v-if="showQ" class="m-q-mask" @click.self="showQ = false">
-      <div class="m-q-sheet">
-        <div class="m-q-handle"></div>
-        <div class="m-q-title">播放设置</div>
-        <div class="m-q-section">画质</div>
-        <div class="m-q-chips">
-          <span class="chip" :class="{ active: qCap === AUTO }" @click="chooseLevel(AUTO)">自动</span>
-          <span class="chip" :class="{ active: qCap >= TOP }" @click="chooseLevel(TOP)">原画</span>
-          <span v-for="(lv, i) in levels" :key="i" class="chip" :class="{ active: qCap > 0 && qCap < TOP && levelIdx === i }" @click="chooseLevel(lv.height > 0 ? lv.height : TOP)">{{ labelOfLevel(lv) }}</span>
-        </div>
-        <template v-if="isLive && player.current && player.current.urls.length > 1">
-          <div class="m-q-section">线路</div>
-          <div class="m-q-chips">
-            <span
-              v-for="(u, i) in player.current.urls"
-              :key="'line' + i"
-              class="chip"
-              :class="{ active: u === rawUrl }"
-              @click="switchLine(u)"
-            >线路 {{ i + 1 }}</span>
-          </div>
-        </template>
-        <div class="m-q-section">外挂字幕</div>
-        <div class="m-q-chips">
-          <label class="chip" style="cursor:pointer">本地字幕
-            <input type="file" accept=".srt,.vtt,.ass,.ssa" style="display:none" @change="onSubFile" />
-          </label>
-          <span class="chip" @click="promptSubUrl">网络字幕</span>
-          <span v-if="externalSubActive" class="chip" @click="removeExternalSub">移除字幕</span>
-          <span v-for="d in [-500, 0, 500]" :key="'msd' + d" class="chip" :class="{ active: subDelay === d }" @click="setSubDelay(d)">{{ d === 0 ? '同步' : (d > 0 ? '+' : '') + (d / 1000).toFixed(1) + 's' }}</span>
-          <span v-for="s in [16, 20, 26, 32]" :key="'msf' + s" class="chip" :class="{ active: subFontSize === s }" @click="setSubFontSize(s)">{{ s }}px</span>
-        </div>
-        <div class="q-hint">{{ subLabel || '支持 SRT / VTT / ASS，文件仅在本机解析' }}</div>
-        <div class="m-q-section">画面比例</div>
-        <div class="m-q-chips">
-          <span v-for="(n, i) in scaleNames" :key="'sc' + i" class="chip" :class="{ active: scaleMode === i }" @click="setScale(i)">{{ n }}</span>
-        </div>
-        <div class="m-q-section">跳过片头</div>
-        <div class="m-q-chips">
-          <span v-for="s in SKIP_PRESETS" :key="'i' + s" class="chip" :class="{ active: introSkipSec === s }" @click="setIntroSkip(s)">{{ s === 0 ? '关' : s + ' 秒' }}</span>
-          <span class="chip" @click="markSkip('intro')">标当前</span>
-        </div>
-        <div class="m-q-section">跳过片尾</div>
-        <div class="m-q-chips">
-          <span v-for="s in SKIP_PRESETS" :key="'o' + s" class="chip" :class="{ active: outroSkipSec === s }" @click="setOutroSkip(s)">{{ s === 0 ? '关' : s + ' 秒' }}</span>
-          <span class="chip" @click="markSkip('outro')">标当前</span>
-        </div>
-        <div class="m-q-close"><el-button size="small" @click="showQ = false" style="width:100%">关闭</el-button></div>
-      </div>
-    </div>
+    <!-- 画质面板（移动端底部 sheet，结构见 PlayerSettingsPanel） -->
+    <PlayerSettingsPanel
+      v-model="showQ"
+      variant="mobile"
+      :is-live="isLive"
+      :levels="levels"
+      :q-cap="qCap"
+      :level-idx="levelIdx"
+      :lines="player.current?.urls || []"
+      :raw-url="rawUrl"
+      :sub-delay="subDelay"
+      :sub-font-size="subFontSize"
+      :external-sub-active="externalSubActive"
+      :sub-label="subLabel"
+      :scale-names="scaleNames"
+      :scale-mode="scaleMode"
+      :intro-skip-sec="introSkipSec"
+      :outro-skip-sec="outroSkipSec"
+      @choose-level="chooseLevel"
+      @switch-line="switchLine"
+      @sub-file="onSubFile"
+      @sub-url="promptSubUrl"
+      @remove-sub="removeExternalSub"
+      @sub-delay="setSubDelay"
+      @sub-size="setSubFontSize"
+      @scale="setScale"
+      @intro-skip="setIntroSkip"
+      @outro-skip="setOutroSkip"
+      @mark-skip="markSkip"
+    />
 
     <!-- 选集抽屉 -->
-    <el-dialog v-model="showEps" :title="`选集 · ${player.vodTitle || ''}（${player.count} 集）`" width="620px" append-to-body>
-      <el-input v-model="epKeyword" size="small" clearable placeholder="输入集数或名称快速定位" />
-      <div class="ep-grid">
-        <button
-          v-for="x in filteredEps"
-          :key="x.i"
-          class="ep-cell"
-          :class="{ on: x.i === player.idx }"
-          @click="jumpToEpisode(x.i)"
-        >{{ x.ep.name || `第 ${x.i + 1} 集` }}</button>
-      </div>
-      <div v-if="!filteredEps.length" class="ep-none">暂无匹配剧集，可以换个关键词</div>
-    </el-dialog>
+    <EpisodeDrawer
+      v-model="showEps"
+      :title="`选集 · ${player.vodTitle || ''}（${player.count} 集）`"
+      :episodes="player.eps"
+      :current-idx="player.idx"
+      @select="jumpToEpisode"
+    />
   </div>
 </template>
 
@@ -1986,45 +1662,6 @@ onUnmounted(() => {
 :fullscreen .osd,
 :-webkit-full-screen .osd,
 :-moz-full-screen .osd { position: fixed; }
-
-.q-panel {
-  position: absolute;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.5);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.q-content {
-  background: var(--surface);
-  border-radius: 16px;
-  padding: 24px;
-  max-width: 640px;
-  width: 80%;
-  max-height: 80vh;
-  overflow-y: auto;
-}
-.q-title { font-size: 16px; font-weight: 600; margin-bottom: 6px; }
-.q-section { font-size: 13px; color: var(--sub); margin: 16px 0 8px; }
-.q-chips { display: flex; flex-wrap: wrap; gap: 10px; }
-.q-hint { margin-top: 8px; color: var(--dim); font-size: 13px; }
-.q-footer { margin-top: 20px; text-align: right; }
-
-.chip {
-  padding: 8px 16px;
-  border-radius: 20px;
-  background: var(--card);
-  border: 1px solid transparent;
-  font-size: 14px;
-  cursor: pointer;
-  transition: all 0.15s;
-}
-.chip:hover { background: var(--card-hi); }
-.chip.active {
-  background: var(--live);
-  color: #fff;
-  font-weight: 600;
-}
 
 /* ===== 移动端播放器 ===== */
 .m-player {
@@ -2258,50 +1895,6 @@ onUnmounted(() => {
   text-align: center;
 }
 
-/* 移动端画质弹窗（底部弹出） */
-.m-q-mask {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.5);
-  display: flex;
-  align-items: flex-end;
-  z-index: 100;
-}
-.m-q-sheet {
-  width: 100%;
-  background: var(--surface);
-  border-radius: 16px 16px 0 0;
-  padding: 20px 16px;
-  max-height: 80vh;
-  overflow-y: auto;
-}
-.m-q-handle {
-  width: 36px;
-  height: 4px;
-  border-radius: 2px;
-  background: var(--card-hi);
-  margin: 0 auto 16px;
-}
-.m-q-title {
-  font-size: 16px;
-  font-weight: 600;
-  margin-bottom: 16px;
-  text-align: center;
-}
-.m-q-section {
-  font-size: 13px;
-  color: var(--sub);
-  margin: 16px 0 8px;
-}
-.m-q-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-.m-q-close {
-  margin-top: 16px;
-}
-
 /* ===== 手势提示覆盖层 ===== */
 .m-gesture-hint {
   position: absolute;
@@ -2328,29 +1921,4 @@ onUnmounted(() => {
   z-index: 5;
   transition: opacity 0.1s;
 }
-
-/* ===== 选集抽屉 ===== */
-.ep-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
-  gap: 8px;
-  margin-top: 12px;
-  max-height: 52vh;
-  overflow-y: auto;
-}
-.ep-cell {
-  border: 1px solid var(--border);
-  background: var(--card);
-  color: var(--sub);
-  border-radius: var(--radius-sm);
-  padding: 8px 6px;
-  font-size: 12px;
-  cursor: pointer;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.ep-cell:hover { color: var(--txt); border-color: var(--sub); }
-.ep-cell.on { background: var(--selected); color: #000; border-color: var(--selected); font-weight: 600; }
-.ep-none { text-align: center; color: var(--dim); font-size: 13px; padding: 24px; }
 </style>

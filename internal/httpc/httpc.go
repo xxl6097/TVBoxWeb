@@ -65,13 +65,22 @@ var StreamClient = &http.Client{
 }
 
 // Text 拉取文本，自动跟随最多 3 次重定向，4xx 给出中文提示。
+// 不携带调用方 context（等价于 TextCtx(context.Background(), ...)），
+// 供定时任务等无请求上下文的场景使用。
 func Text(u string, extra map[string]string, timeout time.Duration) (string, error) {
+	return TextCtx(context.Background(), u, extra, timeout)
+}
+
+// TextCtx 与 Text 相同，但把 ctx 透传到上游请求：
+// 调用方（HTTP handler）断开连接后，正在进行的上游拉取会立即中止，
+// 不再白等满超时时间。
+func TextCtx(ctx context.Context, u string, extra map[string]string, timeout time.Duration) (string, error) {
 	if timeout <= 0 {
 		timeout = 12 * time.Second
 	}
 	cur := u
 	for hop := 0; hop < 3; hop++ {
-		code, body, loc, err := once(cur, extra, timeout)
+		code, body, loc, err := once(ctx, cur, extra, timeout)
 		if err != nil {
 			return "", fmt.Errorf("网络请求失败：%v", err)
 		}
@@ -105,7 +114,12 @@ func Text(u string, extra map[string]string, timeout time.Duration) (string, err
 // Peek 只抓首包（前 4KB），用来判断流地址「活不活」「快不快」。
 // 抛异常 = 连不上；返回空串 = 服务端给了 4xx/5xx。
 func Peek(u string, ms time.Duration) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), ms)
+	return PeekCtx(context.Background(), u, ms)
+}
+
+// PeekCtx 与 Peek 相同，ctx 可取消。
+func PeekCtx(ctx context.Context, u string, ms time.Duration) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, ms)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {
@@ -142,10 +156,15 @@ func Peek(u string, ms time.Duration) (string, error) {
 
 // Propfind 发送 WebDAV PROPFIND 请求，Depth: 1 列当前目录直接子项。
 func Propfind(u string, extra map[string]string, timeout time.Duration) (string, error) {
+	return PropfindCtx(context.Background(), u, extra, timeout)
+}
+
+// PropfindCtx 与 Propfind 相同，ctx 可取消。
+func PropfindCtx(ctx context.Context, u string, extra map[string]string, timeout time.Duration) (string, error) {
 	if timeout <= 0 {
 		timeout = 15 * time.Second
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, "PROPFIND", u, nil)
 	if err != nil {
@@ -179,8 +198,8 @@ func Propfind(u string, extra map[string]string, timeout time.Duration) (string,
 }
 
 // once 单次 GET，返回状态码、body、location。
-func once(u string, extra map[string]string, ms time.Duration) (int, string, string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), ms)
+func once(ctx context.Context, u string, extra map[string]string, ms time.Duration) (int, string, string, error) {
+	ctx, cancel := context.WithTimeout(ctx, ms)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {

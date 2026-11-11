@@ -59,9 +59,16 @@ func (u *GitHubUpgrader) apiAssetURL(id int64) string {
 	return fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/assets/%d", u.owner, u.repo, id)
 }
 
-// openAsset 依次尝试候选下载地址，返回第一个成功（HTTP 200）的响应。
+// openAsset 依次尝试候选下载地址，返回第一个成功的响应。
 // 调用方负责关闭 resp.Body。
 func openAsset(ctx context.Context, sources []downloadSource, timeout time.Duration) (*http.Response, error) {
+	return openAssetRange(ctx, sources, timeout, 0)
+}
+
+// openAssetRange 与 openAsset 相同，但支持 HTTP Range 断点续传：
+// offset > 0 时带上 Range 头，服务端支持则返回 206 Partial Content。
+// 服务端忽略 Range 直接回 200 也接受，由调用方退化为「从头下载」。
+func openAssetRange(ctx context.Context, sources []downloadSource, timeout time.Duration, offset int64) (*http.Response, error) {
 	if len(sources) == 0 {
 		return nil, fmt.Errorf("缺少下载地址")
 	}
@@ -76,6 +83,9 @@ func openAsset(ctx context.Context, sources []downloadSource, timeout time.Durat
 		if s.api {
 			req.Header.Set("Accept", "application/octet-stream")
 		}
+		if offset > 0 {
+			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
+		}
 		req.Header.Set("User-Agent", "yezhen-upgrader")
 
 		resp, err := client.Do(req)
@@ -83,7 +93,8 @@ func openAsset(ctx context.Context, sources []downloadSource, timeout time.Durat
 			errs = append(errs, fmt.Sprintf("%s: %v", s.url, err))
 			continue
 		}
-		if resp.StatusCode == http.StatusOK {
+		if resp.StatusCode == http.StatusOK ||
+			(offset > 0 && resp.StatusCode == http.StatusPartialContent) {
 			return resp, nil
 		}
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
@@ -277,7 +288,7 @@ func (u *GitHubUpgrader) Upgrade(ctx context.Context, rel *Release, onProgress f
 		Message: fmt.Sprintf("正在下载 %s", rel.Version),
 	})
 
-	tmpFile, err := u.downloadRelease(ctx, assetSources(rel.downloadAPIURL, rel.DownloadURL), func(loaded, total int64) {
+	tmpFile, err := u.downloadRelease(ctx, rel, assetSources(rel.downloadAPIURL, rel.DownloadURL), func(loaded, total int64) {
 		report(UpgradeProgress{
 			Stage:   StageDownloading,
 			Loaded:  loaded,
@@ -296,7 +307,7 @@ func (u *GitHubUpgrader) Upgrade(ctx context.Context, rel *Release, onProgress f
 		Message: "验证下载文件",
 	})
 
-	if err := u.verifyFile(tmpFile, rel); err != nil {
+	if err := u.verifyFile(ctx, tmpFile, rel); err != nil {
 		return fmt.Errorf("文件完整性校验失败: %w", err)
 	}
 
@@ -318,73 +329,212 @@ func (u *GitHubUpgrader) Upgrade(ctx context.Context, rel *Release, onProgress f
 	return nil
 }
 
-// downloadRelease 下载 Release 文件，优先 GitHub API asset 通道，失败回退直链。
-func (u *GitHubUpgrader) downloadRelease(ctx context.Context, sources []downloadSource, onProgress func(int64, int64)) (string, error) {
-	resp, err := openAsset(ctx, sources, 5*time.Minute)
+// maxDownloadAttempts 单次升级的下载尝试次数：中断后从中断处续传，不再从头开始。
+const maxDownloadAttempts = 3
+
+// downloadRelease 下载 Release 文件（支持断点续传）。
+// 优先 GitHub API asset 通道，失败回退直链；网络抖动时自动续传重试。
+func (u *GitHubUpgrader) downloadRelease(ctx context.Context, rel *Release, sources []downloadSource, onProgress func(int64, int64)) (string, error) {
+	part, err := partialPath(rel.Version, rel.assetName)
 	if err != nil {
 		return "", err
+	}
+	if dir := filepath.Dir(part); dir != "" {
+		pruneParts(dir, part)
+	}
+
+	var lastErr error
+	for attempt := 1; attempt <= maxDownloadAttempts; attempt++ {
+		if attempt > 1 {
+			// 线性退避：对端多半是临时抖动，等一会儿从中断处继续
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-time.After(time.Duration(attempt-1) * 2 * time.Second):
+			}
+		}
+		if err := u.downloadOnce(ctx, sources, part, rel.Size, onProgress); err != nil {
+			lastErr = err
+			if ctx.Err() != nil {
+				return "", ctx.Err()
+			}
+			continue
+		}
+		return part, nil
+	}
+	// 保留 .part 文件，用户下次点升级可从中断处继续
+	return "", fmt.Errorf("下载失败（已尝试 %d 次，已下载部分会保留，重试时续传）：%w", maxDownloadAttempts, lastErr)
+}
+
+// downloadOnce 单次下载：存在 .part 文件时用 Range 请求续传。
+func (u *GitHubUpgrader) downloadOnce(ctx context.Context, sources []downloadSource, part string, want int64, onProgress func(int64, int64)) error {
+	var offset int64
+	if st, err := os.Stat(part); err == nil {
+		offset = st.Size()
+	}
+	// 缓存文件比目标还大 → 脏数据，丢弃重下
+	if want > 0 && offset > want {
+		_ = os.Remove(part)
+		offset = 0
+	}
+	// 上次其实已下完（只是没走完校验/替换），直接复用
+	if want > 0 && offset == want {
+		if onProgress != nil {
+			onProgress(offset, want)
+		}
+		return nil
+	}
+
+	resp, err := openAssetRange(ctx, sources, 5*time.Minute, offset)
+	if err != nil {
+		return err
 	}
 	defer resp.Body.Close()
 
-	// 创建临时文件
-	tmpFile, err := os.CreateTemp("", "tvboxweb-upgrade-*")
-	if err != nil {
-		return "", err
+	resume := false
+	if offset > 0 && resp.StatusCode == http.StatusPartialContent {
+		if start, ok := contentRangeStart(resp.Header.Get("Content-Range")); ok && start == offset {
+			resume = true
+		}
 	}
-	defer tmpFile.Close()
+	if !resume {
+		// 服务端不支持 Range（或起点对不上），从零开始覆盖写
+		offset = 0
+	}
 
-	// 带进度的复制
-	contentLength := resp.ContentLength
-	var written int64
+	flags := os.O_CREATE | os.O_WRONLY
+	if resume {
+		flags |= os.O_APPEND
+	} else {
+		flags |= os.O_TRUNC
+	}
+	f, err := os.OpenFile(part, flags, 0o600)
+	if err != nil {
+		return fmt.Errorf("创建临时文件失败: %w", err)
+	}
+	defer f.Close()
+
+	total := want
+	if resp.ContentLength > 0 {
+		if resume {
+			total = offset + resp.ContentLength
+		} else {
+			total = resp.ContentLength
+		}
+	}
+	written := offset
+	if onProgress != nil {
+		onProgress(written, total)
+	}
+
 	buf := make([]byte, 32*1024)
-
 	lastReport := time.Now()
 	for {
 		select {
 		case <-ctx.Done():
-			return "", ctx.Err()
+			return ctx.Err()
 		default:
 		}
 
 		nr, er := resp.Body.Read(buf)
 		if nr > 0 {
-			nw, ew := tmpFile.Write(buf[0:nr])
-			if nw > 0 {
-				written += int64(nw)
-			}
+			nw, ew := f.Write(buf[0:nr])
+			written += int64(nw)
 			if ew != nil {
-				return "", ew
+				return ew
 			}
 			if nr != nw {
-				return "", io.ErrShortWrite
+				return io.ErrShortWrite
 			}
-
-			// 每 100ms 报告一次进度
-			if time.Since(lastReport) > 100*time.Millisecond {
-				if onProgress != nil {
-					onProgress(written, contentLength)
-				}
+			if onProgress != nil && time.Since(lastReport) > 100*time.Millisecond {
+				onProgress(written, total)
 				lastReport = time.Now()
 			}
 		}
 		if er != nil {
-			if er != io.EOF {
-				return "", er
+			if er == io.EOF {
+				break
 			}
-			break
+			return er
 		}
 	}
 
-	// 最终进度报告
-	if onProgress != nil {
-		onProgress(written, contentLength)
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("落盘失败: %w", err)
 	}
+	if onProgress != nil {
+		onProgress(written, total)
+	}
+	if total > 0 && written != total {
+		return fmt.Errorf("下载不完整：已收到 %d/%d 字节", written, total)
+	}
+	return nil
+}
 
-	return tmpFile.Name(), nil
+// contentRangeStart 解析 `Content-Range: bytes 1024-2047/2048` 的起始偏移。
+func contentRangeStart(v string) (int64, bool) {
+	v = strings.TrimSpace(v)
+	if !strings.HasPrefix(strings.ToLower(v), "bytes") {
+		return 0, false
+	}
+	v = strings.TrimSpace(v[len("bytes"):])
+	dash := strings.Index(v, "-")
+	if dash <= 0 {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(v[:dash]), 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+// partialDir 返回断点续传缓存目录（用户缓存目录下，不污染可执行文件所在目录）。
+func partialDir() (string, error) {
+	base, err := os.UserCacheDir()
+	if err != nil || base == "" {
+		base = os.TempDir()
+	}
+	dir := filepath.Join(base, "yezhen-upgrade")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("创建升级缓存目录失败: %w", err)
+	}
+	return dir, nil
+}
+
+// partialPath 为「版本 + 资产名」生成稳定的续传文件名。
+// 稳定是断点续传的前提：下次升级请求能找回同一个 .part 文件。
+func partialPath(version, assetName string) (string, error) {
+	dir, err := partialDir()
+	if err != nil {
+		return "", err
+	}
+	safe := func(s string) string {
+		return strings.NewReplacer("/", "_", "\\", "_", "..", "_", ":", "_").Replace(s)
+	}
+	return filepath.Join(dir, safe(version)+"-"+safe(assetName)+".part"), nil
+}
+
+// pruneParts 清理其他版本遗留的 .part 文件，避免缓存目录无限增长。
+func pruneParts(dir, keep string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".part") {
+			continue
+		}
+		p := filepath.Join(dir, e.Name())
+		if p == keep {
+			continue
+		}
+		_ = os.Remove(p)
+	}
 }
 
 // verifyFile 验证下载文件：非空 + SHA256 与 Release 的 checksums.txt 一致。
-func (u *GitHubUpgrader) verifyFile(path string, rel *Release) error {
+func (u *GitHubUpgrader) verifyFile(ctx context.Context, path string, rel *Release) error {
 	info, err := os.Stat(path)
 	if err != nil {
 		return err
@@ -400,7 +550,7 @@ func (u *GitHubUpgrader) verifyFile(path string, rel *Release) error {
 		return fmt.Errorf("缺少校验信息，拒绝替换可执行文件")
 	}
 
-	want, err := u.fetchChecksum(context.Background(), checksumSources, rel.assetName)
+	want, err := u.fetchChecksum(ctx, checksumSources, rel.assetName)
 	if err != nil {
 		return err
 	}

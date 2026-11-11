@@ -8,7 +8,17 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/xxl6097/TVBoxWeb/internal/model"
 )
+
+// initTemp 把 store 指向一个临时文件，避免测试互相污染真实数据。
+func initTemp(t *testing.T) {
+	t.Helper()
+	if err := Init(filepath.Join(t.TempDir(), "store.json")); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestAtomicWriteAndBackup(t *testing.T) {
 	dir := t.TempDir()
@@ -107,4 +117,128 @@ func TestConcurrentFlushDoesNotCorrupt(t *testing.T) {
 	if err := json.Unmarshal(b, &d); err != nil {
 		t.Fatalf("并发落盘后 store.json 损坏: %v", err)
 	}
+}
+
+// ---------- 历史索引 ----------
+
+// verifyIndexes 校验索引与切片完全一致（测试内部使用，调用方须持锁）。
+func verifyIndexes(t *testing.T) {
+	t.Helper()
+	mu.RLock()
+	defer mu.RUnlock()
+	if len(histIdx) != len(data.Hist) {
+		t.Fatalf("点播历史索引条目 %d != 切片长度 %d", len(histIdx), len(data.Hist))
+	}
+	for k, i := range histIdx {
+		if i < 0 || i >= len(data.Hist) {
+			t.Fatalf("点播历史索引 %q 下标越界: %d", k, i)
+		}
+		if histKey(data.Hist[i].SiteKey, data.Hist[i].VodID) != k {
+			t.Fatalf("点播历史索引 %q 指向了别的记录 %q", k, histKey(data.Hist[i].SiteKey, data.Hist[i].VodID))
+		}
+	}
+	if len(wdIdx) != len(data.WdHist) {
+		t.Fatalf("网盘历史索引条目 %d != 切片长度 %d", len(wdIdx), len(data.WdHist))
+	}
+	for k, i := range wdIdx {
+		if i < 0 || i >= len(data.WdHist) {
+			t.Fatalf("网盘历史索引 %q 下标越界: %d", k, i)
+		}
+		if wdKey(data.WdHist[i].SrcID, data.WdHist[i].VodName) != k {
+			t.Fatalf("网盘历史索引 %q 指向了别的记录 %q", k, wdKey(data.WdHist[i].SrcID, data.WdHist[i].VodName))
+		}
+	}
+}
+
+func TestHistoryIndexStaysConsistent(t *testing.T) {
+	initTemp(t)
+	ClearHistory()
+
+	// 反复覆盖同一部片：索引必须始终只有一条
+	for i := 0; i < 6; i++ {
+		UpdateHistoryPos(HistItem{SiteKey: "s1", VodID: "v1", Name: "片名", EpIndex: i, Pos: int64(i)})
+		verifyIndexes(t)
+	}
+	if got := len(History()); got != 1 {
+		t.Fatalf("同一部片应只有 1 条历史，实际 %d 条", got)
+	}
+
+	// 多部片：索引命中的位置必须能取到正确记录
+	for _, id := range []string{"v2", "v3", "v4"} {
+		UpdateHistoryPos(HistItem{SiteKey: "s1", VodID: id, Name: id})
+	}
+	verifyIndexes(t)
+	for _, id := range []string{"v1", "v2", "v3", "v4"} {
+		h, ok := FindHistory("s1", id)
+		if !ok {
+			t.Fatalf("FindHistory 没找到 %s", id)
+		}
+		if h.VodID != id {
+			t.Fatalf("FindHistory(%s) 返回了 %s", id, h.VodID)
+		}
+	}
+	if _, ok := FindHistory("s1", "不存在"); ok {
+		t.Fatal("不存在的影片不应命中")
+	}
+
+	// 删除中间一条后索引不能错位
+	RemoveHistory(HistItem{SiteKey: "s1", VodID: "v2"})
+	verifyIndexes(t)
+	if _, ok := FindHistory("s1", "v2"); ok {
+		t.Fatal("已删除的记录仍能命中")
+	}
+	if h, ok := FindHistory("s1", "v3"); !ok || h.VodID != "v3" {
+		t.Fatal("删除后索引错位，v3 查不到了")
+	}
+
+	// 历史上限 40 条
+	for i := 0; i < 60; i++ {
+		PushHistory(HistItem{SiteKey: "s2", VodID: "p" + itoa(i), Name: "批量"})
+	}
+	if n := len(History()); n > 40 {
+		t.Fatalf("历史应被限制在 40 条，实际 %d", n)
+	}
+	verifyIndexes(t)
+}
+
+func TestWdHistoryIndexStaysConsistent(t *testing.T) {
+	initTemp(t)
+	ClearWdHistory()
+
+	for i := 0; i < 30; i++ {
+		UpdateWdHistory(model.WdHistory{SrcID: "nas", VodName: "片" + itoa(i), Pos: int64(i)})
+	}
+	verifyIndexes(t)
+
+	// 同一部片更新 5 次，不应产生重复记录
+	for i := 0; i < 5; i++ {
+		UpdateWdHistory(model.WdHistory{SrcID: "nas", VodName: "片7", Pos: int64(100 + i)})
+		verifyIndexes(t)
+	}
+	if n := len(WdHistory()); n != 30 {
+		t.Fatalf("更新不应新增记录，实际 %d 条", n)
+	}
+	h, ok := FindWdHistory("nas", "片7")
+	if !ok || h.Pos != 104 {
+		t.Fatalf("FindWdHistory 没拿到最新进度：%+v ok=%v", h, ok)
+	}
+
+	RemoveWdHistory(model.WdHistory{SrcID: "nas", VodName: "片7"})
+	verifyIndexes(t)
+	if _, ok := FindWdHistory("nas", "片7"); ok {
+		t.Fatal("删除后仍能命中")
+	}
+
+	// 并发写入后索引仍需一致
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			UpdateWdHistory(model.WdHistory{SrcID: "nas", VodName: "并发" + itoa(n%4), Pos: int64(n)})
+			UpdateHistoryPos(HistItem{SiteKey: "s", VodID: "c" + itoa(n%4), Pos: int64(n)})
+		}(i)
+	}
+	wg.Wait()
+	verifyIndexes(t)
 }

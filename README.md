@@ -230,6 +230,28 @@ TVBoxWeb/
 
 ---
 
+## 🆕 v1.6.0 · 请求可取消 + 升级续传 + 播放页拆分 + 真虚拟滚动
+
+**后端**
+
+- **`context` 全链路透传**：`httpc` / `cms` / `live` / `webdav` / `resolve` / `crawler` / `quality` / `upgrade` 全部新增 `XxxCtx` 变体，HTTP handler 统一传 `r.Context()`。客户端关页面或断网后，正在跑的上游请求会立刻中止，不再白等满超时（原先多站并发搜索/直播源拉取会一直烧到超时）。旧的 `Xxx` 函数保留为 `context.Background()` 包装，第三方调用不受影响。
+- **在线升级断点续传**：下载改为 `.part` 文件 + `Range: bytes=<offset>-` 续传，中断后最多自动重试 3 次；服务端不支持 Range（回 200）时自动整包重下；`.part` 比目标大视为脏数据丢弃；已下完但没走完校验的直接复用。缓存目录在用户缓存区（`<cache>/yezhen-upgrade/`），换版本时清掉旧 `.part`。
+- **历史记录索引**：点播历史与网盘历史各建 `map[key]下标`，`UpdateHistoryPos`（播放中每 5 秒调一次）从线性扫描变 O(1)；新增 `FindHistory` / `FindWdHistory`。网盘历史上限 500 条，避免 `store.json` 无限膨胀。
+
+**前端**
+
+- **播放页拆分**：`PlayerView.vue` 从 2356 行降到 1924 行。字幕状态机 → `composables/usePlayerSubtitles.ts`，移动端手势 → `composables/usePlayerGestures.ts`，字幕格式转换 → `utils/subtitle.ts`，播放设置面板与选集抽屉 → `components/player/`。桌面浮层与移动 sheet 原本是两段几乎重复的模板，现在共用 `PlayerSettingsPanel.vue`。
+- **`VodGrid` 真虚拟滚动**：DOM 节点数恒定在 2~3 屏（原来首屏 60 条、滚动不断累积）。列数/列宽/行高全部从真实布局测量（`gridTemplateColumns`），响应式断点不用写死数字；从详情页返回时按滚动位置还原窗口，不再依赖已卸载节点。
+- **站源健康度**：`/api/sites/health` 原本没有消费方，现在点播页站源下拉用绿/黄/红/灰圆点显示正常/偏慢/不可用/未知。
+
+**工程化**
+
+- CI actions 全部升到 Node 24 运行时：`checkout@v7`、`setup-go@v7`、`setup-node@v7`、`upload-artifact@v7`、`download-artifact@v8`、`action-gh-release@v3`，消除「forced to run on Node.js 24」弃用告警；每个 job 补 `timeout-minutes`。
+- 新增单测：`httpc` ctx 取消能真正中断上游（4 个）、升级断点续传（6 个）、历史索引一致性（2 个）。
+- 优化档案归档到 `docs/optimization/`，`OPTIMIZATION_TASKS.md` 逐条回勾（12 项里 11 项完成，剩余 3 条已标注原因）。
+
+---
+
 ## 🆕 v1.5.1 · 在线升级下载通道加固
 
 - **修复**：v1.5.0 虽已能正确找到安装包，但校验文件与二进制都走 `github.com/.../releases/download/...` 直链；该域名在部分网络（尤其国内代理）会被网关拦截返回 502，导致升级卡在下载阶段

@@ -206,11 +206,16 @@ func FirstSegment(playlist, base string) string {
 
 // Measure 实测下行速率 kbps。
 func Measure(url string, ms time.Duration, limit int) QSpeed {
+	return MeasureCtx(context.Background(), url, ms, limit)
+}
+
+// MeasureCtx 与 Measure 相同，ctx 可取消（调用方断开时立即放弃测速）。
+func MeasureCtx(ctx context.Context, url string, ms time.Duration, limit int) QSpeed {
 	st := QSpeed{Kbps: -1}
 	if url == "" {
 		return st
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), ms)
+	ctx, cancel := context.WithTimeout(ctx, ms)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {

@@ -108,6 +108,13 @@ var (
 	parseList []model.ParseRule
 	rawSites  int
 
+	// 历史记录索引：把「线性扫描找同一条记录」降成 O(1)。
+	// 键为 siteKey|vodId（点播）与 srcId|vodName（网盘），值为切片下标。
+	// 索引与 data.Hist / data.WdHist 必须始终一致，任何结构性改动
+	//（增删、整体替换）后都要 rebuildIndexes。
+	histIdx = map[string]int{}
+	wdIdx   = map[string]int{}
+
 	// 版本追踪用于 API 缓存（ETag）
 	sitesVersion  int64 // 站源列表最后更新时间戳
 	configVersion int64 // 配置最后更新时间戳
@@ -155,6 +162,29 @@ func ensureMaps() {
 	if data.SiteHealth == nil {
 		data.SiteHealth = map[string]SiteHealthStat{}
 	}
+	rebuildIndexes()
+}
+
+func histKey(siteKey, vodID string) string { return siteKey + "|" + vodID }
+func wdKey(srcID, vodName string) string   { return srcID + "|" + vodName }
+
+// rebuildIndexes 重建历史索引。调用方必须持有 mu 写锁（或处于启动单线程阶段）。
+// 重复键只保留第一条，与原先「找到即处理」的语义一致。
+func rebuildIndexes() {
+	histIdx = make(map[string]int, len(data.Hist))
+	for i := range data.Hist {
+		k := histKey(data.Hist[i].SiteKey, data.Hist[i].VodID)
+		if _, dup := histIdx[k]; !dup {
+			histIdx[k] = i
+		}
+	}
+	wdIdx = make(map[string]int, len(data.WdHist))
+	for i := range data.WdHist {
+		k := wdKey(data.WdHist[i].SrcID, data.WdHist[i].VodName)
+		if _, dup := wdIdx[k]; !dup {
+			wdIdx[k] = i
+		}
+	}
 }
 
 func save() { flush() }
@@ -180,6 +210,7 @@ func Restore(raw []byte) error {
 	}
 	mu.Lock()
 	data = d
+	rebuildIndexes()
 	mu.Unlock()
 	flush()
 	return nil
@@ -195,6 +226,7 @@ func Reset() {
 	siteList = nil
 	parseList = nil
 	rawSites = 0
+	rebuildIndexes()
 	mu.Unlock()
 	flush()
 }
@@ -411,13 +443,24 @@ func SetEnabledKeys(keys []string) {
 
 func History() []HistItem { mu.RLock(); defer mu.RUnlock(); return data.Hist }
 
+// FindHistory 按「站源 + 影片」精确取一条历史记录（O(1)）。
+func FindHistory(siteKey, vodID string) (HistItem, bool) {
+	mu.RLock()
+	defer mu.RUnlock()
+	i, ok := histIdx[histKey(siteKey, vodID)]
+	if !ok || i < 0 || i >= len(data.Hist) {
+		return HistItem{}, false
+	}
+	return data.Hist[i], true
+}
+
 func PushHistory(h HistItem) {
 	mu.Lock()
 	var out []HistItem
 	out = append(out, h)
-	key := h.SiteKey + "|" + h.VodID
+	key := histKey(h.SiteKey, h.VodID)
 	for _, it := range data.Hist {
-		if it.SiteKey+"|"+it.VodID != key {
+		if histKey(it.SiteKey, it.VodID) != key {
 			out = append(out, it)
 		}
 		if len(out) >= 40 {
@@ -425,36 +468,32 @@ func PushHistory(h HistItem) {
 		}
 	}
 	data.Hist = out
+	rebuildIndexes()
 	mu.Unlock()
 	flush()
 }
 
 func UpdateHistoryPos(h HistItem) {
 	mu.Lock()
-	found := false
-	for i := range data.Hist {
+	i, found := histIdx[histKey(h.SiteKey, h.VodID)]
+	if found && i >= 0 && i < len(data.Hist) {
 		it := &data.Hist[i]
-		if it.SiteKey == h.SiteKey && it.VodID == h.VodID {
-			it.Pos, it.Dur, it.EpName, it.EpIndex, it.From, it.Time = h.Pos, h.Dur, h.EpName, h.EpIndex, h.From, time.Now().UnixMilli()
-			// 补更新影片名/封面（早期记录可能为空）
-			if h.Name != "" {
-				it.Name = h.Name
-			}
-			if h.Pic != "" {
-				it.Pic = h.Pic
-			}
-			if h.SiteName != "" {
-				it.SiteName = h.SiteName
-			}
-			// 分集管理：追加当前集到已看集列表（去重）
-			if h.EpIndex >= 0 {
-				it.WatchedEps = appendEps(it.WatchedEps, h.EpIndex)
-			}
-			found = true
-			break // 同站源同影片只有一条记录，找到后直接退出
+		it.Pos, it.Dur, it.EpName, it.EpIndex, it.From, it.Time = h.Pos, h.Dur, h.EpName, h.EpIndex, h.From, time.Now().UnixMilli()
+		// 补更新影片名/封面（早期记录可能为空）
+		if h.Name != "" {
+			it.Name = h.Name
 		}
-	}
-	if !found {
+		if h.Pic != "" {
+			it.Pic = h.Pic
+		}
+		if h.SiteName != "" {
+			it.SiteName = h.SiteName
+		}
+		// 分集管理：追加当前集到已看集列表（去重）
+		if h.EpIndex >= 0 {
+			it.WatchedEps = appendEps(it.WatchedEps, h.EpIndex)
+		}
+	} else {
 		// 首次记录：初始化已看集列表
 		if h.EpIndex >= 0 {
 			h.WatchedEps = []int{h.EpIndex}
@@ -464,6 +503,7 @@ func UpdateHistoryPos(h HistItem) {
 			data.Hist = data.Hist[:39]
 		}
 		data.Hist = append([]HistItem{h}, data.Hist...)
+		rebuildIndexes()
 	}
 	mu.Unlock()
 	flush()
@@ -485,18 +525,25 @@ func appendEps(list []int, ep int) []int {
 
 func RemoveHistory(h HistItem) {
 	mu.Lock()
-	var out []HistItem
-	for _, it := range data.Hist {
-		if !(it.SiteKey == h.SiteKey && it.VodID == h.VodID) {
-			out = append(out, it)
+	key := histKey(h.SiteKey, h.VodID)
+	if i, ok := histIdx[key]; ok && i >= 0 && i < len(data.Hist) {
+		// 命中索引直接切片删除，免掉整表重建
+		data.Hist = append(data.Hist[:i], data.Hist[i+1:]...)
+	} else {
+		var out []HistItem
+		for _, it := range data.Hist {
+			if histKey(it.SiteKey, it.VodID) != key {
+				out = append(out, it)
+			}
 		}
+		data.Hist = out
 	}
-	data.Hist = out
+	rebuildIndexes()
 	mu.Unlock()
 	flush()
 }
 
-func ClearHistory() { mu.Lock(); data.Hist = nil; mu.Unlock(); flush() }
+func ClearHistory() { mu.Lock(); data.Hist = nil; rebuildIndexes(); mu.Unlock(); flush() }
 
 // ---------- 收藏 ----------
 
@@ -967,18 +1014,30 @@ func WdHistory() []model.WdHistory {
 	return list
 }
 
+// FindWdHistory 按「网盘源 + 影片名」精确取一条网盘历史（O(1)）。
+func FindWdHistory(srcID, vodName string) (model.WdHistory, bool) {
+	mu.RLock()
+	defer mu.RUnlock()
+	i, ok := wdIdx[wdKey(srcID, vodName)]
+	if !ok || i < 0 || i >= len(data.WdHist) {
+		return model.WdHistory{}, false
+	}
+	return data.WdHist[i], true
+}
+
+// maxWdHistory 网盘历史上限：避免长时间使用后 store.json 无限膨胀。
+const maxWdHistory = 500
+
 func UpdateWdHistory(h model.WdHistory) {
 	mu.Lock()
-	found := false
-	for i := range data.WdHist {
-		it := &data.WdHist[i]
-		if it.SrcID == h.SrcID && it.VodName == h.VodName {
-			*it = h
-			found = true
+	if i, ok := wdIdx[wdKey(h.SrcID, h.VodName)]; ok && i >= 0 && i < len(data.WdHist) {
+		data.WdHist[i] = h
+	} else {
+		if len(data.WdHist) >= maxWdHistory {
+			data.WdHist = data.WdHist[:maxWdHistory-1]
 		}
-	}
-	if !found {
 		data.WdHist = append([]model.WdHistory{h}, data.WdHist...)
+		rebuildIndexes()
 	}
 	mu.Unlock()
 	flush()
@@ -986,18 +1045,24 @@ func UpdateWdHistory(h model.WdHistory) {
 
 func RemoveWdHistory(h model.WdHistory) {
 	mu.Lock()
-	var out []model.WdHistory
-	for _, it := range data.WdHist {
-		if !(it.SrcID == h.SrcID && it.VodName == h.VodName) {
-			out = append(out, it)
+	key := wdKey(h.SrcID, h.VodName)
+	if i, ok := wdIdx[key]; ok && i >= 0 && i < len(data.WdHist) {
+		data.WdHist = append(data.WdHist[:i], data.WdHist[i+1:]...)
+	} else {
+		var out []model.WdHistory
+		for _, it := range data.WdHist {
+			if wdKey(it.SrcID, it.VodName) != key {
+				out = append(out, it)
+			}
 		}
+		data.WdHist = out
 	}
-	data.WdHist = out
+	rebuildIndexes()
 	mu.Unlock()
 	flush()
 }
 
-func ClearWdHistory() { mu.Lock(); data.WdHist = nil; mu.Unlock(); flush() }
+func ClearWdHistory() { mu.Lock(); data.WdHist = nil; rebuildIndexes(); mu.Unlock(); flush() }
 
 // ---------- 小工具 ----------
 

@@ -94,7 +94,7 @@ func Check(raw string) error {
 		return ci.err
 	}
 
-	err = checkResolved(host)
+	err = checkResolved(context.Background(), host)
 	cacheMu.Lock()
 	cache[host] = cacheItem{err: err, at: time.Now()}
 	// 简单容量控制，避免被大量不同域名灌满
@@ -109,8 +109,8 @@ func Check(raw string) error {
 	return err
 }
 
-func checkResolved(host string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+func checkResolved(ctx context.Context, host string) error {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
 	if err != nil {

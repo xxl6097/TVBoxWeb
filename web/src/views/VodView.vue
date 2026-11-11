@@ -26,6 +26,34 @@ const loadError = ref('')
 
 const currentSite = computed(() => sites.value.find((s) => s.key === siteKey.value))
 
+// 站源健康度：healthy 绿 / slow 黄 / dead 红 / unknown 灰
+const healthMap = ref<Record<string, string>>({})
+const HEALTH_COLOR: Record<string, string> = {
+  healthy: 'var(--live, #22c55e)',
+  slow: '#eab308',
+  dead: 'var(--danger, #ef4444)',
+  unknown: 'var(--dim)'
+}
+const HEALTH_TEXT: Record<string, string> = {
+  healthy: '正常',
+  slow: '偏慢',
+  dead: '不可用',
+  unknown: ''
+}
+function healthOf(key: string): string {
+  return healthMap.value[key] || 'unknown'
+}
+function refreshAll() {
+  void loadHealth()
+  load()
+}
+async function loadHealth() {
+  const r = await api.sitesHealth()
+  const m: Record<string, string> = {}
+  for (const st of r.statuses) m[st.key] = st.status
+  healthMap.value = m
+}
+
 // 顶层分类（pid 为空且 id 不为空，过滤掉后端注入的虚拟「全部」条目）
 const topCats = computed(() => categories.value.filter((c) => c.pid === '' && c.id !== ''))
 const childrenOf = (tid: string) => categories.value.filter((c) => c.pid === tid)
@@ -39,6 +67,7 @@ onMounted(async () => {
   if (route.query.f) {
     try { filterVals.value = JSON.parse(route.query.f as string) } catch { /* ignore */ }
   }
+  void loadHealth()
   const list = await api.sites()
   sites.value = list.filter((s) => s.usable)
   if (!siteKey.value && sites.value.length) siteKey.value = sites.value[0].key
@@ -204,9 +233,15 @@ function parseFilters(ext: string, tid: string): FilterGroup[] {
         <span class="site-name">{{ currentSite?.name || '点播' }}</span>
         <span v-if="page.total > 0" class="total-hint">共 {{ page.total.toLocaleString() }} 部</span>
         <el-select v-model="siteKey" size="small" placeholder="换站" style="width: 200px">
-          <el-option v-for="s in sites" :key="s.key" :label="s.name" :value="s.key" />
+          <el-option v-for="s in sites" :key="s.key" :label="s.name" :value="s.key">
+            <span class="opt-health">
+              <span class="health-dot" :style="{ background: HEALTH_COLOR[healthOf(s.key)] }"></span>
+              <span>{{ s.name }}</span>
+              <span v-if="HEALTH_TEXT[healthOf(s.key)]" class="health-txt">{{ HEALTH_TEXT[healthOf(s.key)] }}</span>
+            </span>
+          </el-option>
         </el-select>
-        <el-button size="small" @click="load">刷新</el-button>
+        <el-button size="small" @click="refreshAll">刷新</el-button>
       </div>
 
       <!-- 父分类 -->
@@ -344,5 +379,21 @@ function parseFilters(ext: string, tid: string): FilterGroup[] {
   .cats .chip, .cats.sub .chip { flex-shrink: 0; }
   .pager { padding: 16px; gap: 12px; }
   .vod-total { font-size: 13px; }
+}
+.opt-health {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.health-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+}
+.health-txt {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--dim);
 }
 </style>

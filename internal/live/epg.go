@@ -2,6 +2,7 @@
 package live
 
 import (
+	"context"
 	"encoding/xml"
 	"fmt"
 	"sort"
@@ -57,6 +58,11 @@ const epgTTL = 30 * time.Minute
 
 // FetchEPG 拉取并解析节目单，按频道名做宽松匹配（忽略大小写、空格、常见清晰度后缀）。
 func FetchEPG(epgURL, channel string) (EpgResult, error) {
+	return FetchEPGCtx(context.Background(), epgURL, channel)
+}
+
+// FetchEPGCtx 与 FetchEPG 相同，ctx 可取消（命中缓存时不发请求）。
+func FetchEPGCtx(ctx context.Context, epgURL, channel string) (EpgResult, error) {
 	out := EpgResult{Channel: channel, Programs: []EpgProgram{}}
 	if strings.TrimSpace(epgURL) == "" {
 		return out, fmt.Errorf("尚未配置 EPG 节目单地址")
@@ -65,7 +71,7 @@ func FetchEPG(epgURL, channel string) (EpgResult, error) {
 		return out, fmt.Errorf("缺少频道名称")
 	}
 
-	body, err := fetchEPGBody(epgURL)
+	body, err := fetchEPGBody(ctx, epgURL)
 	if err != nil {
 		return out, err
 	}
@@ -123,7 +129,7 @@ func FetchEPG(epgURL, channel string) (EpgResult, error) {
 }
 
 // fetchEPGBody 同一地址 30 分钟内复用，避免每次切台都重新下载整份 EPG。
-func fetchEPGBody(u string) (string, error) {
+func fetchEPGBody(ctx context.Context, u string) (string, error) {
 	epgMu.Lock()
 	if c, ok := epgCache[u]; ok && time.Since(c.at) < epgTTL {
 		body := c.body
@@ -132,7 +138,7 @@ func fetchEPGBody(u string) (string, error) {
 	}
 	epgMu.Unlock()
 
-	body, err := httpc.Text(u, nil, 20*time.Second)
+	body, err := httpc.TextCtx(ctx, u, nil, 20*time.Second)
 	if err != nil {
 		return "", err
 	}

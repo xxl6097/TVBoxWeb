@@ -2,6 +2,7 @@
 package webdav
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/xml"
 	"fmt"
@@ -122,9 +123,14 @@ func AbsURL(src model.WebdavSource, href string) string {
 
 // List PROPFIND 列目录，返回直接子项。
 func List(src model.WebdavSource, path string) ([]model.WebdavEntry, error) {
+	return ListCtx(context.Background(), src, path)
+}
+
+// ListCtx 与 List 相同，ctx 可取消（扫描中途取消会及时中止后续 PROPFIND）。
+func ListCtx(ctx context.Context, src model.WebdavSource, path string) ([]model.WebdavEntry, error) {
 	origin := OriginOf(src.URL)
 	u := origin + path
-	xmlStr, err := httpc.Propfind(u, AuthHeader(src), 15*time.Second)
+	xmlStr, err := httpc.PropfindCtx(ctx, u, AuthHeader(src), 15*time.Second)
 	if err != nil {
 		return nil, err
 	}
@@ -142,8 +148,13 @@ func List(src model.WebdavSource, path string) ([]model.WebdavEntry, error) {
 
 // Probe 测试连接，返回条目数。
 func Probe(src model.WebdavSource) (int, error) {
+	return ProbeCtx(context.Background(), src)
+}
+
+// ProbeCtx 与 Probe 相同，ctx 可取消。
+func ProbeCtx(ctx context.Context, src model.WebdavSource) (int, error) {
 	root := MountHref(src)
-	list, err := List(src, root)
+	list, err := ListCtx(ctx, src, root)
 	if err != nil {
 		return 0, err
 	}
@@ -252,6 +263,11 @@ func cleanTitle(s string) string {
 
 // Scan 递归扫描目录树，识别影视并聚合。
 func Scan(src model.WebdavSource, maxDepth int, onProgress func(dirs, files int)) []model.WebdavVod {
+	return ScanCtx(context.Background(), src, maxDepth, onProgress)
+}
+
+// ScanCtx 与 Scan 相同，ctx 可取消。
+func ScanCtx(ctx context.Context, src model.WebdavSource, maxDepth int, onProgress func(dirs, files int)) []model.WebdavVod {
 	root := MountHref(src)
 	var files []model.WebdavEntry
 	const dirBudget = 200
@@ -276,7 +292,7 @@ func Scan(src model.WebdavSource, maxDepth int, onProgress func(dirs, files int)
 			for i, dir := range slice {
 				go func(i int, dir string) {
 					defer func() { ch <- struct{}{} }()
-					if entries, err := List(src, dir); err == nil {
+					if entries, err := ListCtx(ctx, src, dir); err == nil {
 						results[i].entries = entries
 					}
 				}(i, dir)

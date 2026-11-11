@@ -2,6 +2,7 @@
 package live
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -12,10 +13,15 @@ import (
 
 // Probe 单条流探活 + 测响应速度。
 func Probe(url string, ms time.Duration) bool {
+	return ProbeCtx(context.Background(), url, ms)
+}
+
+// ProbeCtx 与 Probe 相同，ctx 可取消。
+func ProbeCtx(ctx context.Context, url string, ms time.Duration) bool {
 	if url == "" {
 		return false
 	}
-	head, err := httpc.Peek(url, ms)
+	head, err := httpc.PeekCtx(ctx, url, ms)
 	if err != nil || head == "" {
 		return false
 	}
@@ -34,10 +40,15 @@ func Probe(url string, ms time.Duration) bool {
 
 // Load 拉取并解析。失败抛异常。
 func Load(url string, timeout time.Duration) ([]model.ChannelGroup, error) {
+	return LoadCtx(context.Background(), url, timeout)
+}
+
+// LoadCtx 与 Load 相同，ctx 可取消。
+func LoadCtx(ctx context.Context, url string, timeout time.Duration) ([]model.ChannelGroup, error) {
 	if timeout <= 0 {
 		timeout = 25 * time.Second
 	}
-	txt, err := httpc.Text(url, nil, timeout)
+	txt, err := httpc.TextCtx(ctx, url, nil, timeout)
 	if err != nil {
 		return nil, err
 	}

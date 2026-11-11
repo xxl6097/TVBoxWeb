@@ -3,6 +3,7 @@
 package cms
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -99,10 +100,15 @@ func New(site model.Site) *Cms { return &Cms{site: site} }
 func (c *Cms) SetExtra(q string) { c.extra = q }
 
 func fetch(url string, ttl time.Duration, ms time.Duration) (string, error) {
+	return fetchCtx(context.Background(), url, ttl, ms)
+}
+
+// fetchCtx 带 ctx 的抓取：缓存命中不发请求；未命中时 ctx 取消会立刻中止上游请求。
+func fetchCtx(ctx context.Context, url string, ttl time.Duration, ms time.Duration) (string, error) {
 	if h := hit(url, ttl); h != "" {
 		return h, nil
 	}
-	txt, err := httpc.Text(url, nil, ms)
+	txt, err := httpc.TextCtx(ctx, url, nil, ms)
 	if err != nil {
 		return "", err
 	}
@@ -127,7 +133,12 @@ func (c *Cms) APIURL(params string) string { return c.u(params) }
 // ---------- 公共入口 ----------
 
 func (c *Cms) Categories() ([]model.Category, error) {
-	txt, err := fetch(c.u("ac=list"), ttlCat, 15*time.Second)
+	return c.CategoriesCtx(context.Background())
+}
+
+// CategoriesCtx 与 Categories 相同，ctx 可取消。
+func (c *Cms) CategoriesCtx(ctx context.Context) ([]model.Category, error) {
+	txt, err := fetchCtx(ctx, c.u("ac=list"), ttlCat, 15*time.Second)
 	if err != nil {
 		return nil, err
 	}
@@ -182,8 +193,13 @@ func prependAll(cats []model.Category) []model.Category {
 }
 
 func (c *Cms) List(tid string, page int) (model.VodPage, error) {
+	return c.ListCtx(context.Background(), tid, page)
+}
+
+// ListCtx 与 List 相同，ctx 可取消。
+func (c *Cms) ListCtx(ctx context.Context, tid string, page int) (model.VodPage, error) {
 	q := "ac=videolist&t=" + urlEncode(tid) + "&pg=" + strconv.Itoa(page) + c.extra
-	txt, err := fetch(c.u(q), ttlList, 18*time.Second)
+	txt, err := fetchCtx(ctx, c.u(q), ttlList, 18*time.Second)
 	if err != nil {
 		return model.VodPage{}, err
 	}
@@ -213,6 +229,11 @@ func (c *Cms) List(tid string, page int) (model.VodPage, error) {
 
 // ListMerged 把一个父分类和它的子分类合在一起取第一页（按 vod id 去重）。
 func (c *Cms) ListMerged(ids []string, page int) (model.VodPage, error) {
+	return c.ListMergedCtx(context.Background(), ids, page)
+}
+
+// ListMergedCtx 与 ListMerged 相同，ctx 可取消。
+func (c *Cms) ListMergedCtx(ctx context.Context, ids []string, page int) (model.VodPage, error) {
 	out := model.VodPage{Page: 1, PageCount: 1}
 	seen := map[string]bool{}
 	type res struct {
@@ -222,7 +243,7 @@ func (c *Cms) ListMerged(ids []string, page int) (model.VodPage, error) {
 	ch := make(chan res, len(ids))
 	for _, id := range ids {
 		go func(id string) {
-			pg, err := c.List(id, page)
+			pg, err := c.ListCtx(ctx, id, page)
 			ch <- res{pg, err}
 		}(id)
 	}
@@ -243,8 +264,13 @@ func (c *Cms) ListMerged(ids []string, page int) (model.VodPage, error) {
 }
 
 func (c *Cms) Detail(id string) (model.Vod, error) {
+	return c.DetailCtx(context.Background(), id)
+}
+
+// DetailCtx 与 Detail 相同，ctx 可取消。
+func (c *Cms) DetailCtx(ctx context.Context, id string) (model.Vod, error) {
 	q := "ac=detail&ids=" + urlEncode(id)
-	txt, err := fetch(c.u(q), ttlDetail, 18*time.Second)
+	txt, err := fetchCtx(ctx, c.u(q), ttlDetail, 18*time.Second)
 	if err != nil {
 		return model.Vod{}, err
 	}
@@ -264,13 +290,21 @@ func (c *Cms) Detail(id string) (model.Vod, error) {
 
 // Search 搜索；不同站对 ac / wd 的接受度不同，做两级兜底。
 func (c *Cms) Search(kw string) []model.Vod {
+	return c.SearchCtx(context.Background(), kw)
+}
+
+// SearchCtx 与 Search 相同，ctx 可取消（第一级被取消后不再发起第二级请求）。
+func (c *Cms) SearchCtx(ctx context.Context, kw string) []model.Vod {
 	e := urlEncode(kw)
 	var items []model.Vod
-	if txt, err := httpc.Text(c.u("ac=videolist&wd="+e), nil, 12*time.Second); err == nil {
+	if txt, err := httpc.TextCtx(ctx, c.u("ac=videolist&wd="+e), nil, 12*time.Second); err == nil {
 		items = c.pickList(txt)
 	}
 	if len(items) == 0 {
-		if txt2, err := httpc.Text(c.u("wd="+e), nil, 12*time.Second); err == nil {
+		if ctx.Err() != nil {
+			return items
+		}
+		if txt2, err := httpc.TextCtx(ctx, c.u("wd="+e), nil, 12*time.Second); err == nil {
 			items = c.pickList(txt2)
 		}
 	}

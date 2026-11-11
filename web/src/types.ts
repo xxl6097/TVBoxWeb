@@ -1,5 +1,14 @@
 // 与 Go 后端 model 包一一对应的前端类型。
 
+/** 站源健康度（GET /api/sites/health） */
+export interface SiteHealthStatus {
+  key: string
+  status: 'healthy' | 'slow' | 'dead' | 'unknown' | string
+  lastSuccess: number
+  errorRate: number
+  avgMs: number
+}
+
 export interface Site {
   key: string
   name: string

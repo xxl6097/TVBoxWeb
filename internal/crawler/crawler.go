@@ -2,6 +2,7 @@
 package crawler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -15,15 +16,19 @@ import (
 )
 
 var (
-	errNoSites  = errors.New("配置里没有 sites 列表")
-	errInvalid  = errors.New("订阅不是合法 JSON")
-	errNoData   = errors.New("订阅里既没有站点也没有直播源")
+	errNoSites = errors.New("配置里没有 sites 列表")
+	errInvalid = errors.New("订阅不是合法 JSON")
+	errNoData  = errors.New("订阅里既没有站点也没有直播源")
 )
 
 func fetchText(source string) (string, error) {
+	return fetchTextCtx(context.Background(), source)
+}
+
+func fetchTextCtx(ctx context.Context, source string) (string, error) {
 	src := strings.TrimSpace(source)
 	if strings.HasPrefix(src, "http://") || strings.HasPrefix(src, "https://") {
-		return httpc.Text(src, nil, 20*time.Second)
+		return httpc.TextCtx(ctx, src, nil, 20*time.Second)
 	}
 	if src != "" {
 		return src, nil
@@ -61,7 +66,6 @@ func itoa(n int) string {
 	}
 	return string(b)
 }
-
 
 const (
 	CrawlInterval = 6 * time.Hour
@@ -262,7 +266,12 @@ func loadConfig(source string) (int, error) {
 
 // LoadConfig 供 api 包复用：载入配置（URL 或 JSON 文本）。
 func LoadConfig(source string) (int, error) {
-	text, err := fetchText(source)
+	return LoadConfigCtx(context.Background(), source)
+}
+
+// LoadConfigCtx 与 LoadConfig 相同，ctx 可取消。
+func LoadConfigCtx(ctx context.Context, source string) (int, error) {
+	text, err := fetchTextCtx(ctx, source)
 	if err != nil {
 		return 0, err
 	}
@@ -282,7 +291,12 @@ func LoadConfig(source string) (int, error) {
 
 // LoadSubscription 订阅：一份 JSON 同时带点播站源与直播源。
 func LoadSubscription(source string) (store.SubResult, error) {
-	text, err := fetchText(source)
+	return LoadSubscriptionCtx(context.Background(), source)
+}
+
+// LoadSubscriptionCtx 与 LoadSubscription 相同，ctx 可取消。
+func LoadSubscriptionCtx(ctx context.Context, source string) (store.SubResult, error) {
+	text, err := fetchTextCtx(ctx, source)
 	if err != nil {
 		return store.SubResult{}, err
 	}
