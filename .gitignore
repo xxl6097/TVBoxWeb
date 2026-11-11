@@ -9,6 +9,7 @@ release/
 /tvbox
 /fanren-*
 /yezhen-*
+/tvboxweb
 
 # Node
 web/node_modules/
