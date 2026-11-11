@@ -6,7 +6,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-VERSION="${1:-v1.7.2}"
+VERSION="${1:-v1.8.0}"
 RELEASE="release/${VERSION}"
 rm -rf "$RELEASE"
 mkdir -p "$RELEASE"

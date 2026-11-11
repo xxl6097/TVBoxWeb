@@ -185,7 +185,9 @@ func dirName(href string) string {
 	return name
 }
 
-var reDirPrefix = regexp.MustCompile(`^\d{1,3}\s*[-_ ]?\s*`)
+// reDirPrefix 匹配目录名前缀序号，如「01 风起天南」「10-外海风云」。
+// 用 \b 边界 + 长度 ≤3 限制：避免把「2024」这种四位年份当成序号。
+var reDirPrefix = regexp.MustCompile(`^(\d{1,3})(?:\s*[-_. ]\s*|\s+)`)
 
 func cleanDirName(name string) string {
 	return strings.TrimSpace(reDirPrefix.ReplaceAllString(name, ""))
@@ -318,22 +320,58 @@ func ScanCtx(ctx context.Context, src model.WebdavSource, maxDepth int, onProgre
 		depth++
 	}
 
+	return aggregate(src, files)
+}
+
+// aggregate 把扫描到的视频文件聚合成「电影 / 剧集」。
+//
+// 抽成独立函数便于单测：归并规则写错时，一部剧会被拆成十几部，
+// 或者不同电影被并成一部，这类退化必须能被测试发现。
+func aggregate(src model.WebdavSource, files []model.WebdavEntry) []model.WebdavVod {
 	var vods []model.WebdavVod
 	idx := map[string]int{}
+
+	// 剧集归并：把「剧名/01 篇章/1.mp4」「剧名/02 篇章/2.mp4」合成同一部剧。
+	// 目录层级（实测）：
+	//   dir       = …/迅雷下载/凡人/01 风起天南   ← 文件所在目录（篇章）
+	//   up1       = …/迅雷下载/凡人              ← 剧名目录（归并键 + 片名来源）
+	//   dirOf(up1)= …/迅雷下载                   ← 媒体根，不能再往上合并
+	// 只有当 up1 的父目录（媒体根）下存在 ≥2 个含视频的子目录时，才认为
+	// up1 是「剧名」层级；否则（如「迅雷下载/电影/xx.mp4」）保持按目录分组。
+	subCount := map[string]int{}
+	for _, f := range files {
+		subCount[dirOf(dirOf(f.Href))]++ // 键 = up1（剧名目录）
+	}
+
 	for i, f := range files {
 		p := parse(f.Name)
 		dir := dirOf(f.Href)
+
 		title := p.title
 		if title == "" && p.isSeries {
 			title = cleanDirName(dirName(dir))
 		}
-		key := p.title
+
+		var key string
 		if p.isSeries {
+			// 默认按所在目录分组
 			key = dir + "|" + title
+			// 上两级有多个含视频的子目录 → 认为它们是同一部剧的篇章，向上归并
+			up1 := dirOf(dir) // 剧名目录
+			if n := subCount[up1]; n >= 2 {
+				// 片名取剧名目录本身的名字（dirName(up1) 而非 dirName(dir)）
+				upTitle := cleanDirName(dirName(up1))
+				if upTitle != "" {
+					title = upTitle
+				}
+				key = up1 + "|" + title
+			}
 		} else {
 			key = "#" + strconv.Itoa(i)
 		}
+
 		pos, ok := idx[key]
+		season := p.season
 		if !ok {
 			name := title
 			if name == "" {
@@ -346,14 +384,26 @@ func ScanCtx(ctx context.Context, src model.WebdavSource, maxDepth int, onProgre
 			vods = append(vods, model.WebdavVod{Name: name, Kind: kind, Year: p.year, Dir: dir})
 			pos = len(vods) - 1
 			idx[key] = pos
+			if p.isSeries {
+				// 「01 风起天南」这类目录序号作为季号，便于在选集里按篇章分组
+				if n := dirOrder(dirName(dir)); n > 0 {
+					season = n
+				}
+			}
+		} else if vods[pos].Kind == "series" && season == 0 {
+			if n := dirOrder(dirName(dir)); n > 0 {
+				season = n
+			}
 		}
+
 		vod := &vods[pos]
 		ep := model.WebdavEp{
 			Name: f.Name, URL: AbsURL(src, f.Href), Href: f.Href,
-			Season: p.season, Episode: p.episode,
+			Season: season, Episode: p.episode,
 		}
 		vod.Eps = append(vod.Eps, ep)
 	}
+
 	for i := range vods {
 		if vods[i].Kind == "series" {
 			sort.SliceStable(vods[i].Eps, func(a, b int) bool {
@@ -365,6 +415,18 @@ func ScanCtx(ctx context.Context, src model.WebdavSource, maxDepth int, onProgre
 		}
 	}
 	return vods
+}
+
+func dirOrder(name string) int {
+	m := reDirPrefix.FindString(name)
+	if m == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(strings.TrimRight(strings.TrimSpace(m), "-_ ")))
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
 }
 
 func stripExt(name string) string {

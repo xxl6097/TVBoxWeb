@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { api, humanizeApiError } from '@/api'
 import { useAppStore } from '@/stores/app'
 import { usePlayerStore } from '@/stores/player'
@@ -9,6 +9,7 @@ import type { WebdavSource, WebdavVod, WebdavEntry, WebdavEp, WdHistory } from '
 import TopBar from '@/components/TopBar.vue'
 
 const router = useRouter()
+const route = useRoute()
 const app = useAppStore()
 const player = usePlayerStore()
 
@@ -35,7 +36,25 @@ const selVod = ref<WebdavVod | null>(null)
 const formOpen = ref(false)
 const form = ref<WebdavSource>({ id: '', name: '', url: '', user: '', pass: '', root: '' })
 
-onMounted(refreshData)
+onMounted(async () => {
+  await refreshData()
+  // 从设置页「识别影视 → 查看结果」跳过来时带 ?src=<id>：
+  // 该源已有识别缓存就直接进识别视图（不重扫）；缓存为空就停在源列表并说明。
+  const srcId = route.query.src as string | undefined
+  if (!srcId) return
+  const s = sources.value.find((x) => x.id === srcId)
+  if (!s) return
+  const cache = await api.webdavVods(s.id).catch(() => [])
+  if (cache.length > 0) {
+    cur.value = s
+    curPath.value = '/'
+    vods.value = cache
+    view.value = 'scan'
+    msg.value = `已识别 ${cache.length} 部影视`
+  } else {
+    msg.value = `「${s.name}」还没有识别结果，点它进入即可开始识别`
+  }
+})
 
 async function refreshData() {
   sources.value = await api.webdavSources()

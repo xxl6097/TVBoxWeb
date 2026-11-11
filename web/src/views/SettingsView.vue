@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { api, humanizeApiError, getAuthToken, setAuthToken } from '@/api'
 import { getTheme, setTheme, type ThemeMode } from '@/theme'
@@ -159,8 +159,10 @@ async function load() {
   wdSources.value   = wdList
   liveSources.value = liveList
 
-  // 加载版本信息
+  // 加载版本信息 + 各网盘上次识别到的数量（用于「识别影视」入口摘要）
   loadVersionInfo()
+  // 不 await：摘要晚点出来无所谓，别拖慢设置页首屏
+  void loadWdScanCache()
 }
 
 async function loadVersionInfo() {
@@ -288,6 +290,90 @@ function speedOk(key: string): boolean | null {
   return r ? r.ok : null
 }
 
+// ---------- 识别影视 ----------
+// 与鸿蒙版一致：递归扫描目录树，把视频文件按命名规范聚合成「电影 / 剧集」。
+// 结果由后端缓存（store.SaveWebdavScan），网盘页进入源时优先读缓存。
+const wdScanOpen = ref(false)
+const wdScanSrcId = ref('')
+const wdScanDepth = ref(6)
+const wdScanning = ref(false)
+const wdScanMsg = ref('')
+const wdScanMsgOk = ref(false)
+const wdScanCount = ref(0)
+// 每个源上次识别到的数量，用于在入口上显示摘要
+const wdScanCache = ref<Record<string, number>>({})
+
+const wdScanSummary = computed(() => {
+  const total = Object.values(wdScanCache.value).reduce((a, b) => a + b, 0)
+  if (total > 0) {
+    const n = Object.keys(wdScanCache.value).length
+    return `已识别 ${total} 部${n > 1 ? ` · ${n} 个网盘` : ''}`
+  }
+  return '扫描网盘目录，自动聚合成电影 / 剧集'
+})
+
+const wdScanSrc = computed(() => wdSources.value.find((s) => s.id === wdScanSrcId.value))
+
+async function loadWdScanCache() {
+  // 逐个源读缓存；没扫过的接口会返回空数组
+  const out: Record<string, number> = {}
+  await Promise.all(
+    wdSources.value.map(async (s) => {
+      try {
+        const list = await api.webdavVods(s.id)
+        if (list.length > 0) out[s.id] = list.length
+      } catch {
+        /* 单个源失败不影响其他 */
+      }
+    })
+  )
+  wdScanCache.value = out
+}
+
+function openWdScan() {
+  if (!wdSources.value.length) return
+  wdScanSrcId.value = wdSources.value[0].id
+  wdScanMsg.value = ''
+  wdScanMsgOk.value = false
+  wdScanCount.value = wdScanCache.value[wdScanSrcId.value] || 0
+  wdScanOpen.value = true
+}
+
+async function doWdScan() {
+  const src = wdScanSrc.value
+  if (!src) {
+    wdScanMsg.value = '请选择要扫描的网盘'
+    wdScanMsgOk.value = false
+    return
+  }
+  wdScanning.value = true
+  wdScanMsg.value = '正在扫描目录…大网盘可能要十几秒'
+  wdScanMsgOk.value = false
+  try {
+    const list = await api.webdavScan(src, wdScanDepth.value)
+    wdScanCount.value = list.length
+    wdScanCache.value = { ...wdScanCache.value, [src.id]: list.length }
+    if (list.length === 0) {
+      wdScanMsg.value = '没识别到影视。可能是目录层级超过扫描深度，或文件名不含集数标记'
+    } else {
+      const series = list.filter((v) => v.kind === 'series').length
+      wdScanMsg.value = `识别到 ${list.length} 部（电影 ${list.length - series} · 剧集 ${series}）`
+      wdScanMsgOk.value = true
+    }
+  } catch (e: any) {
+    wdScanMsg.value = humanizeApiError(e)
+    wdScanMsgOk.value = false
+  }
+  wdScanning.value = false
+}
+
+// 扫完跳去网盘页看结果（网盘页会优先读缓存，不会重复扫）
+function gotoWdScan() {
+  const src = wdScanSrc.value
+  wdScanOpen.value = false
+  router.push({ path: '/webdav', query: src ? { src: src.id } : {} })
+}
+
 // ---------- 账号 ----------
 async function doLogout() {
   await logout()
@@ -330,6 +416,7 @@ async function saveWd() {
   if (!f.name) { try { f.name = new URL(url).host } catch { f.name = url } }
   await api.saveWebdavSource(f)
   wdSources.value = await api.webdavSources()
+  await loadWdScanCache()
   wdEditOpen.value = false
   app.showTip('已保存「' + f.name + '」')
 }
@@ -337,6 +424,7 @@ async function saveWd() {
 async function removeWd(s: WebdavSource) {
   await api.removeWebdavSource(s.id)
   wdSources.value = await api.webdavSources()
+  await loadWdScanCache()
   wdEditOpen.value = false
   app.showTip('已删除「' + s.name + '」')
 }
@@ -483,6 +571,21 @@ async function clearHistory() {
                 <span class="srow-dim">{{ wdSources.length }} 个已挂载</span>
               </div>
               <span class="arrow">›</span>
+            </div>
+            <!-- 识别影视：与鸿蒙版一致，扫目录树把视频文件聚合成电影/剧集 -->
+            <div class="sdiv"></div>
+            <div v-if="wdSources.length" class="srow srow-clickable" @click="openWdScan">
+              <div class="srow-left">
+                <span class="srow-title">识别影视</span>
+                <span class="srow-dim">{{ wdScanSummary }}</span>
+              </div>
+              <span class="arrow">›</span>
+            </div>
+            <div v-else class="srow srow-disabled">
+              <div class="srow-left">
+                <span class="srow-title">识别影视</span>
+                <span class="srow-dim">先添加一个网盘挂载</span>
+              </div>
             </div>
             <template v-if="!wdSources.length">
               <div class="sdiv"></div>
@@ -692,6 +795,46 @@ async function clearHistory() {
     </div>
   </div>
 
+  <!-- ========== 识别影视弹窗 ========== -->
+  <el-dialog v-model="wdScanOpen" title="识别影视" width="520px" append-to-body>
+    <div class="wd-form">
+      <p class="scan-tip">递归扫描所选网盘的目录树，把视频文件按命名规范聚合成「电影 / 剧集」，识别完成后可在网盘页选集播放。</p>
+
+      <div class="scan-field">
+        <span class="scan-label">网盘</span>
+        <el-select v-model="wdScanSrcId" style="width: 100%" @change="wdScanCount = wdScanCache[wdScanSrcId] || 0">
+          <el-option v-for="s in wdSources" :key="s.id" :label="s.name" :value="s.id" />
+        </el-select>
+      </div>
+
+      <div class="scan-field">
+        <span class="scan-label">扫描深度</span>
+        <el-select v-model="wdScanDepth" style="width: 100%">
+          <el-option :value="3" label="3 层 · 快（目录结构简单时够用）" />
+          <el-option :value="5" label="5 层 · 推荐" />
+          <el-option :value="6" label="6 层 · 默认" />
+          <el-option :value="8" label="8 层 · 最深（大网盘较慢）" />
+        </el-select>
+      </div>
+
+      <p v-if="wdScanCount > 0 && !wdScanMsg" class="scan-cached">
+        上次识别到 {{ wdScanCount }} 部，可直接去网盘页查看，或重新扫描。
+      </p>
+      <p v-if="wdScanMsg" class="wd-msg" :class="{ ok: wdScanMsgOk }">{{ wdScanMsg }}</p>
+    </div>
+    <template #footer>
+      <div class="wd-footer">
+        <el-button :disabled="wdScanning || wdScanCount === 0" @click="gotoWdScan">查看结果</el-button>
+        <div>
+          <el-button :disabled="wdScanning" @click="wdScanOpen = false">关闭</el-button>
+          <el-button type="primary" :loading="wdScanning" @click="doWdScan">
+            {{ wdScanning ? '正在识别…' : (wdScanCount > 0 ? '重新识别' : '开始识别') }}
+          </el-button>
+        </div>
+      </div>
+    </template>
+  </el-dialog>
+
   <!-- ========== 网盘编辑弹窗 ========== -->
   <el-dialog
     v-model="wdEditOpen"
@@ -892,6 +1035,64 @@ async function clearHistory() {
 .wd-msg { font-size: 13px; color: var(--warn); margin: 0; }
 .wd-msg.ok { color: #b7f0bc; }
 .wd-hint { font-size: 12px; color: var(--dim); margin: -2px 0 0; line-height: 1.5; }
+
+/* ===== 识别影视 ===== */
+.srow-disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.srow-disabled .srow-title { color: var(--dim); }
+.scan-tip {
+  margin: 0 0 4px;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--sub);
+}
+.scan-field {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.scan-label {
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  color: var(--sub);
+}
+.scan-cached {
+  margin: 2px 0 0;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--dim);
+}
+
+/* ===== 识别影视 ===== */
+.srow-disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.srow-disabled .srow-title { color: var(--dim); }
+.scan-tip {
+  margin: 0 0 4px;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--sub);
+}
+.scan-field {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.scan-label {
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  color: var(--sub);
+}
+.scan-cached {
+  margin: 2px 0 0;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--dim);
+}
 .wd-footer { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 
 /* ===== 订阅行（两段布局：名称行 + 输入行） ===== */
