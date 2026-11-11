@@ -5,7 +5,7 @@ import { api, humanizeApiError } from '@/api'
 import { useAppStore } from '@/stores/app'
 import { usePlayerStore } from '@/stores/player'
 import { getWSClient } from '@/ws'
-import type { LiveDir, Channel, RawLive, LiveScore } from '@/types'
+import type { LiveDir, Channel, RawLive, LiveScore, EpgResult, EpgProgram } from '@/types'
 import type { HealthUpdate } from '@/ws'
 import TopBar from '@/components/TopBar.vue'
 import SkeletonList from '@/components/SkeletonList.vue'
@@ -321,6 +321,67 @@ function getSiteHealth(name: string): HealthUpdate | null {
   }
   return null
 }
+
+// ===== EPG 节目单 =====
+const epgOpen = ref(false)
+const epgUrl = ref('')
+const epgChannel = ref('')
+const epgLoading = ref(false)
+const epgData = ref<EpgResult | null>(null)
+const epgError = ref('')
+const epgChannelOptions = computed<Channel[]>(() => flatChannels.value.slice(0, 800))
+
+async function openEpg(ch?: Channel) {
+  epgOpen.value = true
+  if (!epgUrl.value) {
+    const p = await api.prefs().catch(() => null)
+    if (p) epgUrl.value = p.epgUrl || ''
+  }
+  if (ch) epgChannel.value = ch.name
+  if (!epgChannel.value && flatChannels.value.length) epgChannel.value = flatChannels.value[0].name
+  if (epgChannel.value && epgUrl.value) await loadEpg()
+}
+
+async function loadEpg() {
+  if (!epgChannel.value) { app.showTip('请先选择频道'); return }
+  epgLoading.value = true
+  epgError.value = ''
+  try {
+    epgData.value = await api.liveEpg(epgChannel.value, epgUrl.value)
+    if (!epgData.value.programs.length) epgError.value = '暂无该频道的节目单，可以检查频道名或 EPG 源'
+  } catch (e) {
+    epgError.value = humanizeApiError(e)
+    epgData.value = null
+  } finally {
+    epgLoading.value = false
+  }
+}
+
+async function saveEpgUrl() {
+  await api.setPrefs({ epgUrl: epgUrl.value.trim() }).catch(() => {})
+  app.showTip('EPG 地址已保存')
+  if (epgChannel.value) await loadEpg()
+}
+
+function epgTime(ms: number): string {
+  if (!ms) return '--:--'
+  const d = new Date(ms)
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+function epgRange(p: EpgProgram): string {
+  return `${epgTime(p.start)} - ${epgTime(p.stop)}`
+}
+function isOnAir(p: EpgProgram): boolean {
+  const n = Date.now()
+  return p.start <= n && (p.stop === 0 || p.stop > n)
+}
+// 优先展示今天的节目，最多 120 条，避免大 EPG 卡顿
+const epgVisible = computed<EpgProgram[]>(() => {
+  const list = epgData.value?.programs || []
+  const d = new Date(); d.setHours(0, 0, 0, 0)
+  const today = list.filter(p => p.start >= d.getTime())
+  return (today.length ? today : list).slice(0, 120)
+})
 </script>
 
 <template>
@@ -343,6 +404,7 @@ function getSiteHealth(name: string): HealthUpdate | null {
         </el-select>
         <el-button size="small" :loading="probing" @click="probeChannels">检测</el-button>
         <el-button size="small" :loading="ranking" @click="rankSources">测速排行</el-button>
+        <el-button size="small" @click="openEpg()">节目单</el-button>
       </div>
     </div>
 
@@ -414,6 +476,7 @@ function getSiteHealth(name: string): HealthUpdate | null {
           >
             <span class="ch-name">{{ ch.name }}</span>
             <span v-if="ch.urls.length > 1" class="ch-alts">{{ ch.urls.length }} 线路</span>
+            <span class="ch-epg" title="查看节目单" @click.stop="openEpg(ch)">▤</span>
             <span
               class="ch-fav"
               :class="{ on: isFav(ch) }"
@@ -460,6 +523,43 @@ function getSiteHealth(name: string): HealthUpdate | null {
         <el-button :loading="ranking" @click="rankSources">{{ ranking ? '测速中…' : '重新测速' }}</el-button>
         <el-button type="primary" @click="speedOpen = false">关闭</el-button>
       </template>
+    </el-dialog>
+
+    <!-- EPG 节目单 -->
+    <el-dialog v-model="epgOpen" title="节目单 (EPG)" width="620px" append-to-body>
+      <div class="epg-bar">
+        <el-select v-model="epgChannel" size="small" filterable placeholder="选择频道" style="width: 220px" @change="loadEpg">
+          <el-option v-for="c in epgChannelOptions" :key="c.name + c.url" :label="c.name" :value="c.name" />
+        </el-select>
+        <el-button size="small" :loading="epgLoading" @click="loadEpg">刷新</el-button>
+      </div>
+      <div class="epg-bar">
+        <el-input v-model="epgUrl" size="small" clearable placeholder="EPG 地址（XMLTV，如 https://.../epg.xml）" />
+        <el-button size="small" type="primary" @click="saveEpgUrl">保存</el-button>
+      </div>
+      <div v-if="epgLoading" class="epg-tip">正在加载节目单…</div>
+      <div v-else-if="epgError" class="epg-tip">{{ epgError }}</div>
+      <template v-else-if="epgData && epgData.programs.length">
+        <div v-if="epgData.now" class="epg-now">
+          <span class="epg-now-tag">正在播出</span>
+          <div class="epg-now-title">{{ epgData.now.title }}</div>
+          <div class="epg-now-meta">
+            {{ epgRange(epgData.now) }}
+            <span v-if="epgData.next"> · 接下来：{{ epgData.next.title }}</span>
+          </div>
+        </div>
+        <div class="epg-list">
+          <div v-for="(p, i) in epgVisible" :key="i" class="epg-row" :class="{ on: isOnAir(p) }">
+            <span class="epg-time">{{ epgRange(p) }}</span>
+            <div class="epg-info">
+              <div class="epg-name">{{ p.title }}</div>
+              <div v-if="p.desc" class="epg-desc">{{ p.desc }}</div>
+            </div>
+          </div>
+        </div>
+      </template>
+      <div v-else class="epg-tip">暂无节目单，可以填入 EPG 地址后点「保存」</div>
+      <template #footer><el-button type="primary" @click="epgOpen = false">关闭</el-button></template>
     </el-dialog>
   </div>
 </template>
@@ -709,5 +809,51 @@ function getSiteHealth(name: string): HealthUpdate | null {
   }
   .channel { padding: 10px; font-size: 13px; }
   .empty { padding: 60px 16px; }
+}
+
+/* ===== EPG 节目单 ===== */
+.ch-epg {
+  color: var(--dim);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 0 4px;
+}
+.ch-epg:hover { color: var(--selected); }
+.epg-bar { display: flex; gap: 8px; margin-bottom: 10px; }
+.epg-tip { color: var(--dim); text-align: center; padding: 24px; font-size: 13px; }
+.epg-now {
+  background: var(--card-hi);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+}
+.epg-now-tag {
+  display: inline-block;
+  background: var(--selected);
+  color: #000;
+  border-radius: 4px;
+  font-size: 11px;
+  padding: 1px 6px;
+  margin-bottom: 6px;
+}
+.epg-now-title { font-size: 15px; font-weight: 600; }
+.epg-now-meta { font-size: 12px; color: var(--dim); margin-top: 4px; }
+.epg-list { max-height: 360px; overflow-y: auto; }
+.epg-row {
+  display: flex;
+  gap: 12px;
+  padding: 8px 6px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+.epg-row.on { color: var(--selected); background: var(--card); }
+.epg-time { color: var(--dim); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.epg-info { min-width: 0; }
+.epg-desc { color: var(--dim); font-size: 12px; margin-top: 2px; }
+@media (max-width: 640px) {
+  .epg-bar { flex-wrap: wrap; }
+  .epg-bar .el-input { width: 100%; }
+  .epg-row { flex-direction: column; gap: 2px; }
 }
 </style>

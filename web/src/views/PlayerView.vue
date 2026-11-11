@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { api, proxied } from '@/api'
+import { api, proxied, humanizeApiError } from '@/api'
 import { useAppStore } from '@/stores/app'
 import { usePlayerStore } from '@/stores/player'
 import { fmtMs } from '@/utils/format'
@@ -198,6 +198,8 @@ onUnmounted(() => {
   if (saveTimer) clearTimeout(saveTimer)
   if (seekPendingTimer) clearTimeout(seekPendingTimer)
   if (volSaveTimer) clearTimeout(volSaveTimer)
+  removeExternalSub()
+  if (subStyleEl) { subStyleEl.remove(); subStyleEl = null }
   // 页面卸载时确保最终进度被保存
   savePos()
   destroyPlayer()
@@ -783,19 +785,131 @@ function switchSubtitle(idx: number) {
   app.showTip(`已激活字幕：${sub.label}`)
 }
 
-// 调整字幕延迟
+// ===== 外挂字幕（SRT / VTT / ASS）=====
+const subFontSize = ref(20)
+const subLabel = ref('')
+const externalSubActive = ref(false)
+let extTrack: HTMLTrackElement | null = null
+let extTrackUrl = ''
+let subStyleEl: HTMLStyleElement | null = null
+const cueOrigins = new WeakMap<any, { s: number; e: number }>()
+
+// SRT → WebVTT：时间码逗号改句点，去掉纯数字序号行
+function srtToVtt(text: string): string {
+  const clean = text.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n')
+  if (/\[Script Info\]/i.test(clean)) return assToVtt(clean)
+  if (/^\s*WEBVTT/i.test(clean)) return clean
+  const body = clean
+    .replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2')
+    .replace(/^\s*\d+\s*$/gm, '')
+  return 'WEBVTT\n\n' + body.trim() + '\n'
+}
+
+function assTime(t: string): string {
+  const m = t.trim().match(/^(\d+):(\d{2}):(\d{2})(?:\.(\d{1,2}))?$/)
+  if (!m) return ''
+  return `${m[1].padStart(2, '0')}:${m[2]}:${m[3]}.${(m[4] || '0').padEnd(3, '0')}`
+}
+
+// ASS 只抽取对白文本（忽略特效标签），基础可用
+function assToVtt(text: string): string {
+  const cues: string[] = ['WEBVTT', '']
+  for (const line of text.split('\n')) {
+    if (!/^Dialogue:/i.test(line)) continue
+    const p = line.replace(/^Dialogue:\s*/i, '').split(',')
+    if (p.length < 10) continue
+    const st = assTime(p[1])
+    const sp = assTime(p[2])
+    const body = p.slice(9).join(',').replace(/\{[^}]*\}/g, '').replace(/\\[Nn]/g, '\n').trim()
+    if (st && sp && body) cues.push(`${st} --> ${sp}\n${body}\n`)
+  }
+  return cues.join('\n') + '\n'
+}
+
+// ::cue 无法被 scoped 样式命中，动态注入一条全局规则
+function applySubStyle() {
+  if (!subStyleEl) {
+    subStyleEl = document.createElement('style')
+    subStyleEl.id = 'yz-sub-style'
+    document.head.appendChild(subStyleEl)
+  }
+  subStyleEl.textContent = `video::cue { font-size: ${subFontSize.value}px; color: #fff; text-shadow: 0 1px 3px #000, 0 0 6px #000; }`
+}
+
+function setSubFontSize(px: number) {
+  subFontSize.value = px
+  applySubStyle()
+  app.showTip(`字幕字号 ${px}px`)
+}
+
+function removeExternalSub() {
+  if (extTrack) { extTrack.remove(); extTrack = null }
+  if (extTrackUrl) { URL.revokeObjectURL(extTrackUrl); extTrackUrl = '' }
+  externalSubActive.value = false
+  subLabel.value = ''
+}
+
+function setExternalSub(text: string, label: string) {
+  const vid = videoEl.value
+  if (!vid) { app.showTip('播放器尚未就绪'); return }
+  removeExternalSub()
+  const url = URL.createObjectURL(new Blob([srtToVtt(text)], { type: 'text/vtt' }))
+  const track = document.createElement('track')
+  track.kind = 'subtitles'
+  track.label = label
+  track.srclang = 'zh'
+  track.src = url
+  track.default = true
+  vid.appendChild(track)
+  track.addEventListener('load', () => { if (track.track) track.track.mode = 'showing' })
+  window.setTimeout(() => { if (track.track) track.track.mode = 'showing' }, 300)
+  extTrack = track
+  extTrackUrl = url
+  externalSubActive.value = true
+  subLabel.value = label
+  applySubStyle()
+}
+
+async function onSubFile(e: Event) {
+  const input = e.target as HTMLInputElement
+  const f = input.files?.[0]
+  if (!f) return
+  try {
+    setExternalSub(await f.text(), f.name)
+    app.showTip('字幕已加载：' + f.name)
+  } catch {
+    app.showTip('字幕读取失败，请检查文件编码')
+  }
+  input.value = ''
+}
+
+async function promptSubUrl() {
+  const u = window.prompt('输入字幕文件地址（SRT / VTT / ASS）')
+  if (!u || !u.trim()) return
+  try {
+    const res = await fetch(proxied(u.trim()))
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    setExternalSub(await res.text(), u.split('/').pop() || '网络字幕')
+    app.showTip('字幕已加载')
+  } catch (e) {
+    app.showTip('字幕加载失败：' + humanizeApiError(e))
+  }
+}
+
+// 调整字幕延迟：基于原始时间重算，避免多次调整累积漂移
 function setSubDelay(ms: number) {
   subDelay.value = ms
-  // 通过 CSS 调整字幕位置（或其他 hls.js 提供的 API）
-  if (hls && hls.media && hls.media.textTracks) {
-    for (let i = 0; i < hls.media.textTracks.length; i++) {
-      const track = hls.media.textTracks[i]
-      if (track.cues) {
-        for (let j = 0; j < track.cues.length; j++) {
-          const cue = track.cues[j]
-          cue.startTime += ms / 1000
-          cue.endTime += ms / 1000
-        }
+  const tracks = videoEl.value?.textTracks
+  if (tracks) {
+    for (let i = 0; i < tracks.length; i++) {
+      const cues = tracks[i].cues
+      if (!cues) continue
+      for (let j = 0; j < cues.length; j++) {
+        const cue: any = cues[j]
+        if (!cueOrigins.has(cue)) cueOrigins.set(cue, { s: cue.startTime, e: cue.endTime })
+        const o = cueOrigins.get(cue)!
+        cue.startTime = Math.max(0, o.s + ms / 1000)
+        cue.endTime = Math.max(0, o.e + ms / 1000)
       }
     }
   }
@@ -1318,6 +1432,17 @@ onUnmounted(() => {
             >线路 {{ i + 1 }}</span>
           </div>
         </template>
+        <div class="q-section">外挂字幕</div>
+        <div class="q-chips">
+          <label class="chip" style="cursor:pointer">本地字幕
+            <input type="file" accept=".srt,.vtt,.ass,.ssa" style="display:none" @change="onSubFile" />
+          </label>
+          <span class="chip" @click="promptSubUrl">网络字幕</span>
+          <span v-if="externalSubActive" class="chip" @click="removeExternalSub">移除字幕</span>
+          <span v-for="d in [-500, 0, 500]" :key="'sd' + d" class="chip" :class="{ active: subDelay === d }" @click="setSubDelay(d)">{{ d === 0 ? '同步' : (d > 0 ? '+' : '') + (d / 1000).toFixed(1) + 's' }}</span>
+          <span v-for="s in [16, 20, 26, 32]" :key="'sf' + s" class="chip" :class="{ active: subFontSize === s }" @click="setSubFontSize(s)">{{ s }}px</span>
+        </div>
+        <div class="q-hint">{{ subLabel || '支持 SRT / VTT / ASS，文件仅在本机解析' }}</div>
         <div class="q-section">画面比例</div>
         <div class="q-chips">
           <span v-for="(n, i) in scaleNames" :key="'sc' + i" class="chip" :class="{ active: scaleMode === i }" @click="setScale(i)">{{ n }}</span>
@@ -1507,6 +1632,17 @@ onUnmounted(() => {
             >线路 {{ i + 1 }}</span>
           </div>
         </template>
+        <div class="m-q-section">外挂字幕</div>
+        <div class="m-q-chips">
+          <label class="chip" style="cursor:pointer">本地字幕
+            <input type="file" accept=".srt,.vtt,.ass,.ssa" style="display:none" @change="onSubFile" />
+          </label>
+          <span class="chip" @click="promptSubUrl">网络字幕</span>
+          <span v-if="externalSubActive" class="chip" @click="removeExternalSub">移除字幕</span>
+          <span v-for="d in [-500, 0, 500]" :key="'msd' + d" class="chip" :class="{ active: subDelay === d }" @click="setSubDelay(d)">{{ d === 0 ? '同步' : (d > 0 ? '+' : '') + (d / 1000).toFixed(1) + 's' }}</span>
+          <span v-for="s in [16, 20, 26, 32]" :key="'msf' + s" class="chip" :class="{ active: subFontSize === s }" @click="setSubFontSize(s)">{{ s }}px</span>
+        </div>
+        <div class="q-hint">{{ subLabel || '支持 SRT / VTT / ASS，文件仅在本机解析' }}</div>
         <div class="m-q-section">画面比例</div>
         <div class="m-q-chips">
           <span v-for="(n, i) in scaleNames" :key="'sc' + i" class="chip" :class="{ active: scaleMode === i }" @click="setScale(i)">{{ n }}</span>

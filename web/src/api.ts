@@ -13,6 +13,7 @@ import type {
   ChannelGroup,
   Channel,
   LiveScore,
+  EpgResult,
   QLevel,
   WebdavSource,
   WebdavEntry,
@@ -239,6 +240,8 @@ export const api = {
   liveRankOne: (name: string, url: string) => post<LiveScore>('/live/rank/one', { name, url }),
   liveRank: (items: LiveScore[]) => post<LiveScore[]>('/live/rank', { items }),
   liveProbeChannels: (channels: Channel[]) => post<{ dead: number; total: number }>('/live/probe/channels', { channels }),
+  liveEpg: (name: string, url?: string) =>
+    get<EpgResult>(`/live/epg?name=${encodeURIComponent(name)}` + (url ? `&url=${encodeURIComponent(url)}` : '')),
   peek: (url: string) => get<{ alive: boolean }>(`/peek?url=${encodeURIComponent(url)}`),
 
   crawlSummary: () => get<{ summary: string; last: number; running: boolean; processed: number; total: number }>('/crawl'),
@@ -246,8 +249,8 @@ export const api = {
   feed: () => get<{ feed: Vod[]; deadKeys: string[]; summary: string }>('/feed'),
   qualityMaster: (url: string) => post<QLevel[]>('/quality/master', { url }),
 
-  prefs: () => get<{ qPref: number; speedPref: number; volumePref: number; introSkip: number; outroSkip: number; tapSound: number; tapVibrate: number }>('/prefs'),
-  setPrefs: (p: Record<string, number>) => post('/prefs', p),
+  prefs: () => get<{ qPref: number; speedPref: number; volumePref: number; epgUrl: string; introSkip: number; outroSkip: number; tapSound: number; tapVibrate: number }>('/prefs'),
+  setPrefs: (p: Record<string, number | string>) => post('/prefs', p),
 
   webdavSources: () => get<WebdavSource[]>('/webdav/sources'),
   saveWebdavSource: (src: WebdavSource) => post('/webdav/sources', src),

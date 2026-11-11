@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { api } from '@/api'
 import { useAppStore } from '@/stores/app'
@@ -21,6 +21,32 @@ async function load() {
   // 过滤空名称的历史记录（旧格式或测试遗留）
   hist.value = all.filter((h: HistItem) => h.name && h.name.trim())
 }
+
+
+interface HistGroup { label: string; items: HistItem[] }
+
+// 按「今天 / 昨天 / 近 7 天 / 更早」分组，兼容秒级与毫秒级时间戳
+const groups = computed<HistGroup[]>(() => {
+  const d = new Date()
+  const d0 = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
+  const y0 = d0 - 86400000
+  const w0 = d0 - 6 * 86400000
+  const buckets: HistGroup[] = [
+    { label: '今天', items: [] },
+    { label: '昨天', items: [] },
+    { label: '近 7 天', items: [] },
+    { label: '更早', items: [] }
+  ]
+  for (const h of hist.value) {
+    const raw = h.time || 0
+    const t = raw > 1e12 ? raw : raw * 1000
+    if (t >= d0) buckets[0].items.push(h)
+    else if (t >= y0) buckets[1].items.push(h)
+    else if (t >= w0) buckets[2].items.push(h)
+    else buckets[3].items.push(h)
+  }
+  return buckets.filter(b => b.items.length)
+})
 
 function progressOf(h: HistItem): number {
   if (!h.dur || h.dur <= 0 || h.pos <= 0) return 0
@@ -90,29 +116,32 @@ function clearAll() {
     </div>
 
     <div v-if="hist.length" class="list">
-      <div v-for="h in hist" :key="h.siteKey + h.vodId" class="row" @click="open(h)">
-        <div class="thumb">
-          <img :src="h.pic" :alt="h.name" loading="lazy" />
-        </div>
-        <div class="info">
-          <div class="name">{{ h.name }}</div>
-          <div class="meta">
-            {{ h.epName || '未开始' }}<span v-if="h.siteName"> · {{ h.siteName }}</span>
-            <span v-if="h.watchedEps && h.watchedEps.length > 1"> · 已看 {{ h.watchedEps.length }} 集</span>
-            <span v-if="ago(h.time)"> · {{ ago(h.time) }}</span>
+      <template v-for="g in groups" :key="g.label">
+        <div class="group-title">{{ g.label }} <span class="group-count">{{ g.items.length }} 条</span></div>
+        <div v-for="h in g.items" :key="h.siteKey + h.vodId" class="row" @click="open(h)">
+          <div class="thumb">
+            <img :src="h.pic" :alt="h.name" loading="lazy" />
           </div>
-          <div v-if="progressOf(h) > 0" class="progress">
-            <div class="bar" :style="{ width: progressOf(h) * 100 + '%' }"></div>
+          <div class="info">
+            <div class="name">{{ h.name }}</div>
+            <div class="meta">
+              {{ h.epName || '未开始' }}<span v-if="h.siteName"> · {{ h.siteName }}</span>
+              <span v-if="h.watchedEps && h.watchedEps.length > 1"> · 已看 {{ h.watchedEps.length }} 集</span>
+              <span v-if="ago(h.time)"> · {{ ago(h.time) }}</span>
+            </div>
+            <div v-if="progressOf(h) > 0" class="progress">
+              <div class="bar" :style="{ width: progressOf(h) * 100 + '%' }"></div>
+            </div>
           </div>
-        </div>
-        <div
-          class="del"
-          :class="{ danger: confirmDel === h.siteKey + '|' + h.vodId }"
-          @click.stop="remove(h)"
-        >
-          {{ confirmDel === h.siteKey + '|' + h.vodId ? '确认删除？' : '删除' }}
-        </div>
-      </div>
+          <div
+            class="del"
+            :class="{ danger: confirmDel === h.siteKey + '|' + h.vodId }"
+            @click.stop="remove(h)"
+          >
+            {{ confirmDel === h.siteKey + '|' + h.vodId ? '确认删除？' : '删除' }}
+          </div>
+          </div>
+      </template>
     </div>
     <div v-else class="empty">
       <p>暂无播放记录</p>
@@ -201,6 +230,15 @@ function clearAll() {
   color: var(--dim);
 }
 .empty-sub { font-size: 13px; margin: 8px 0 14px; }
+.group-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--sub);
+  padding: 14px 10px 6px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+.group-count { font-size: 12px; color: var(--dim); font-weight: 400; margin-left: 6px; }
 
 /* ===== 移动端响应式 ===== */
 @media (max-width: 640px) {

@@ -180,6 +180,20 @@ export interface RawLive {
   url: string
 }
 
+export interface EpgProgram {
+  start: number
+  stop: number
+  title: string
+  desc: string
+}
+
+export interface EpgResult {
+  channel: string
+  programs: EpgProgram[]
+  now: EpgProgram | null
+  next: EpgProgram | null
+}
+
 export interface QLevel {
   height: number
   width: number

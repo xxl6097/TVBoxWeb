@@ -127,6 +127,7 @@ func Handler() *http.ServeMux {
 	mux.HandleFunc("/api/live/sources", hLiveSources)
 	mux.HandleFunc("/api/live/channels", hLiveChannels)
 	mux.HandleFunc("/api/live/favs", hLiveFavs)
+	mux.HandleFunc("/api/live/epg", hLiveEpg)
 	mux.HandleFunc("/api/live/fav/toggle", hLiveFavToggle)
 	mux.HandleFunc("/api/live/rank/one", hLiveRankOne)
 	mux.HandleFunc("/api/live/rank", hLiveRank)
@@ -339,17 +340,17 @@ func q(r *http.Request, k string) string { return r.URL.Query().Get(k) }
 
 func hStatus(w http.ResponseWriter, r *http.Request) {
 	ok(w, map[string]any{
-		"isCustom":     store.IsCustom(),
-		"subName":      store.SubName(),
-		"configUrl":    store.GetConfigURL(),
-		"totalSites":   store.TotalSites(),
-		"activeSites":  len(store.ActiveSites()),
-		"feedCount":    len(store.Feed()),
-		"lastCrawl":    store.LastCrawlAt(),
-		"crawlSummary": store.CrawlSummary(),
-		"liveUrl":      store.LiveURL(),
+		"isCustom":      store.IsCustom(),
+		"subName":       store.SubName(),
+		"configUrl":     store.GetConfigURL(),
+		"totalSites":    store.TotalSites(),
+		"activeSites":   len(store.ActiveSites()),
+		"feedCount":     len(store.Feed()),
+		"lastCrawl":     store.LastCrawlAt(),
+		"crawlSummary":  store.CrawlSummary(),
+		"liveUrl":       store.LiveURL(),
 		"privacyAgreed": store.PrivacyAgreed(),
-		"guideDone":    store.GuideDone(),
+		"guideDone":     store.GuideDone(),
 	})
 }
 
@@ -1072,6 +1073,24 @@ func hLiveSources(w http.ResponseWriter, r *http.Request) {
 }
 
 // hLiveFavs GET: 返回收藏的直播频道列表。
+// hLiveEpg GET /api/live/epg?name=频道名&url=EPG地址（url 省略时用设置里保存的地址）
+func hLiveEpg(w http.ResponseWriter, r *http.Request) {
+	u := q(r, "url")
+	if u == "" {
+		u = store.EpgURL()
+	}
+	res, err := live.FetchEPG(u, q(r, "name"))
+	if err != nil {
+		status, code := 502, ErrUpstream
+		if strings.Contains(err.Error(), "尚未配置") || strings.Contains(err.Error(), "缺少频道") {
+			status, code = 400, ErrBadRequest
+		}
+		failWith(w, status, code, err.Error())
+		return
+	}
+	ok(w, res)
+}
+
 func hLiveFavs(w http.ResponseWriter, r *http.Request) {
 	ok(w, store.LiveFavs())
 }
@@ -1219,6 +1238,7 @@ func hPrefs(w http.ResponseWriter, r *http.Request) {
 			"qPref":      store.QPref(),
 			"speedPref":  store.SpeedPref(),
 			"volumePref": store.VolumePref(),
+			"epgUrl":     store.EpgURL(),
 			"introSkip":  store.IntroSkipSec(),
 			"outroSkip":  store.OutroSkipSec(),
 			"tapSound":   store.TapSound(),
@@ -1238,6 +1258,11 @@ func hPrefs(w http.ResponseWriter, r *http.Request) {
 		}
 		if v, ok := req["volumePref"]; ok {
 			store.SetVolumePref(toFloat(v))
+		}
+		if v, ok := req["epgUrl"]; ok {
+			if s, ok := v.(string); ok {
+				store.SetEpgURL(strings.TrimSpace(s))
+			}
 		}
 		if v, ok := req["introSkip"]; ok {
 			store.SetIntroSkipSec(int(toFloat(v)))
@@ -1522,6 +1547,7 @@ func rewriteM3u8(body, base, auth string) string {
 // uriAttrRe 大小写不敏感，支持双引号和单引号两种写法：
 // URI="http://..." 或 uri='http://...'
 var uriAttrRe = regexp.MustCompile(`(?i)(URI\s*=\s*)(["'])([^"']*)(["'])`)
+
 // rewriteUriAttrs 重写标签行里 URI="..." 或 URI='...' 的值
 // （#EXT-X-KEY / #EXT-X-MAP / #EXT-X-MEDIA 等），大小写不敏感。
 func rewriteUriAttrs(line string, proxyOf func(string) string) string {

@@ -16,36 +16,37 @@ import (
 
 // Data 是落盘结构，字段名与鸿蒙 preferences 键一一对应。
 type Data struct {
-	CfgText      string               `json:"cfgText"`
-	CfgURL       string               `json:"cfgUrl"`
-	CfgCustom    string               `json:"cfgCustom"`
-	SubName      string               `json:"subName"`
-	Enabled      []string             `json:"enabled"`
-	Hist         []HistItem           `json:"hist"`
-	Fav          []FavItem            `json:"fav"`
-	KwHist       string               `json:"kwHist"`
-	LiveURL      string               `json:"liveUrl"`
-	SubLives     []model.RawLive      `json:"subLives"`
-	LiveFavs     []model.Channel      `json:"liveFavs"` // 直播频道收藏
-	QPref        int                  `json:"qPref"`
-	SpeedPref    float64              `json:"speedPref"` // 播放倍速偏好（0=未设置，用 1.0）
-	VolumePref   float64              `json:"volumePref"` // 播放音量偏好（0=未设置，用 1.0）
-	IntroSkip    int                  `json:"introSkip"`
-	OutroSkip    int                  `json:"outroSkip"`
-	TapSound     int                  `json:"tapSound"`
-	TapVibrate   int                  `json:"tapVibrate"`
-	Feed         []model.Vod          `json:"feed"`
-	CrawlAt      int64                `json:"crawlAt"`
-	CrawlSummary string               `json:"crawlSummary"`
-	DeadKeys     []string             `json:"deadKeys"`
-	PrivacyAgreed bool                `json:"privacyAgreed"`
-	GuideDone    bool                 `json:"guideDone"`
-	DirectList   []string             `json:"directList"`
-	WebdavList   []model.WebdavSource `json:"webdavList"`
-	WebdavScan   map[string][]model.WebdavVod `json:"webdavScan"`
-	WdHist       []model.WdHistory    `json:"wdHist"`
-	SiteHealth   map[string]SiteHealthStat `json:"siteHealth"` // 站源健康度统计
-	FavGroups    []FavGroup           `json:"favGroups"`      // 收藏分组列表
+	CfgText       string                       `json:"cfgText"`
+	CfgURL        string                       `json:"cfgUrl"`
+	CfgCustom     string                       `json:"cfgCustom"`
+	SubName       string                       `json:"subName"`
+	Enabled       []string                     `json:"enabled"`
+	Hist          []HistItem                   `json:"hist"`
+	Fav           []FavItem                    `json:"fav"`
+	KwHist        string                       `json:"kwHist"`
+	LiveURL       string                       `json:"liveUrl"`
+	EpgURL        string                       `json:"epgUrl"` // EPG 节目单地址（XMLTV）
+	SubLives      []model.RawLive              `json:"subLives"`
+	LiveFavs      []model.Channel              `json:"liveFavs"` // 直播频道收藏
+	QPref         int                          `json:"qPref"`
+	SpeedPref     float64                      `json:"speedPref"`  // 播放倍速偏好（0=未设置，用 1.0）
+	VolumePref    float64                      `json:"volumePref"` // 播放音量偏好（0=未设置，用 1.0）
+	IntroSkip     int                          `json:"introSkip"`
+	OutroSkip     int                          `json:"outroSkip"`
+	TapSound      int                          `json:"tapSound"`
+	TapVibrate    int                          `json:"tapVibrate"`
+	Feed          []model.Vod                  `json:"feed"`
+	CrawlAt       int64                        `json:"crawlAt"`
+	CrawlSummary  string                       `json:"crawlSummary"`
+	DeadKeys      []string                     `json:"deadKeys"`
+	PrivacyAgreed bool                         `json:"privacyAgreed"`
+	GuideDone     bool                         `json:"guideDone"`
+	DirectList    []string                     `json:"directList"`
+	WebdavList    []model.WebdavSource         `json:"webdavList"`
+	WebdavScan    map[string][]model.WebdavVod `json:"webdavScan"`
+	WdHist        []model.WdHistory            `json:"wdHist"`
+	SiteHealth    map[string]SiteHealthStat    `json:"siteHealth"` // 站源健康度统计
+	FavGroups     []FavGroup                   `json:"favGroups"`  // 收藏分组列表
 }
 
 // SiteHealthStat 站源健康度统计数据。
@@ -95,16 +96,16 @@ type SubResult struct {
 }
 
 var (
-	mu      sync.Mutex
-	path    string
-	data    = &Data{
+	mu   sync.Mutex
+	path string
+	data = &Data{
 		WebdavScan: map[string][]model.WebdavVod{},
 		SiteHealth: map[string]SiteHealthStat{},
 	}
-	siteList []model.Site
+	siteList  []model.Site
 	parseList []model.ParseRule
-	rawSites int
-	
+	rawSites  int
+
 	// 版本追踪用于 API 缓存（ETag）
 	sitesVersion  int64 // 站源列表最后更新时间戳
 	configVersion int64 // 配置最后更新时间戳
@@ -164,10 +165,10 @@ func flush() {
 
 // ---------- 配置 ----------
 
-func IsCustom() bool { return data.CfgCustom == "1" }
+func IsCustom() bool       { return data.CfgCustom == "1" }
 func GetConfigURL() string { return data.CfgURL }
-func SubName() string { return data.SubName }
-func CachedText() string { return data.CfgText }
+func SubName() string      { return data.SubName }
+func CachedText() string   { return data.CfgText }
 
 // SetCfg 保存配置原文与来源地址。
 func SetCfg(text, source string) {
@@ -263,11 +264,11 @@ func BuildParses(cfg model.RawConfig) {
 	parseList = out
 }
 
-func Sites() []model.Site { return siteList }
-func TotalSites() int     { return rawSites }
+func Sites() []model.Site       { return siteList }
+func TotalSites() int           { return rawSites }
 func Parses() []model.ParseRule { return parseList }
-func SitesVersion() int64  { mu.Lock(); defer mu.Unlock(); return sitesVersion }
-func ConfigVersion() int64 { mu.Lock(); defer mu.Unlock(); return configVersion }
+func SitesVersion() int64       { mu.Lock(); defer mu.Unlock(); return sitesVersion }
+func ConfigVersion() int64      { mu.Lock(); defer mu.Unlock(); return configVersion }
 
 func Site(key string) *model.Site {
 	for i := range siteList {
@@ -688,9 +689,11 @@ func HotKeywords() []string {
 
 // ---------- 直播源 ----------
 
-func LiveURL() string       { return data.LiveURL }
-func SetLiveURL(u string)   { mu.Lock(); data.LiveURL = u; mu.Unlock(); flush() }
-func SubLives() []model.RawLive { return data.SubLives }
+func LiveURL() string                  { return data.LiveURL }
+func SetLiveURL(u string)              { mu.Lock(); data.LiveURL = u; mu.Unlock(); flush() }
+func EpgURL() string                   { return data.EpgURL }
+func SetEpgURL(u string)               { mu.Lock(); data.EpgURL = u; mu.Unlock(); flush() }
+func SubLives() []model.RawLive        { return data.SubLives }
 func SetSubLives(list []model.RawLive) { mu.Lock(); data.SubLives = list; mu.Unlock(); flush() }
 
 // ---------- 直播频道收藏 ----------
@@ -740,42 +743,62 @@ func IsLiveFav(name, url string) bool {
 
 // ---------- 画质 / 倍速 / 跳过 / 反馈 ----------
 
-func QPref() int            { return data.QPref }
-func SetQPref(v int)        { mu.Lock(); data.QPref = v; mu.Unlock(); flush() }
-func SpeedPref() float64    { if data.SpeedPref <= 0 { return 1.0 }; return data.SpeedPref }
+func QPref() int     { return data.QPref }
+func SetQPref(v int) { mu.Lock(); data.QPref = v; mu.Unlock(); flush() }
+func SpeedPref() float64 {
+	if data.SpeedPref <= 0 {
+		return 1.0
+	}
+	return data.SpeedPref
+}
 func SetSpeedPref(v float64) { mu.Lock(); data.SpeedPref = v; mu.Unlock(); flush() }
-func VolumePref() float64   { if data.VolumePref <= 0 { return 1.0 }; return data.VolumePref }
+func VolumePref() float64 {
+	if data.VolumePref <= 0 {
+		return 1.0
+	}
+	return data.VolumePref
+}
 func SetVolumePref(v float64) { mu.Lock(); data.VolumePref = v; mu.Unlock(); flush() }
-func IntroSkipSec() int     { return data.IntroSkip }
-func SetIntroSkipSec(v int) { mu.Lock(); data.IntroSkip = v; mu.Unlock(); flush() }
-func OutroSkipSec() int     { return data.OutroSkip }
-func SetOutroSkipSec(v int) { mu.Lock(); data.OutroSkip = v; mu.Unlock(); flush() }
-func TapSound() int         { if data.TapSound == 0 { return 1 }; return data.TapSound }
-func SetTapSound(v int)     { mu.Lock(); data.TapSound = v; mu.Unlock(); flush() }
-func TapVibrate() int       { if data.TapVibrate == 0 { return 1 }; return data.TapVibrate }
-func SetTapVibrate(v int)   { mu.Lock(); data.TapVibrate = v; mu.Unlock(); flush() }
+func IntroSkipSec() int       { return data.IntroSkip }
+func SetIntroSkipSec(v int)   { mu.Lock(); data.IntroSkip = v; mu.Unlock(); flush() }
+func OutroSkipSec() int       { return data.OutroSkip }
+func SetOutroSkipSec(v int)   { mu.Lock(); data.OutroSkip = v; mu.Unlock(); flush() }
+func TapSound() int {
+	if data.TapSound == 0 {
+		return 1
+	}
+	return data.TapSound
+}
+func SetTapSound(v int) { mu.Lock(); data.TapSound = v; mu.Unlock(); flush() }
+func TapVibrate() int {
+	if data.TapVibrate == 0 {
+		return 1
+	}
+	return data.TapVibrate
+}
+func SetTapVibrate(v int) { mu.Lock(); data.TapVibrate = v; mu.Unlock(); flush() }
 
 // ---------- 定时抓取 ----------
 
-func Feed() []model.Vod        { return data.Feed }
-func SaveFeed(list []model.Vod) { mu.Lock(); data.Feed = list; mu.Unlock(); flush() }
-func LastCrawlAt() int64       { return data.CrawlAt }
-func SetLastCrawlAt(t int64)   { mu.Lock(); data.CrawlAt = t; mu.Unlock(); flush() }
-func CrawlSummary() string     { return data.CrawlSummary }
-func SaveCrawlSummary(s string) { mu.Lock(); data.CrawlSummary = s; mu.Unlock(); flush() }
-func DeadKeys() []string       { return data.DeadKeys }
+func Feed() []model.Vod          { return data.Feed }
+func SaveFeed(list []model.Vod)  { mu.Lock(); data.Feed = list; mu.Unlock(); flush() }
+func LastCrawlAt() int64         { return data.CrawlAt }
+func SetLastCrawlAt(t int64)     { mu.Lock(); data.CrawlAt = t; mu.Unlock(); flush() }
+func CrawlSummary() string       { return data.CrawlSummary }
+func SaveCrawlSummary(s string)  { mu.Lock(); data.CrawlSummary = s; mu.Unlock(); flush() }
+func DeadKeys() []string         { return data.DeadKeys }
 func SaveDeadKeys(keys []string) { mu.Lock(); data.DeadKeys = keys; mu.Unlock(); flush() }
 
 // ---------- 首启同意与引导 ----------
 
-func PrivacyAgreed() bool       { return data.PrivacyAgreed }
-func SetPrivacyAgreed()         { mu.Lock(); data.PrivacyAgreed = true; mu.Unlock(); flush() }
-func GuideDone() bool           { return data.GuideDone }
-func SetGuideDone()             { mu.Lock(); data.GuideDone = true; mu.Unlock(); flush() }
+func PrivacyAgreed() bool { return data.PrivacyAgreed }
+func SetPrivacyAgreed()   { mu.Lock(); data.PrivacyAgreed = true; mu.Unlock(); flush() }
+func GuideDone() bool     { return data.GuideDone }
+func SetGuideDone()       { mu.Lock(); data.GuideDone = true; mu.Unlock(); flush() }
 
 // ---------- 直连播放 ----------
 
-func DirectList() []string      { return data.DirectList }
+func DirectList() []string { return data.DirectList }
 func PushDirect(url string) {
 	mu.Lock()
 	out := []string{url}
@@ -979,20 +1002,22 @@ func RecordSiteRequest(siteKey string, success bool, ms int) {
 		stat.AvgMs = (stat.AvgMs*9 + ms) / 10
 	}
 	data.SiteHealth[siteKey] = stat
-	
+
 	// 计算健康状态并广播 WebSocket
 	health := calcHealth(stat)
 	errorRate := float64(stat.FailCount) / float64(stat.TotalReq)
 	if errorRate > 1.0 {
 		errorRate = 1.0
 	}
-	
+
 	// 异步广播与落盘，避免阻塞
 	go func() {
 		// 广播 WebSocket 消息
 		if hub := getWSHub(); hub != nil {
 			// 使用类型断言调用 BroadcastHealth
-			if h, ok := hub.(interface{ BroadcastHealth(string, string, float64, int, int64, int64) }); ok {
+			if h, ok := hub.(interface {
+				BroadcastHealth(string, string, float64, int, int64, int64)
+			}); ok {
 				h.BroadcastHealth(siteKey, health, errorRate, stat.AvgMs, now*1000, stat.LastSuccess*1000)
 			}
 		}
@@ -1009,7 +1034,7 @@ func calcHealth(stat SiteHealthStat) string {
 	errorRate := float64(stat.FailCount) / float64(stat.TotalReq)
 	now := time.Now().Unix()
 	daysSinceSuccess := (now - stat.LastSuccess) / 86400
-	
+
 	if daysSinceSuccess > 1 || errorRate > 0.8 {
 		return "dead"
 	}
