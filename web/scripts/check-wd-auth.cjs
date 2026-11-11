@@ -43,8 +43,12 @@ if (!fn) {
 } else {
   const body = stripComments(fn[1])
   check(!/directMode/.test(body), '不再按 directMode 决定是否带 auth', '当前实现：' + body.trim())
-  check(/proxied\(\s*finalUrl\s*,\s*player\.header\?\.auth/.test(body),
-    'proxied() 第二个参数使用 player.header?.auth')
+  // 断言「传给 proxied 的第二个参数来自 header 的 auth」，
+  // 不绑定具体写法（可能先取到局部变量 auth 再传）
+  const usesHeaderAuth = /player\.header\?\.auth/.test(body)
+  const passesAuthVar = /auth\s*=/.test(body) && /proxied\(\s*finalUrl\s*,\s*auth\s*\)/.test(body)
+  check(usesHeaderAuth && (passesAuthVar || /proxied\(\s*finalUrl\s*,\s*player\.header\?\.auth/.test(body)),
+    'proxied() 的 auth 参数来自 player.header.auth')
 }
 
 // 视频错误不能一律报「解码失败」

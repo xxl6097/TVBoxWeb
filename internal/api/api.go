@@ -34,7 +34,7 @@ import (
 
 // 版本信息（通过 ldflags -X 注入，默认值兜底）。
 var (
-	AppVersion = "v1.8.2"
+	AppVersion = "v1.9.0"
 	BuildTime  = "unknown"
 )
 
@@ -161,6 +161,8 @@ func Handler() *http.ServeMux {
 	mux.HandleFunc("/api/reset", hReset)
 
 	mux.HandleFunc("/api/proxy", hProxy)
+	// MKV 等浏览器不支持的容器：服务端实时转封装成 fMP4
+	mux.HandleFunc("/api/remux", hRemux)
 	return mux
 }
 
@@ -422,6 +424,7 @@ func q(r *http.Request, k string) string { return r.URL.Query().Get(k) }
 // ---------- 状态 / 站点 ----------
 
 func hStatus(w http.ResponseWriter, r *http.Request) {
+	_, ffmpegReason := FFmpegAvailable()
 	ok(w, map[string]any{
 		"isCustom":      store.IsCustom(),
 		"subName":       store.SubName(),
@@ -434,6 +437,9 @@ func hStatus(w http.ResponseWriter, r *http.Request) {
 		"liveUrl":       store.LiveURL(),
 		"privacyAgreed": store.PrivacyAgreed(),
 		"guideDone":     store.GuideDone(),
+		// ffmpeg 可用时，前端才把 MKV 之类的容器交给 /api/remux 转封装
+		"remux":       ffmpegReason == "",
+		"remuxReason": ffmpegReason,
 	})
 }
 

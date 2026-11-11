@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { api, proxied, humanizeApiError } from '@/api'
+import { api, proxied, remuxed, humanizeApiError } from '@/api'
 import { useAppStore } from '@/stores/app'
 import { usePlayerStore } from '@/stores/player'
 import { fmtMs } from '@/utils/format'
@@ -34,6 +34,11 @@ const vodId = (route.query.id as string) || ''
 const vodName = (route.query.name as string) || (route.query.vodTitle as string) || ''
 const vodPic = (route.query.pic as string) || ''
 const vodSiteName = (route.query.siteName as string) || ''
+
+// 转封装模式：MKV 等容器由服务端实时转成 fMP4。
+// 这种流不支持 Range，所以拖进度条要带 seek 重新起转。
+const remuxMode = ref(false)
+const remuxSeek = ref(0)
 
 let rawUrl = rawUrl0
 let finalUrl = ''
@@ -404,12 +409,38 @@ async function pickPlayableLive(): Promise<string> {
 
 // ---------- 播放器 ----------
 
+// 浏览器 <video>/MSE 不支持这些容器：即使里面的 H.264/AAC 能解也播不了，
+// 必须由服务端转封装成 fMP4（/api/remux）。
+const REMUX_EXTS = ['.mkv', '.avi', '.wmv', '.rmvb', '.rm', '.mov', '.ts', '.m2ts', '.mpg', '.mpeg', '.vob']
+
+/** 从 URL 取容器扩展名（忽略 query/hash） */
+function containerExt(u: string): string {
+  const clean = u.split('?')[0].split('#')[0].toLowerCase()
+  const dot = clean.lastIndexOf('.')
+  return dot >= 0 ? clean.slice(dot) : ''
+}
+
+function needsRemux(u: string): boolean {
+  const ext = containerExt(u)
+  // 无扩展名（网盘常见，如「异星战境 Atlas」）无法从名字判断，先交给浏览器试；
+  // 真失败时 onPlayError 会走「尝试转封装」的兜底。
+  return ext !== '' && REMUX_EXTS.includes(ext)
+}
+
 function proxiedFinal(): string {
+  const auth = player.header?.auth || undefined
+  // MKV 之类：服务端转封装。输出是分片 fMP4 流、不支持 Range，
+  // 拖进度条时会用 seek 参数重新起转（见 reloadAt）。
+  if (needsRemux(finalUrl) && app.status?.remux) {
+    remuxMode.value = true
+    return remuxed(finalUrl, auth, remuxSeek.value)
+  }
+  remuxMode.value = false
   // 认证信息与「是否直连」无关：只要上游需要 Basic Auth（WebDAV 网盘就是），
   // 无论直连还是走 /api/proxy 都必须带上。
   // 之前写成 directMode ? auth : undefined —— 网盘走的是普通代理模式，
   // 代理拿不到认证 → 上游 401 → <video> 触发 error → 被误报成「视频解码失败」。
-  return proxied(finalUrl, player.header?.auth || undefined)
+  return proxied(finalUrl, auth)
 }
 
 async function initPlayer() {
@@ -471,17 +502,26 @@ async function initPlayer() {
 
 function bindVideoEvents(vid: HTMLVideoElement) {
   vid.onloadedmetadata = () => {
-    durMs.value = isLive ? 0 : vid.duration * 1000
+    if (isLive) {
+      durMs.value = 0
+    } else if (remuxMode.value) {
+      // 转封装流从 seek 点起转，服务端只知剩余时长，补回起点才是整片时长
+      durMs.value = (remuxSeek.value + vid.duration) * 1000
+    } else {
+      durMs.value = vid.duration * 1000
+    }
     prepared.value = true
     buffering.value = false
     playing.value = true
     popOsd()
-    // 网盘续播：起播后 seek 到上次进度
+    // 网盘续播：起播后 seek 到上次进度。
+    // 转封装模式下走 applySeek（要重新请求），不能直接改 currentTime。
+    // player.seek 先清零再调用，避免重新加载后 loadedmetadata 再次触发造成循环。
     if (player.seek > 0 && !isLive) {
-      vid.currentTime = player.seek / 1000
-      curMs.value = player.seek
+      const t = player.seek / 1000
       player.seek = 0
       app.showTip('已从上次位置继续播放')
+      applySeek(t)
     }
     if (introSkipSec.value > 0 && !introDone && !isLive) {
       const skipMs = introSkipSec.value * 1000
@@ -489,7 +529,9 @@ function bindVideoEvents(vid: HTMLVideoElement) {
     }
   }
   vid.ontimeupdate = () => {
-    curMs.value = vid.currentTime * 1000
+    // 转封装模式下服务端从 seek 点起转，视频时间戳从 0 开始，
+    // 这里把跳转起点加回去，进度条与时间显示才是真实位置。
+    curMs.value = (remuxMode.value ? remuxSeek.value : 0) * 1000 + vid.currentTime * 1000
     // 进度保存：节流（5 秒）+ 防抖（300ms），保证最后一次 seek 后一定保存
     if (curMs.value - lastSaveMs > 5000) {
       lastSaveMs = curMs.value
@@ -567,6 +609,17 @@ function onPlayError(errKind?: string) {
     return
   }
   // 按错误类型给出友好提示
+  // 容器不支持（MKV 等）且服务端没有 ffmpeg：给出可操作的指引，
+  // 而不是让人以为文件坏了。这是网盘播放最常见的失败原因。
+  const isContainerIssue = needsRemux(finalUrl) || /\.(mkv|avi|wmv|rmvb|rm|ts|mov|m2ts|mpg|mpeg|vob)\b/i.test(finalUrl)
+  if (isContainerIssue && !app.status?.remux) {
+    errMsg.value =
+      (app.status?.remuxReason || '服务端缺少 ffmpeg，无法转换该视频容器') +
+      '。装好后重启服务即可播放，画质不受影响（只换容器不重新编码）。'
+    showOsd.value = true
+    return
+  }
+
   const tips: Record<string, string> = {
     networkError: '网络连接失败，请检查网络后点击重试',
     mediaError: '视频解码失败，可能是编码格式不支持',
@@ -575,7 +628,9 @@ function onPlayError(errKind?: string) {
     fragLoadError: '视频分片加载中断，可能是网络波动',
     manifestIncompatibleCodecsError: '编码格式不支持当前浏览器',
     authError: '资源需要认证或没有访问权限，请检查网盘账号密码',
-    srcNotSupported: '这个文件无法直接播放。可能是 MKV/HEVC 等浏览器不支持的格式，或地址已失效',
+    srcNotSupported: needsRemux(finalUrl)
+      ? '该容器转换失败。可能是源不是 H.264/AAC（如 HEVC/AC3），无法无损转封装'
+      : '这个文件无法直接播放。可能是编码格式浏览器不支持，或地址已失效',
   }
   errMsg.value = tips[errKind || ''] || '播放失败，可能是链接失效或编码不支持'
   showOsd.value = true
@@ -834,6 +889,39 @@ function seekBy(dir: number) {
   let t = vid.currentTime + (dir * SEEK_STEP) / 1000
   if (t < 0) t = 0
   if (durMs.value > 0 && t > durMs.value / 1000 - 1) t = durMs.value / 1000 - 1
+  applySeek(t)
+}
+
+/**
+ * 执行一次跳转。
+ *
+ * 转封装流（/api/remux）是服务端线性吐出来的分片 MP4，体积索引不完整，
+ * 直接改 video.currentTime 浏览器会原地重试甚至报错。这里改为带 seek 参数
+ * 重新请求，让 ffmpeg 从目标位置重新转封装。
+ */
+let seekingRemux = false
+
+function applySeek(t: number) {
+  const vid = videoEl.value
+  if (!vid) return
+  if (remuxMode.value) {
+    // 防重入：重新设置 src 会再触发 loadedmetadata，
+    // 若此时还有未消化的 player.seek 就会反复重载。
+    if (seekingRemux) return
+    seekingRemux = true
+    window.setTimeout(() => (seekingRemux = false), 1500)
+    remuxSeek.value = Math.max(0, Math.floor(t))
+    const wasPlaying = playing.value
+    const src = proxiedFinal()
+    vid.src = src
+    curMs.value = t * 1000
+    vid.addEventListener('loadedmetadata', () => {
+      if (wasPlaying) vid.play().catch(() => {})
+    }, { once: true })
+    popOsd()
+    app.showTip('正在跳转…')
+    return
+  }
   vid.currentTime = t
   curMs.value = t * 1000
   popOsd()
@@ -882,11 +970,8 @@ const { gestureHint, brightness, onTouchStart, onTouchMove, onTouchEnd, disposeG
 function seekToRatio(ratio: number) {
   const vid = videoEl.value
   if (!vid || !prepared.value || durMs.value <= 0) return
-  let r = Math.min(1, Math.max(0, ratio))
-  const t = (durMs.value * r) / 1000
-  vid.currentTime = t
-  curMs.value = t * 1000
-  popOsd()
+  const r = Math.min(1, Math.max(0, ratio))
+  applySeek((durMs.value * r) / 1000)
 }
 
 function changeVolume(delta: number) {

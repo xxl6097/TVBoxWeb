@@ -13,6 +13,10 @@ interface Status {
   liveUrl: string
   privacyAgreed: boolean
   guideDone: boolean
+  /** 服务端有 ffmpeg 时才能把 MKV 等容器转封装播放 */
+  remux: boolean
+  /** 不具备转封装能力时的原因说明（用于提示用户） */
+  remuxReason: string
 }
 
 export const useAppStore = defineStore('app', {

@@ -374,6 +374,19 @@ export const api = {
 }
 
 // 视频地址走代理（绕开跨域，m3u8 分片也由代理重写）。
+/**
+ * 把一个容器交给服务端转封装（MKV → fMP4）。
+ * 浏览器不支持 Matroska，但里面的 H.264/AAC 是能解的，转封装即可无损播放。
+ * @param seek 从第几秒开始（拖进度条时用；转封装流不支持 Range）
+ */
+export function remuxed(rawUrl: string, auth?: string, seek = 0): string {
+  let u = `/api/remux?url=${encodeURIComponent(rawUrl)}`
+  if (auth) u += `&auth=${encodeURIComponent(auth)}`
+  if (seek > 0) u += `&seek=${Math.floor(seek)}`
+  const t = getAuthToken()
+  return t ? `${u}&token=${encodeURIComponent(t)}` : u
+}
+
 export function proxied(rawUrl: string, auth?: string): string {
   const u = `/api/proxy?url=${encodeURIComponent(rawUrl)}`
   const withAuth = auth ? `${u}&auth=${encodeURIComponent(auth)}` : u

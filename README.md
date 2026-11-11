@@ -260,6 +260,45 @@ TVBoxWeb/
 
 ---
 
+## 🆕 v1.9.0 · MKV 等容器转封装播放（需要 ffmpeg）
+
+### 为什么之前的版本「能播」，现在「不行」
+
+不是回归，是**以前那个文件根本没进列表**。v1.8.0 的识别逻辑按「所在目录」分组，`凡人/07 外海风云/143.mkv` 会把整组归成一部叫「外海风云」的剧；v1.8.0 起改为按「剧名」归并，`143.mkv` 才第一次显示在「凡人」的第 7 季里。文件一直在，只是以前没露出来。
+
+### 浏览器为什么播不了 MKV
+
+`143.mkv` 里面是 **H.264 High + AAC-LC（4K）**，编码本身浏览器完全能解。**卡在容器**：Chrome / Edge / Firefox 的 `<video>` 与 MSE 都不支持 Matroska。
+
+### 解决方案：服务端转封装（不是转码）
+
+新增 `GET /api/remux?url=&auth=&seek=`：
+
+- 用 `ffmpeg -c copy` 把 MKV 里的音视频流**原样搬进 fMP4**，**不重新编码，画质零损失**，CPU 几乎不花（实测 2.5GB 4K 文件取 20 秒约 6 秒，主要是网络 IO）。
+- `frag_keyframe+empty_moov` → **边转边播**，不用等整片转完。
+- 等第一块数据到了才写响应头：源不可解时返回 JSON 错误而不是空流。
+- `context` 跟随客户端：关掉页面 ffmpeg 立即退出，不留孤儿进程。
+- 复用 `/api/proxy` 的 SSRF 校验（内网地址默认拒绝）。
+- `-ss` 快速定位支持拖进度条；输出时间戳从 0 起算，前端用 `remuxSeek` 补回偏移，进度条与总时长都正确。
+
+**前端行为**：`.mkv/.avi/.wmv/.rmvb/.rm/.mov/.ts/.m2ts/.mpg/.mpeg/.vob` 自动走转封装；`.mp4/.webm` 仍走原来的代理直放。`/api/status` 新增 `remux` / `remuxReason` 字段，没有 ffmpeg 时前端会明确提示「安装 ffmpeg 后重启即可，画质不受影响」。
+
+### 需要装 ffmpeg
+
+```bash
+# macOS
+brew install ffmpeg
+# Debian/Ubuntu
+apt install ffmpeg
+# 群晖/威联通：套件中心装 ffmpeg，或 docker 镜像里带上
+```
+
+没装也能正常用，只是 MKV 播不了，会给出明确提示（而不是笼统的「格式不支持」）。
+
+> Docker 镜像目前不含 ffmpeg（会显著增大体积）。需要 MKV 支持请在镜像里加装，或把容器换成自带 ffmpeg 的基础镜像。
+
+---
+
 ## 🆕 v1.8.2 · 修复网盘视频播放报「解码失败」
 
 - **现象**：网盘里的视频点播放，提示「视频解码失败，可能是编码格式不支持」。
