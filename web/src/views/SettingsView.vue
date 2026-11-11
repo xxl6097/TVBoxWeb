@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { api, humanizeApiError } from '@/api'
+import { api, humanizeApiError, getAuthToken, setAuthToken } from '@/api'
 import { useAppStore } from '@/stores/app'
 import type { Site, WebdavSource } from '@/types'
 import TopBar from '@/components/TopBar.vue'
@@ -9,6 +9,13 @@ import UpgradePanel from '@/components/UpgradePanel.vue'
 
 const app = useAppStore()
 const router = useRouter()
+
+// ===== 访问口令（服务端 -token 开启后必须一致）=====
+const authTokenInput = ref(getAuthToken())
+function saveAuthToken() {
+  setAuthToken(authTokenInput.value.trim())
+  app.showTip('访问口令已保存，刷新页面后生效')
+}
 
 // ===== 导航 =====
 type NavKey = 'source' | 'update' | 'webdav' | 'sites' | 'data' | 'about'
@@ -490,6 +497,22 @@ async function clearHistory() {
         <template v-else-if="navKey === 'data'">
           <div class="section-label">数据</div>
           <div class="card">
+            <div class="srow">
+              <span class="srow-title">访问口令</span>
+              <span class="srow-val">服务端设置 -token 时填写</span>
+            </div>
+            <div class="srow">
+              <el-input
+                v-model="authTokenInput"
+                size="small"
+                type="password"
+                show-password
+                placeholder="留空表示未启用口令"
+                style="max-width: 260px"
+              />
+              <el-button size="small" type="primary" @click="saveAuthToken">保存</el-button>
+            </div>
+            <div class="sdiv"></div>
             <div class="srow srow-clickable" :class="{ warn: confirmClear }" @click="clearHistory">
               <span class="srow-title" :class="{ warn: confirmClear }">
                 {{ confirmClear ? '再次点击确认清除播放记录' : '清除播放记录' }}

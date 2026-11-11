@@ -18,13 +18,18 @@
 package tvbox
 
 import (
+	"context"
 	"embed"
 	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/xxl6097/TVBoxWeb/internal/api"
@@ -45,8 +50,10 @@ var (
 
 // Server 代表一个「夜帧影视」Web 服务实例。
 type Server struct {
-	opts Options
-	mux  *http.ServeMux
+	opts      Options
+	mux       *http.ServeMux
+	stop      chan struct{}
+	closeOnce sync.Once
 }
 
 // Options 是库的配置项，通过 Option 函数式选项设置。
@@ -63,6 +70,21 @@ type Options struct {
 
 	// Version 当前版本号，用于升级检测对比。默认 AppVersion。
 	Version string
+
+	// AuthToken 访问口令。非空时 /api/* 与 /ws 必须携带
+	// Authorization: Bearer <token> 或 X-Auth-Token: <token>。
+	// 默认空（兼容原有单机部署）。
+	AuthToken string
+
+	// AllowedOrigins 额外允许的 CORS / WebSocket 来源（同源始终允许）。
+	AllowedOrigins []string
+
+	// AllowPrivateUpstreams 允许服务端请求内网地址（家用 NAS / 内网订阅源）。
+	// 默认 false：/api/proxy 等回显型接口拒绝私有 IP，防 SSRF。
+	AllowPrivateUpstreams bool
+
+	// AllowedHosts 上游域名白名单，空表示不限制（仍做私网校验）。
+	AllowedHosts []string
 }
 
 // Option 函数式配置项。
@@ -86,6 +108,26 @@ func WithUpgrader(u upgrade.Upgrader) Option {
 // WithVersion 设置当前版本号（升级检测时与远端比较）。
 func WithVersion(v string) Option {
 	return func(o *Options) { o.Version = v }
+}
+
+// WithAuthToken 开启访问口令保护（公网部署建议设置）。
+func WithAuthToken(token string) Option {
+	return func(o *Options) { o.AuthToken = strings.TrimSpace(token) }
+}
+
+// WithAllowedOrigins 设置额外的 CORS / WebSocket 允许来源。
+func WithAllowedOrigins(origins ...string) Option {
+	return func(o *Options) { o.AllowedOrigins = origins }
+}
+
+// WithAllowPrivateUpstreams 允许请求内网上游（家庭 NAS 场景）。
+func WithAllowPrivateUpstreams(allow bool) Option {
+	return func(o *Options) { o.AllowPrivateUpstreams = allow }
+}
+
+// WithAllowedHosts 限制上游域名白名单。
+func WithAllowedHosts(hosts ...string) Option {
+	return func(o *Options) { o.AllowedHosts = hosts }
 }
 
 // Version 返回当前版本号（可通过 ldflags -X 注入 internal/api.AppVersion）。
@@ -119,6 +161,18 @@ func New(opts ...Option) (*Server, error) {
 		return nil, err
 	}
 
+	// 安全配置必须在任何请求进来之前注入
+	api.SetSecurity(api.SecurityConfig{
+		AuthToken:             o.AuthToken,
+		AllowedOrigins:        o.AllowedOrigins,
+		AllowPrivateUpstreams: o.AllowPrivateUpstreams,
+		AllowedHosts:          o.AllowedHosts,
+		Logger:                o.Logger,
+	})
+	ws.SetOriginChecker(api.OriginAllowed)
+	// 新版本能正常启动才清理上一版 .backup，否则可用它手工回滚
+	upgrade.ConfirmStartup()
+
 	// 注入升级实现与版本号
 	api.SetUpgrader(o.Upgrader)
 	if o.Version != "" {
@@ -136,7 +190,7 @@ func New(opts ...Option) (*Server, error) {
 		crawler.Restore()
 	}
 
-	s := &Server{opts: o, mux: api.Handler()}
+	s := &Server{opts: o, mux: api.Handler(), stop: make(chan struct{})}
 
 	// WebSocket 端点
 	wsHandler := ws.NewHandler(ws.GlobalHub)
@@ -171,19 +225,67 @@ func (s *Server) Handler() http.Handler {
 //
 //	addr 形如 ":8090"、"127.0.0.1:9000"。
 func (s *Server) ListenAndServe(addr string) error {
-	// 后台定时抓取（首次启动先触发一轮，非阻塞）
+	// 后台定时抓取：启动先跑一轮，之后按 CrawlInterval 常驻调度
+	s.startScheduler()
+
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           s.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		// 视频流为长连接，不设整体 WriteTimeout；用 IdleTimeout 兜底
+		IdleTimeout:    120 * time.Second,
+		MaxHeaderBytes: 1 << 20,
+	}
+
+	// SIGINT/SIGTERM 优雅退出：先停止接收新请求，再让在途请求收尾
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+	go func() {
+		<-sigCh
+		s.opts.Logger.Printf("收到退出信号，正在优雅关闭…")
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	}()
+
+	s.opts.Logger.Printf("夜帧影视 Web 服务已启动：http://localhost%s", addr)
+	err := srv.ListenAndServe()
+	if err == http.ErrServerClosed {
+		err = nil
+	}
+	_ = s.Close()
+	return err
+}
+
+// startScheduler 常驻定时抓取：修复原先「只在启动时检查一次」的问题。
+func (s *Server) startScheduler() {
 	go func() {
 		if store.TotalSites() > 0 {
 			crawler.MaybeRun()
 		}
+		t := time.NewTicker(crawler.CrawlInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-t.C:
+				crawler.MaybeRun()
+			case <-s.stop:
+				return
+			}
+		}
 	}()
-	s.opts.Logger.Printf("夜帧影视 Web 服务已启动：http://localhost%s", addr)
-	return http.ListenAndServe(addr, s.Handler())
 }
 
-// Close 释放资源（关闭 WebSocket Hub 等）。服务关闭前调用。
+// Close 释放资源（停止调度器、关闭 WebSocket Hub）。幂等，可重复调用。
 func (s *Server) Close() error {
-	ws.Shutdown()
+	s.closeOnce.Do(func() {
+		if s.stop != nil {
+			close(s.stop)
+		}
+		ws.Shutdown()
+	})
 	return nil
 }
 

@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/xxl6097/TVBoxWeb/internal/netguard"
 )
 
 const UA = "Mozilla/5.0 (Linux; HarmonyOS; SmartScreen) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -19,6 +21,20 @@ const UA = "Mozilla/5.0 (Linux; HarmonyOS; SmartScreen) AppleWebKit/537.36 (KHTM
 // 鸿蒙 SmartScreen UA 会被部分视频 CDN（如 Fastly/媒体站）判定为异常设备返回 403，
 // 导致分片/整片拉取失败、进度条 seek 卡死；视频流改用通用桌面 Chrome UA 保证兼容。
 const WebUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+// maxTextBody 限制文本类上游响应体，避免恶意/异常大响应打满内存。
+const maxTextBody = 8 << 20 // 8MB
+
+// sharedTransport 供文本类请求复用连接池，避免每次 new(http.Client) 造成握手浪费。
+var sharedTransport = &http.Transport{
+	Proxy:                 http.ProxyFromEnvironment,
+	MaxIdleConns:          100,
+	MaxIdleConnsPerHost:   8,
+	IdleConnTimeout:       90 * time.Second,
+	TLSHandshakeTimeout:   10 * time.Second,
+	ResponseHeaderTimeout: 20 * time.Second,
+	DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+}
 
 // StreamClient 视频流代理专用：连接池复用 + 流式长连接。
 // 关键点：不设置 Client.Timeout（视频分片/长流会被整体超时切断），
@@ -39,6 +55,13 @@ var StreamClient = &http.Client{
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
 	},
+	// 每一跳重定向都重新做 SSRF 校验，防止 302 跳进内网
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 5 {
+			return fmt.Errorf("重定向次数过多")
+		}
+		return netguard.Check(req.URL.String())
+	},
 }
 
 // Text 拉取文本，自动跟随最多 3 次重定向，4xx 给出中文提示。
@@ -54,6 +77,9 @@ func Text(u string, extra map[string]string, timeout time.Duration) (string, err
 		}
 		if code >= 300 && code < 400 && loc != "" {
 			cur = abs(cur, loc)
+			if err := netguard.Check(cur); err != nil {
+				return "", fmt.Errorf("重定向目标不安全：%v", err)
+			}
 			continue
 		}
 		if code == 0 {
@@ -88,7 +114,7 @@ func Peek(u string, ms time.Duration) (string, error) {
 	req.Header.Set("User-Agent", UA)
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("Range", "bytes=0-4095")
-	client := &http.Client{Transport: &http.Transport{DisableCompression: true}}
+	client := &http.Client{Transport: sharedTransport}
 	res, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("连接失败：%v", err)
@@ -130,13 +156,13 @@ func Propfind(u string, extra map[string]string, timeout time.Duration) (string,
 	for k, v := range extra {
 		req.Header.Set(k, v)
 	}
-	client := &http.Client{}
+	client := &http.Client{Transport: sharedTransport}
 	res, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("WebDAV 请求失败：%v", err)
 	}
 	defer res.Body.Close()
-	body, _ := io.ReadAll(res.Body)
+	body, _ := io.ReadAll(io.LimitReader(res.Body, maxTextBody))
 	if res.StatusCode >= 400 {
 		hint := ""
 		switch res.StatusCode {
@@ -166,6 +192,7 @@ func once(u string, extra map[string]string, ms time.Duration) (int, string, str
 		req.Header.Set(k, v)
 	}
 	client := &http.Client{
+		Transport: sharedTransport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
@@ -175,7 +202,7 @@ func once(u string, extra map[string]string, ms time.Duration) (int, string, str
 		return 0, "", "", err
 	}
 	defer res.Body.Close()
-	body, _ := io.ReadAll(res.Body)
+	body, _ := io.ReadAll(io.LimitReader(res.Body, maxTextBody))
 	return res.StatusCode, string(body), res.Header.Get("Location"), nil
 }
 

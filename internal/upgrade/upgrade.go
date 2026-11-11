@@ -3,6 +3,8 @@ package upgrade
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -22,6 +25,10 @@ type Release struct {
 	PageURL     string `json:"pageUrl"`
 	DownloadURL string `json:"downloadUrl"`
 	Size        int64  `json:"size"`
+
+	// 内部字段：不暴露给前端，仅用于下载后做 SHA256 完整性校验
+	assetName   string
+	checksumURL string
 }
 
 // UpgradeStage 升级阶段
@@ -139,26 +146,31 @@ func (u *GitHubUpgrader) Check(ctx context.Context) (*Release, error) {
 		return nil, fmt.Errorf("解析 GitHub Release 失败: %w", err)
 	}
 
-	// 检查版本是否更新
-	if ghRelease.TagName == "" || ghRelease.TagName == u.currentVersion {
-		return nil, nil // 已是最新版本
+	// 只升不降：用 semver 数字比较，避免远端 tag 异常时诱导降级
+	if ghRelease.TagName == "" || !isNewerVersion(ghRelease.TagName, u.currentVersion) {
+		return nil, nil // 已是最新版本（或远端版本更旧）
 	}
 
-	// 查找当前平台的资源文件
-	assetName := u.getAssetName(ghRelease.TagName)
-	var downloadURL string
+	// 查找当前平台的裸二进制（CI 产物名 yezhen-<os>-<arch>）
+	assetName := u.getAssetName()
+	var downloadURL, checksumURL string
 	var size int64
 
 	for _, asset := range ghRelease.Assets {
-		if asset.Name == assetName {
+		switch asset.Name {
+		case assetName:
 			downloadURL = asset.BrowserDownloadURL
 			size = asset.Size
-			break
+		case "checksums.txt":
+			checksumURL = asset.BrowserDownloadURL
 		}
 	}
 
 	if downloadURL == "" {
-		return nil, fmt.Errorf("未找到适用于 %s/%s 平台的安装包", runtime.GOOS, runtime.GOARCH)
+		return nil, fmt.Errorf("未找到适用于 %s/%s 平台的安装包（%s）", runtime.GOOS, runtime.GOARCH, assetName)
+	}
+	if checksumURL == "" {
+		return nil, fmt.Errorf("该版本缺少 checksums.txt，出于安全考虑已中止升级")
 	}
 
 	return &Release{
@@ -168,6 +180,8 @@ func (u *GitHubUpgrader) Check(ctx context.Context) (*Release, error) {
 		PageURL:     ghRelease.HTMLURL,
 		DownloadURL: downloadURL,
 		Size:        size,
+		assetName:   assetName,
+		checksumURL: checksumURL,
 	}, nil
 }
 
@@ -205,8 +219,8 @@ func (u *GitHubUpgrader) Upgrade(ctx context.Context, rel *Release, onProgress f
 		Message: "验证下载文件",
 	})
 
-	if err := u.verifyFile(tmpFile); err != nil {
-		return fmt.Errorf("文件验证失败: %w", err)
+	if err := u.verifyFile(tmpFile, rel); err != nil {
+		return fmt.Errorf("文件完整性校验失败: %w", err)
 	}
 
 	// 3. 替换可执行文件
@@ -302,26 +316,130 @@ func (u *GitHubUpgrader) downloadRelease(ctx context.Context, url string, onProg
 	return tmpFile.Name(), nil
 }
 
-// verifyFile 验证下载的文件
-func (u *GitHubUpgrader) verifyFile(path string) error {
+// verifyFile 验证下载文件：非空 + SHA256 与 Release 的 checksums.txt 一致。
+func (u *GitHubUpgrader) verifyFile(path string, rel *Release) error {
 	info, err := os.Stat(path)
 	if err != nil {
 		return err
 	}
-
-	// 基本验证：文件大小不为 0
 	if info.Size() == 0 {
 		return fmt.Errorf("下载的文件为空")
 	}
+	if rel == nil || rel.checksumURL == "" || rel.assetName == "" {
+		return fmt.Errorf("缺少校验信息，拒绝替换可执行文件")
+	}
 
-	// 验证文件是否可执行（Unix 系统）
+	want, err := u.fetchChecksum(context.Background(), rel.checksumURL, rel.assetName)
+	if err != nil {
+		return err
+	}
+	got, err := sha256File(path)
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(got, want) {
+		return fmt.Errorf("SHA256 不匹配（下载包可能被篡改或损坏）：期望 %s，实际 %s", want, got)
+	}
+	if rel.Size > 0 && info.Size() != rel.Size {
+		return fmt.Errorf("文件大小与 Release 记录不一致：期望 %d，实际 %d", rel.Size, info.Size())
+	}
 	if runtime.GOOS != "windows" {
 		if err := os.Chmod(path, 0755); err != nil {
 			return fmt.Errorf("设置执行权限失败: %w", err)
 		}
 	}
-
 	return nil
+}
+
+// fetchChecksum 下载 checksums.txt 并取出指定文件的 sha256。
+func (u *GitHubUpgrader) fetchChecksum(ctx context.Context, url, assetName string) (string, error) {
+	client := &http.Client{Timeout: 20 * time.Second}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+	res, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("下载 checksums.txt 失败：%w", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("下载 checksums.txt 失败，HTTP %d", res.StatusCode)
+	}
+	b, err := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && len(fields[0]) == 64 {
+			name := strings.TrimPrefix(fields[len(fields)-1], "*")
+			if name == assetName || strings.HasSuffix(name, "/"+assetName) {
+				return fields[0], nil
+			}
+		}
+	}
+	return "", fmt.Errorf("checksums.txt 中没有 %s 的校验值", assetName)
+}
+
+func sha256File(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// isNewerVersion 只做 vX.Y.Z 数字比较；无法解析时回退字符串比较，
+// 但相同版本一律视为不升级。预发布标签（-rc1 等）按基础版本比较。
+func isNewerVersion(remote, current string) bool {
+	norm := func(v string) []int {
+		v = strings.TrimPrefix(strings.TrimSpace(v), "v")
+		if i := strings.IndexAny(v, "-+"); i >= 0 {
+			v = v[:i]
+		}
+		parts := strings.Split(v, ".")
+		out := make([]int, 3)
+		for i := 0; i < len(parts) && i < 3; i++ {
+			n, err := strconv.Atoi(parts[i])
+			if err != nil {
+				return nil
+			}
+			out[i] = n
+		}
+		return out
+	}
+	r, c := norm(remote), norm(current)
+	if r == nil || c == nil {
+		return remote != current
+	}
+	for i := 0; i < 3; i++ {
+		if r[i] != c[i] {
+			return r[i] > c[i]
+		}
+	}
+	return false
+}
+
+// ConfirmStartup 在进程成功启动后调用：新版本能跑起来，才清理上一版的备份。
+// 若新版本无法启动，用户可直接用 <exe>.backup 手工回滚。
+func ConfirmStartup() {
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	if p, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = p
+	}
+	backup := exe + ".backup"
+	if st, err := os.Stat(backup); err == nil && st.Size() > 0 {
+		_ = os.Remove(backup)
+	}
 }
 
 // replaceExecutable 替换当前可执行文件
@@ -349,29 +467,20 @@ func (u *GitHubUpgrader) replaceExecutable(newFile string) error {
 		}
 	}
 
-	// 删除备份
-	_ = os.Remove(backupPath)
-
+	// 备份保留到下次启动自检成功（ConfirmStartup）后再清理，
+	// 这样新版本起不来时仍可用 <exe>.backup 手工回滚。
 	return nil
 }
 
-// getAssetName 根据当前平台生成资源文件名
-func (u *GitHubUpgrader) getAssetName(version string) string {
-	// 去掉版本号中的 'v' 前缀（如果有）
-	version = strings.TrimPrefix(version, "v")
-
-	osName := runtime.GOOS
-	arch := runtime.GOARCH
-
-	// 文件名格式: TVBoxWeb_v1.3.1_darwin_arm64
-	fileName := fmt.Sprintf("TVBoxWeb_%s_%s_%s", version, osName, arch)
-
-	// Windows 平台添加 .exe 扩展名
-	if osName == "windows" {
-		fileName += ".exe"
+// getAssetName 与 .github/workflows/build-release.yml 的产物名严格一致：
+// yezhen-<os>-<arch>（Windows 带 .exe）。旧实现找 TVBoxWeb_<ver>_<os>_<arch>，
+// 与 CI 产物永不匹配，导致在线升级一直报「未找到安装包」。
+func (u *GitHubUpgrader) getAssetName() string {
+	name := fmt.Sprintf("yezhen-%s-%s", runtime.GOOS, runtime.GOARCH)
+	if runtime.GOOS == "windows" {
+		name += ".exe"
 	}
-
-	return fileName
+	return name
 }
 
 // copyFile 复制文件

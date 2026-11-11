@@ -4,6 +4,7 @@ package store
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -96,9 +97,10 @@ type SubResult struct {
 }
 
 var (
-	mu   sync.Mutex
-	path string
-	data = &Data{
+	mu      sync.RWMutex // 保护 data：写用 Lock，读用 RLock
+	writeMu sync.Mutex   // 落盘串行化，避免并发覆盖
+	path    string
+	data    = &Data{
 		WebdavScan: map[string][]model.WebdavVod{},
 		SiteHealth: map[string]SiteHealthStat{},
 	}
@@ -131,44 +133,93 @@ func Init(p string) error {
 	}
 	d := &Data{}
 	if err := json.Unmarshal(b, &d); err != nil {
-		return err
-	}
-	if d.WebdavScan == nil {
-		d.WebdavScan = map[string][]model.WebdavVod{}
+		// 上次进程被强杀可能留下半截 JSON：自动回退到 .bak
+		if bak, e := os.ReadFile(p + ".bak"); e == nil {
+			if json.Unmarshal(bak, &d) == nil {
+				data = d
+				ensureMaps()
+				return nil
+			}
+		}
+		return fmt.Errorf("数据文件损坏且备份不可用：%w", err)
 	}
 	data = d
+	ensureMaps()
 	return nil
 }
 
-func save() {
-	if path == "" {
-		return
+func ensureMaps() {
+	if data.WebdavScan == nil {
+		data.WebdavScan = map[string][]model.WebdavVod{}
 	}
-	os.MkdirAll(filepath.Dir(path), 0o755)
-	b, _ := json.MarshalIndent(data, "", "  ")
-	_ = os.WriteFile(path, b, 0o600)
+	if data.SiteHealth == nil {
+		data.SiteHealth = map[string]SiteHealthStat{}
+	}
 }
 
+func save() { flush() }
+
 // flush 线程安全地把当前 data 序列化写入磁盘。
-// 调用方不需要持锁；本函数内部加锁做快照，再在锁外写文件，
-// 避免锁竞争同时保证写入的是一致快照。
+// 快照在 RLock 内生成，落盘由 writeMu 串行化，避免多 goroutine 交叉覆盖。
 func flush() {
 	if path == "" {
 		return
 	}
-	mu.Lock()
-	b, _ := json.MarshalIndent(data, "", "  ")
-	mu.Unlock()
-	os.MkdirAll(filepath.Dir(path), 0o755)
-	_ = os.WriteFile(path, b, 0o600)
+	mu.RLock()
+	b, err := json.MarshalIndent(data, "", "  ")
+	mu.RUnlock()
+	if err != nil {
+		log.Printf("[store] 序列化失败，本次修改未落盘: %v", err)
+		return
+	}
+	writeMu.Lock()
+	defer writeMu.Unlock()
+	if err := atomicWrite(path, b); err != nil {
+		log.Printf("[store] 落盘失败: %v", err)
+	}
+}
+
+// atomicWrite 写临时文件 → fsync → 备份原文件 → rename 原子替换。
+// 中途崩溃至多留下 .tmp，不会破坏 store.json；.bak 保留最近一份可用快照。
+func atomicWrite(dst string, b []byte) error {
+	dir := filepath.Dir(dst)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".store-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(b); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, 0o600); err != nil {
+		return err
+	}
+	if _, err := os.Stat(dst); err == nil {
+		if old, e := os.ReadFile(dst); e == nil {
+			_ = os.WriteFile(dst+".bak", old, 0o600)
+		}
+	}
+	return os.Rename(tmpName, dst)
 }
 
 // ---------- 配置 ----------
 
 func IsCustom() bool       { return data.CfgCustom == "1" }
-func GetConfigURL() string { return data.CfgURL }
-func SubName() string      { return data.SubName }
-func CachedText() string   { return data.CfgText }
+func GetConfigURL() string { mu.RLock(); defer mu.RUnlock(); return data.CfgURL }
+func SubName() string      { mu.RLock(); defer mu.RUnlock(); return data.SubName }
+func CachedText() string   { mu.RLock(); defer mu.RUnlock(); return data.CfgText }
 
 // SetCfg 保存配置原文与来源地址。
 func SetCfg(text, source string) {
@@ -308,7 +359,7 @@ func ActiveSites() []model.Site {
 	return out
 }
 
-func EnabledKeys() []string { return data.Enabled }
+func EnabledKeys() []string { mu.RLock(); defer mu.RUnlock(); return data.Enabled }
 func SetEnabledKeys(keys []string) {
 	mu.Lock()
 	data.Enabled = keys
@@ -318,7 +369,7 @@ func SetEnabledKeys(keys []string) {
 
 // ---------- 历史 ----------
 
-func History() []HistItem { return data.Hist }
+func History() []HistItem { mu.RLock(); defer mu.RUnlock(); return data.Hist }
 
 func PushHistory(h HistItem) {
 	mu.Lock()
@@ -409,7 +460,7 @@ func ClearHistory() { mu.Lock(); data.Hist = nil; mu.Unlock(); flush() }
 
 // ---------- 收藏 ----------
 
-func Favorites() []FavItem { return data.Fav }
+func Favorites() []FavItem { mu.RLock(); defer mu.RUnlock(); return data.Fav }
 
 func IsFavorite(siteKey, vodID string) bool {
 	for _, f := range data.Fav {
@@ -689,11 +740,11 @@ func HotKeywords() []string {
 
 // ---------- 直播源 ----------
 
-func LiveURL() string                  { return data.LiveURL }
+func LiveURL() string                  { mu.RLock(); defer mu.RUnlock(); return data.LiveURL }
 func SetLiveURL(u string)              { mu.Lock(); data.LiveURL = u; mu.Unlock(); flush() }
-func EpgURL() string                   { return data.EpgURL }
+func EpgURL() string                   { mu.RLock(); defer mu.RUnlock(); return data.EpgURL }
 func SetEpgURL(u string)               { mu.Lock(); data.EpgURL = u; mu.Unlock(); flush() }
-func SubLives() []model.RawLive        { return data.SubLives }
+func SubLives() []model.RawLive        { mu.RLock(); defer mu.RUnlock(); return data.SubLives }
 func SetSubLives(list []model.RawLive) { mu.Lock(); data.SubLives = list; mu.Unlock(); flush() }
 
 // ---------- 直播频道收藏 ----------
@@ -743,7 +794,7 @@ func IsLiveFav(name, url string) bool {
 
 // ---------- 画质 / 倍速 / 跳过 / 反馈 ----------
 
-func QPref() int     { return data.QPref }
+func QPref() int     { mu.RLock(); defer mu.RUnlock(); return data.QPref }
 func SetQPref(v int) { mu.Lock(); data.QPref = v; mu.Unlock(); flush() }
 func SpeedPref() float64 {
 	if data.SpeedPref <= 0 {
@@ -759,9 +810,9 @@ func VolumePref() float64 {
 	return data.VolumePref
 }
 func SetVolumePref(v float64) { mu.Lock(); data.VolumePref = v; mu.Unlock(); flush() }
-func IntroSkipSec() int       { return data.IntroSkip }
+func IntroSkipSec() int       { mu.RLock(); defer mu.RUnlock(); return data.IntroSkip }
 func SetIntroSkipSec(v int)   { mu.Lock(); data.IntroSkip = v; mu.Unlock(); flush() }
-func OutroSkipSec() int       { return data.OutroSkip }
+func OutroSkipSec() int       { mu.RLock(); defer mu.RUnlock(); return data.OutroSkip }
 func SetOutroSkipSec(v int)   { mu.Lock(); data.OutroSkip = v; mu.Unlock(); flush() }
 func TapSound() int {
 	if data.TapSound == 0 {
@@ -780,25 +831,25 @@ func SetTapVibrate(v int) { mu.Lock(); data.TapVibrate = v; mu.Unlock(); flush()
 
 // ---------- 定时抓取 ----------
 
-func Feed() []model.Vod          { return data.Feed }
+func Feed() []model.Vod          { mu.RLock(); defer mu.RUnlock(); return data.Feed }
 func SaveFeed(list []model.Vod)  { mu.Lock(); data.Feed = list; mu.Unlock(); flush() }
-func LastCrawlAt() int64         { return data.CrawlAt }
+func LastCrawlAt() int64         { mu.RLock(); defer mu.RUnlock(); return data.CrawlAt }
 func SetLastCrawlAt(t int64)     { mu.Lock(); data.CrawlAt = t; mu.Unlock(); flush() }
-func CrawlSummary() string       { return data.CrawlSummary }
+func CrawlSummary() string       { mu.RLock(); defer mu.RUnlock(); return data.CrawlSummary }
 func SaveCrawlSummary(s string)  { mu.Lock(); data.CrawlSummary = s; mu.Unlock(); flush() }
-func DeadKeys() []string         { return data.DeadKeys }
+func DeadKeys() []string         { mu.RLock(); defer mu.RUnlock(); return data.DeadKeys }
 func SaveDeadKeys(keys []string) { mu.Lock(); data.DeadKeys = keys; mu.Unlock(); flush() }
 
 // ---------- 首启同意与引导 ----------
 
-func PrivacyAgreed() bool { return data.PrivacyAgreed }
+func PrivacyAgreed() bool { mu.RLock(); defer mu.RUnlock(); return data.PrivacyAgreed }
 func SetPrivacyAgreed()   { mu.Lock(); data.PrivacyAgreed = true; mu.Unlock(); flush() }
-func GuideDone() bool     { return data.GuideDone }
+func GuideDone() bool     { mu.RLock(); defer mu.RUnlock(); return data.GuideDone }
 func SetGuideDone()       { mu.Lock(); data.GuideDone = true; mu.Unlock(); flush() }
 
 // ---------- 直连播放 ----------
 
-func DirectList() []string { return data.DirectList }
+func DirectList() []string { mu.RLock(); defer mu.RUnlock(); return data.DirectList }
 func PushDirect(url string) {
 	mu.Lock()
 	out := []string{url}
@@ -814,7 +865,7 @@ func PushDirect(url string) {
 
 // ---------- WebDAV ----------
 
-func WebdavSources() []model.WebdavSource { return data.WebdavList }
+func WebdavSources() []model.WebdavSource { mu.RLock(); defer mu.RUnlock(); return data.WebdavList }
 
 func SaveWebdavSource(src model.WebdavSource) {
 	mu.Lock()
@@ -858,7 +909,11 @@ func WebdavSource(id string) *model.WebdavSource {
 	return nil
 }
 
-func WebdavScanCache(srcID string) []model.WebdavVod { return data.WebdavScan[srcID] }
+func WebdavScanCache(srcID string) []model.WebdavVod {
+	mu.RLock()
+	defer mu.RUnlock()
+	return data.WebdavScan[srcID]
+}
 func SaveWebdavScan(srcID string, vods []model.WebdavVod) {
 	mu.Lock()
 	data.WebdavScan[srcID] = vods

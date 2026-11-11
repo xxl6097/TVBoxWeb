@@ -34,7 +34,9 @@ class WSClient {
     // 自动推断 WebSocket URL
     if (!url) {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-      this.url = `${protocol}//${window.location.host}/ws`
+      const base = `${protocol}//${window.location.host}/ws`
+      const t = (() => { try { return localStorage.getItem('yz_auth_token') || '' } catch { return '' } })()
+      this.url = t ? `${base}?token=${encodeURIComponent(t)}` : base
     } else {
       this.url = url
     }

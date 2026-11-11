@@ -23,6 +23,7 @@ import (
 	"github.com/xxl6097/TVBoxWeb/internal/liveprobe"
 	"github.com/xxl6097/TVBoxWeb/internal/metrics"
 	"github.com/xxl6097/TVBoxWeb/internal/model"
+	"github.com/xxl6097/TVBoxWeb/internal/netguard"
 	"github.com/xxl6097/TVBoxWeb/internal/pinyin"
 	"github.com/xxl6097/TVBoxWeb/internal/quality"
 	"github.com/xxl6097/TVBoxWeb/internal/resolve"
@@ -301,32 +302,19 @@ func failWith(w http.ResponseWriter, status int, code, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg, "code": code})
 }
 
-// CORS 跨域中间件（开发时前后端分离用），并兜底 panic 防止单站异常拖垮服务。
-func CORS(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// 记录请求指标（只统计 API 请求）
-		start := time.Now()
-		isAPI := strings.HasPrefix(r.URL.Path, "/api/")
+const maskedPassword = "******"
 
-		defer func() {
-			if rec := recover(); rec != nil {
-				metrics.RecordError()
-				writeJSON(w, 500, map[string]string{"error": "内部错误"})
-			}
-			// 记录请求耗时
-			if isAPI {
-				metrics.Record(r.URL.Path, time.Since(start).Milliseconds())
-			}
-		}()
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Range")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(204)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
+// guardURL 对所有「客户端可指定上游地址」的接口做统一 SSRF 校验。
+// 校验失败时写入结构化错误并返回 false，调用方直接 return。
+func guardURL(w http.ResponseWriter, raw string) bool {
+	if raw == "" {
+		return true
+	}
+	if err := netguard.Check(raw); err != nil {
+		failWith(w, http.StatusBadRequest, ErrBadRequest, "目标地址不安全："+err.Error())
+		return false
+	}
+	return true
 }
 
 func body(r *http.Request, v any) error {
@@ -1079,6 +1067,9 @@ func hLiveEpg(w http.ResponseWriter, r *http.Request) {
 	if u == "" {
 		u = store.EpgURL()
 	}
+	if !guardURL(w, u) {
+		return
+	}
 	res, err := live.FetchEPG(u, q(r, "name"))
 	if err != nil {
 		status, code := 502, ErrUpstream
@@ -1113,6 +1104,9 @@ func hLiveChannels(w http.ResponseWriter, r *http.Request) {
 	}
 	if u == "" {
 		fail(w, 400, "暂无直播源，先去「设置 → 订阅」导入")
+		return
+	}
+	if !guardURL(w, u) {
 		return
 	}
 	groups, err := live.Load(u, 25*time.Second)
@@ -1180,6 +1174,9 @@ func hPeek(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "缺少 url")
 		return
 	}
+	if !guardURL(w, u) {
+		return
+	}
 	alive := live.Probe(u, 2500*time.Millisecond)
 	ok(w, map[string]any{"alive": alive})
 }
@@ -1221,6 +1218,9 @@ func hQualityMaster(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.URL == "" || !strings.HasPrefix(req.URL, "http") {
 		ok(w, []quality.QLevel{})
+		return
+	}
+	if !guardURL(w, req.URL) {
 		return
 	}
 	txt, err := httpc.Text(req.URL, nil, 6*time.Second)
@@ -1302,12 +1302,33 @@ func toFloat(v any) float64 {
 func hWdSources(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		ok(w, store.WebdavSources())
+		// 密码永不回显给前端（即使开了 CORS 白名单）
+		srcs := store.WebdavSources()
+		out := make([]model.WebdavSource, len(srcs))
+		copy(out, srcs)
+		for i := range out {
+			if out[i].Pass != "" {
+				out[i].Pass = maskedPassword
+			}
+		}
+		ok(w, out)
 	case http.MethodPost:
 		var src model.WebdavSource
 		if err := body(r, &src); err != nil {
 			fail(w, 400, "参数错误")
 			return
+		}
+		if !guardURL(w, src.URL) {
+			return
+		}
+		// 前端回传掩码时保留服务端已存的真实密码，避免「查看即清空密码」
+		if src.Pass == maskedPassword {
+			for _, old := range store.WebdavSources() {
+				if old.ID == src.ID {
+					src.Pass = old.Pass
+					break
+				}
+			}
 		}
 		store.SaveWebdavSource(src)
 		ok(w, map[string]any{"ok": true})
@@ -1321,6 +1342,9 @@ func hWdProbe(w http.ResponseWriter, r *http.Request) {
 	var src model.WebdavSource
 	if err := body(r, &src); err != nil {
 		fail(w, 400, "参数错误")
+		return
+	}
+	if !guardURL(w, src.URL) {
 		return
 	}
 	n, err := webdav.Probe(src)
@@ -1454,6 +1478,9 @@ func hProxy(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "url 必须以 http:// 或 https:// 开头")
 		return
 	}
+	if !guardURL(w, target) {
+		return
+	}
 	auth := q(r, "auth")
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, target, nil)
 	if err != nil {
@@ -1479,7 +1506,10 @@ func hProxy(w http.ResponseWriter, r *http.Request) {
 	isM3u8 := strings.Contains(ct, "mpegurl") || strings.Contains(ct, "m3u8") ||
 		strings.Contains(ct, "x-mpegurl") || strings.Contains(ct, "vnd.apple")
 
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if o := r.Header.Get("Origin"); OriginAllowed(o, r.Host) {
+		w.Header().Set("Access-Control-Allow-Origin", o)
+		w.Header().Set("Vary", "Origin")
+	}
 	w.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Range, Accept-Ranges")
 
 	if isM3u8 {
@@ -1493,7 +1523,7 @@ func hProxy(w http.ResponseWriter, r *http.Request) {
 		if res.Request != nil && res.Request.URL != nil {
 			base = res.Request.URL.String()
 		}
-		rewritten := rewriteM3u8(string(data), base, auth)
+		rewritten := rewriteM3u8(string(data), base, auth, tokenFrom(r))
 		for _, h := range []string{"Content-Type", "Cache-Control", "ETag", "Last-Modified"} {
 			if v := res.Header.Get(h); v != "" {
 				w.Header().Set(h, v)
@@ -1516,14 +1546,30 @@ func hProxy(w http.ResponseWriter, r *http.Request) {
 
 // rewriteM3u8 把 m3u8 里所有 URI（分片行 + #EXT-X-KEY/#EXT-X-MAP/#EXT-X-MEDIA 的 URI 属性）
 // 都改成走代理，保证分片、AES 密钥、fMP4 init 段都能正确拉取。
-func rewriteM3u8(body, base, auth string) string {
+func tokenFrom(r *http.Request) string {
+	if t := r.URL.Query().Get("token"); t != "" {
+		return t
+	}
+	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+		return strings.TrimPrefix(h, "Bearer ")
+	}
+	return r.Header.Get("X-Auth-Token")
+}
+
+func rewriteM3u8(body, base, auth, token string) string {
 	lines := strings.Split(strings.ReplaceAll(strings.ReplaceAll(body, "\r\n", "\n"), "\r", "\n"), "\n")
 	proxyOf := func(uri string) string {
 		u := strings.TrimSpace(uri)
 		if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
 			u = absURL(base, u)
 		}
-		return "/api/proxy?url=" + url.QueryEscape(u) + proxyAuth(auth)
+		out := "/api/proxy?url=" + url.QueryEscape(u) + proxyAuth(auth)
+		// m3u8 内的分片/KEY 地址由浏览器直接发起，无法带自定义头，
+		// 因此把访问口令透传到每个子请求 URL 上（仅在开启口令时生效）。
+		if token != "" {
+			out += "&token=" + url.QueryEscape(token)
+		}
+		return out
 	}
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)

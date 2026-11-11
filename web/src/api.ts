@@ -23,6 +23,25 @@ import { idbGet, idbSet } from '@/idb'
 
 const BASE = '/api'
 
+// ===== 可选访问口令（服务端 -token 开启时才需要）=====
+const AUTH_KEY = 'yz_auth_token'
+
+export function getAuthToken(): string {
+  try { return localStorage.getItem(AUTH_KEY) || '' } catch { return '' }
+}
+
+export function setAuthToken(token: string): void {
+  try {
+    if (token) localStorage.setItem(AUTH_KEY, token)
+    else localStorage.removeItem(AUTH_KEY)
+  } catch { /* 隐私模式下 localStorage 不可用，忽略 */ }
+}
+
+function authHeaders(): Record<string, string> {
+  const t = getAuthToken()
+  return t ? { 'X-Auth-Token': t } : {}
+}
+
 // 可离线缓存的 GET 路径（历史/收藏/分类/站源等只读数据）
 // 视频详情、搜索等也缓存，但 TTL 较短
 const CACHEABLE_PREFIXES = [
@@ -109,8 +128,12 @@ async function request<T>(path: string, opts: RequestInit = {}): Promise<T> {
   let res: Response
   try {
     res = await fetch(BASE + path, {
-      headers: { 'Content-Type': 'application/json' },
-      ...opts
+      ...opts,
+      headers: {
+        'Content-Type': 'application/json',
+        ...authHeaders(),
+        ...(opts.headers as Record<string, string> | undefined || {})
+      }
     })
   } catch {
     throw new ApiError('网络连接失败', 'ERR_NETWORK', 0, ERROR_HINTS.ERR_NETWORK)
@@ -160,7 +183,7 @@ async function request<T>(path: string, opts: RequestInit = {}): Promise<T> {
 async function refreshCache(path: string, cacheKey: string): Promise<void> {
   try {
     const res = await fetch(BASE + path, {
-      headers: { 'Content-Type': 'application/json' }
+      headers: { 'Content-Type': 'application/json', ...authHeaders() }
     })
     if (res.ok) {
       const data = await res.json()
@@ -275,5 +298,8 @@ export const api = {
 // 视频地址走代理（绕开跨域，m3u8 分片也由代理重写）。
 export function proxied(rawUrl: string, auth?: string): string {
   const u = `/api/proxy?url=${encodeURIComponent(rawUrl)}`
-  return auth ? `${u}&auth=${encodeURIComponent(auth)}` : u
+  const withAuth = auth ? `${u}&auth=${encodeURIComponent(auth)}` : u
+  // 视频分片由浏览器直接加载，无法带自定义头，口令走 query（后端会透传到 m3u8 内部地址）
+  const t = getAuthToken()
+  return t ? `${withAuth}&token=${encodeURIComponent(t)}` : withAuth
 }
