@@ -272,8 +272,30 @@ func numAttr(line, key string) int {
 	return toNum(strAttr(line, key))
 }
 
+// strAttr 取 HLS 属性列表里的值，如 strAttr(line, "BANDWIDTH")。
+//
+// 必须校验 key 前面是行首、冒号或逗号 —— 否则查 "BANDWIDTH" 会先命中
+// "AVERAGE-BANDWIDTH=" 里的片段，取到前缀属性的值。
+// （实测：AVERAGE-BANDWIDTH=800000,BANDWIDTH=1200000 曾错误返回 800000。）
 func strAttr(line, key string) string {
-	i := strings.Index(line, key+"=")
+	needle := key + "="
+	i := -1
+	for off := 0; ; {
+		j := strings.Index(line[off:], needle)
+		if j < 0 {
+			break
+		}
+		pos := off + j
+		// 前一个字符必须是分隔符，才是独立的属性名
+		if pos == 0 || line[pos-1] == ',' || line[pos-1] == ':' {
+			i = pos
+			break
+		}
+		off = pos + len(needle)
+		if off >= len(line) {
+			break
+		}
+	}
 	if i < 0 {
 		return ""
 	}

@@ -14,6 +14,8 @@ const errMsg = ref('')
 const shake = ref(false)
 const userEl = ref<HTMLInputElement>()
 const passEl = ref<HTMLInputElement>()
+// 版本号：排查「用户说的是旧版本问题」时，登录页就能看到，很省事
+const appVersion = ref('')
 
 const canSubmit = computed(() => user.value.trim() !== '' && pass.value !== '' && !loading.value)
 
@@ -24,6 +26,13 @@ onMounted(async () => {
   } catch {
     /* 隐私模式忽略 */
   }
+  // 版本号非关键信息，失败就不显示，不能影响登录
+  fetch('/api/version')
+    .then((r) => (r.ok ? r.json() : null))
+    .then((j) => {
+      if (j?.appVersion) appVersion.value = j.appVersion
+    })
+    .catch(() => {})
   await nextTick()
   // 有用户名就直接把光标放到密码框，少一次点击
   ;(user.value ? passEl.value : userEl.value)?.focus()
@@ -149,7 +158,9 @@ async function submit() {
       </footer>
     </main>
 
-    <p class="copyright">夜帧影视 · Yezhen</p>
+    <p class="copyright">
+      夜帧影视 · Yezhen<span v-if="appVersion" class="ver">{{ appVersion }}</span>
+    </p>
   </div>
 </template>
 
@@ -400,6 +411,12 @@ async function submit() {
   letter-spacing: 0.18em;
   color: var(--dim);
   opacity: 0.7;
+}
+.copyright .ver {
+  margin-left: 10px;
+  letter-spacing: 0.04em;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.75;
 }
 
 /* ===== 移动端 ===== */

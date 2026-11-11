@@ -212,10 +212,38 @@ func hLogin(w http.ResponseWriter, r *http.Request) {
 		Expires:  exp,
 		MaxAge:   int(sessionTTL.Seconds()),
 		HttpOnly: true,
+		Secure:   cookieSecure(r),
 		SameSite: http.SameSiteLaxMode,
-		// 不设 Secure：家用 HTTP 部署也要能用；上 HTTPS 后由反代保证链路加密
 	})
 	ok(w, map[string]any{"ok": true, "user": sec.LoginUser})
+}
+
+// cookieSecure 决定会话 Cookie 是否带 Secure（只在 HTTPS 下发送）。
+//
+// 判定只看「本次请求是不是走的 HTTPS」：
+//   - 直连 TLS：r.TLS != nil
+//   - 反代终止 TLS：Go 这边 r.TLS 为 nil，看 X-Forwarded-Proto
+//
+// 为什么不干脆用配置项强开：Secure Cookie 在 HTTP 页面里会被浏览器**静默丢弃**，
+// 一旦配错就是「输入正确密码 → 提示成功 → 立刻又回登录页」，用户完全无从排查。
+// 所以 HTTP 请求上一律不加 Secure，宁可弱一点也不能让人登不进去。
+//
+// CookieSecure 配置项仍然保留：它用于「我知道自己在 HTTPS 后面，但反代没透传
+// X-Forwarded-Proto」的场景 —— 此时若客户端确实用 https 访问，需要服务端主动加标记。
+// 该场景下由部署方保证前提成立。
+func cookieSecure(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	proto := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto"))
+	if strings.EqualFold(proto, "https") {
+		return true
+	}
+	if sec.CookieSecure && proto == "" {
+		// 显式开启且没有任何反代协议头：按部署方声明的 HTTPS 处理
+		return true
+	}
+	return false
 }
 
 // hLogout POST: 清除会话。
@@ -226,6 +254,8 @@ func hLogout(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
+		// 清除时也要带同样的 Secure，否则浏览器可能不认这条删除指令
+		Secure:   cookieSecure(r),
 		SameSite: http.SameSiteLaxMode,
 	})
 	ok(w, map[string]any{"ok": true})

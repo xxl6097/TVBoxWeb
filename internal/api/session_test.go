@@ -219,3 +219,87 @@ func TestLoginRateLimit(t *testing.T) {
 	}
 	clearFails("198.51.100.7")
 }
+
+// 会话 Cookie 的 Secure 标记：HTTP 下绝不能加（否则浏览器丢弃 Cookie，
+// 表现为「登录成功却立刻回到登录页」）；HTTPS 下要加。
+func TestCookieSecureFlag(t *testing.T) {
+	setup := func(secureCfg bool) {
+		SetSecurity(SecurityConfig{LoginUser: "u", LoginPass: "p", CookieSecure: secureCfg})
+		clearFails("192.0.2.1")
+	}
+	defer SetSecurity(SecurityConfig{})
+
+	loginWith := func(hdr map[string]string) *http.Cookie {
+		body := `{"user":"u","pass":"p"}`
+		req := httptest.NewRequest("POST", "/api/login", strings.NewReader(body))
+		req.RemoteAddr = "192.0.2.1:1234"
+		for k, v := range hdr {
+			req.Header.Set(k, v)
+		}
+		rec := httptest.NewRecorder()
+		secured().ServeHTTP(rec, req)
+		if rec.Code != 200 {
+			t.Fatalf("登录失败 %d: %s", rec.Code, rec.Body.String())
+		}
+		for _, c := range rec.Result().Cookies() {
+			if c.Name == sessionCookieName {
+				return c
+			}
+		}
+		return nil
+	}
+
+	// ① 纯 HTTP（无任何 HTTPS 迹象）→ 不能带 Secure
+	setup(false)
+	if c := loginWith(nil); c == nil || c.Secure {
+		t.Fatalf("HTTP 请求下 Cookie 不应带 Secure，实际 %+v", c)
+	}
+
+	// ② 反代声明 https → 带 Secure（无需显式配置）
+	setup(false)
+	if c := loginWith(map[string]string{"X-Forwarded-Proto": "https"}); c == nil || !c.Secure {
+		t.Fatalf("X-Forwarded-Proto: https 时 Cookie 应带 Secure，实际 %+v", c)
+	}
+
+	// ③ 显式开启且无协议头 → 按部署方声明处理，带 Secure
+	setup(true)
+	if c := loginWith(nil); c == nil || !c.Secure {
+		t.Fatalf("显式开启时 Cookie 应带 Secure，实际 %+v", c)
+	}
+
+	// ④ 显式开启但明确是 http → 仍不加 Secure（防止把自己锁死）
+	setup(true)
+	if c := loginWith(map[string]string{"X-Forwarded-Proto": "http"}); c == nil || c.Secure {
+		t.Fatalf("明确 http 时不应带 Secure，实际 %+v", c)
+	}
+}
+
+// 鉴权豁免名单必须「只放必要的」：登录页要能读 version/session/health，
+// 其余接口一律要登录。放多一个就等于开了个匿名后门。
+func TestAuthExemptListIsMinimal(t *testing.T) {
+	SetSecurity(SecurityConfig{LoginUser: "u", LoginPass: "p"})
+	defer SetSecurity(SecurityConfig{})
+
+	anonymous := []string{"/api/health", "/api/login", "/api/logout", "/api/session", "/api/version"}
+	protected := []string{
+		"/api/status", "/api/sites", "/api/metrics", "/api/webdav/sources",
+		"/api/favorites", "/api/history", "/api/prefs", "/api/direct",
+	}
+
+	for _, p := range anonymous {
+		if needsAuth(p) {
+			t.Errorf("%s 应匿名可达", p)
+		}
+	}
+	for _, p := range protected {
+		if !needsAuth(p) {
+			t.Errorf("%s 必须要求登录，不能放进豁免名单", p)
+		}
+		req := httptest.NewRequest("GET", p, nil)
+		rec := httptest.NewRecorder()
+		secured().ServeHTTP(rec, req)
+		if rec.Code != 401 {
+			t.Errorf("%s 未登录应 401，实际 %d", p, rec.Code)
+		}
+	}
+}

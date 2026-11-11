@@ -152,6 +152,7 @@ go build -o yezhen ./cmd/tvbox
 | `-data` | `data` | 数据目录（存 `store.json`） |
 | `-user` | 空 | 登录用户名（与 `-pass` 同时设置才启用登录页；也可用环境变量 `YZ_USER`） |
 | `-pass` | 空 | 登录密码（与 `-user` 同时设置才启用登录页；也可用环境变量 `YZ_PASS`） |
+| `-secure-cookie` | 关 | 会话 Cookie 加 `Secure`（HTTPS 但反代不透传 `X-Forwarded-Proto` 时才需要；HTTP 下开启会导致登录失效） |
 
 ### 跨平台打包
 
@@ -256,6 +257,37 @@ TVBoxWeb/
 - **内容回显类**接口（`/api/proxy`、m3u8 解析）默认拒绝内网，避免把内网暴露成开放代理；
 - 例外是**你保存过的源域名**：即使它解析到内网（家里 NAS 的公网域名在内网被 DNS 解成 ULA `fd00::/8` 或 `192.168.x.x` 很常见），也会被自动加入可信列表并放行，所以 NAS 上的视频能正常经 `/api/proxy` 播放。
 - 只有「临时用一次、没配置成源」的内网地址才需要 `-allow-private` 兜底。
+
+---
+
+## 🆕 v1.8.1 · 安全加固 + 清晰度解析修复 + 补测试
+
+### 安全：会话 Cookie 支持 Secure
+
+- 新增 `-secure-cookie` / `tvbox.WithCookieSecure(true)`。默认关闭以兼容家用 HTTP 部署。
+- **自动判断**：直连 TLS（`r.TLS != nil`）或反代带来 `X-Forwarded-Proto: https` 时自动加 `Secure`，一般部署无需配置。
+- **HTTP 下强制不加**：`Secure` Cookie 在 HTTP 页面会被浏览器**静默丢弃**，配错的表现是「密码正确 → 提示成功 → 立刻回登录页」，用户完全无从排查。所以宁可弱一点也不锁死自己。
+- 登出时的清除指令也带同样的 `Secure`，否则浏览器可能不认这条删除。
+
+### 修复：HLS 多档码率解析取错值
+
+`strAttr` 用 `strings.Index(line, key+"=")` 查找，查 `BANDWIDTH` 会先命中 `AVERAGE-BANDWIDTH=` 里的片段：
+
+```
+#EXT-X-STREAM-INF:AVERAGE-BANDWIDTH=800000,BANDWIDTH=1200000
+                                    ↑ 错误命中这里
+```
+
+结果取到 800000 而非 1200000，导致 `PickBySpeed` 选档偏低。改为校验 key 前一个字符必须是 `,` / `:` / 行首。同时更正一处：`0` 之前被当成「无数据」返回空串，现保持原行为并加注释与测试锁定。
+
+### 登录页显示版本号
+
+`/api/version` 加入鉴权豁免名单（只含版本/构建时间/平台，无用户数据）。登录页底部显示 `夜帧影视 · Yezhen v1.8.1`，排查「用户在旧版本上反馈问题」时很省事。新增测试断言豁免名单**只放行必要接口**，其余 8 个接口未登录必须 401。
+
+### 其他
+
+- `quality` 包从 0 测试补到 9 组（清晰度标签、master playlist 解析、按速率/分辨率选档、首分片提取、速率格式化）。
+- 清理 `TopBar` 里只写不读的 `clock` 变量（模板实际用 `clockParts`），改名为名副其实的 `clockText` 供无障碍标签使用。
 
 ---
 

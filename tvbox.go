@@ -82,6 +82,11 @@ type Options struct {
 	LoginUser string
 	LoginPass string
 
+	// CookieSecure 给会话 Cookie 加 Secure 标记。
+	// 默认 false 兼容家用 HTTP 部署；服务端会自动依据 r.TLS / X-Forwarded-Proto
+	// 判断 HTTPS，所以只有在「HTTPS 但反代不透传协议头」时才需要显式打开。
+	CookieSecure bool
+
 	// AllowedOrigins 额外允许的 CORS / WebSocket 来源（同源始终允许）。
 	AllowedOrigins []string
 
@@ -136,6 +141,13 @@ func WithVersion(v string) Option {
 // WithAuthToken 开启访问口令保护（公网部署建议设置）。
 func WithAuthToken(token string) Option {
 	return func(o *Options) { o.AuthToken = strings.TrimSpace(token) }
+}
+
+// WithCookieSecure 强制会话 Cookie 带 Secure 标记。
+// 仅在「HTTPS 部署但反向代理不透传 X-Forwarded-Proto」时需要打开；
+// 注意 HTTP 访问时打开会导致浏览器丢弃 Cookie、登录后立刻被踢回登录页。
+func WithCookieSecure(on bool) Option {
+	return func(o *Options) { o.CookieSecure = on }
 }
 
 // WithLogin 开启账号密码登录。
@@ -202,6 +214,7 @@ func New(opts ...Option) (*Server, error) {
 		AuthToken:             o.AuthToken,
 		LoginUser:             o.LoginUser,
 		LoginPass:             o.LoginPass,
+		CookieSecure:          o.CookieSecure,
 		AllowedOrigins:        o.AllowedOrigins,
 		AllowPrivateUpstreams: o.AllowPrivateUpstreams,
 		AllowedHosts:          o.AllowedHosts,

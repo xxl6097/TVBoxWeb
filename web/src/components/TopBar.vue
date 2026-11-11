@@ -5,9 +5,10 @@ import { useRouter, useRoute } from 'vue-router'
 const router = useRouter()
 const route = useRoute()
 
-const clock = ref('')
 // 拆成 时/分/秒 三段渲染：秒用等宽字形，避免每秒跳动时整行数字左右晃
 const clockParts = ref({ h: '00', m: '00', s: '00' })
+// 屏幕阅读器用的完整时间串（模板里显示的是上面三段）
+const clockText = ref('00:00:00')
 const menuOpen = ref(false)
 let timer = 0
 
@@ -30,7 +31,7 @@ function tick() {
   const m = pad(d.getMinutes())
   const s = pad(d.getSeconds())
   clockParts.value = { h, m, s }
-  clock.value = `${h}:${m}:${s}`
+  clockText.value = `${h}:${m}:${s}`
 }
 
 onMounted(() => {
@@ -84,7 +85,7 @@ function navigate(path: string) {
         {{ n.label }}
       </span>
     </nav>
-    <span class="clock desktop-only" :aria-label="`当前时间 ${clock}`">
+    <span class="clock desktop-only" :aria-label="`当前时间 ${clockText}`">
       <span class="c-hm">{{ clockParts.h }}:{{ clockParts.m }}</span><span class="c-s">:{{ clockParts.s }}</span>
     </span>
 

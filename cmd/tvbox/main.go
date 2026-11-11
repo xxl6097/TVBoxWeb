@@ -25,6 +25,7 @@ func main() {
 	token := flag.String("token", "", "访问口令（公网部署强烈建议设置；留空则不鉴权）")
 	user := flag.String("user", "", "登录用户名（与 -pass 同时设置才会启用登录页）")
 	pass := flag.String("pass", "", "登录密码（与 -user 同时设置才会启用登录页）")
+	secureCookie := flag.Bool("secure-cookie", false, "会话 Cookie 加 Secure 标记（HTTPS 部署时建议开启；HTTP 访问下开启会导致登录失效）")
 	origins := flag.String("origins", "", "额外允许的 CORS 来源，逗号分隔")
 	allowPrivate := flag.Bool("allow-private", false, "允许请求内网上游（家用 NAS / 内网订阅源）")
 	hosts := flag.String("hosts", "", "上游域名白名单，逗号分隔（留空不限制）")
@@ -51,6 +52,7 @@ func main() {
 		tvbox.WithDataDir(*dataDir),
 		tvbox.WithAuthToken(*token),
 		tvbox.WithLogin(envOr("YZ_USER", *user), envOr("YZ_PASS", *pass)),
+		tvbox.WithCookieSecure(*secureCookie),
 		tvbox.WithAllowedOrigins(split(*origins)...),
 		tvbox.WithAllowPrivateUpstreams(*allowPrivate),
 		tvbox.WithAllowedHosts(split(*hosts)...),

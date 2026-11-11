@@ -32,6 +32,10 @@ type SecurityConfig struct {
 	// 未设置时行为与旧版本一致（不启用登录页）。
 	LoginUser string
 	LoginPass string
+	// CookieSecure 给会话 Cookie 加 Secure 标记（只在 HTTPS 下发送）。
+	// 默认 false 以兼容家用 HTTP 部署；公网/HTTPS 部署应打开。
+	// 另有自动判断：请求经反代带来 X-Forwarded-Proto: https 时也会自动加。
+	CookieSecure bool
 	// Logger 用于记录 panic 堆栈，nil 时用标准日志。
 	Logger *log.Logger
 }
@@ -178,7 +182,9 @@ func hostOnly(h string) string {
 func needsAuth(path string) bool {
 	// 登录相关端点必须匿名可达，否则拿不到会话
 	switch path {
-	case "/api/health", "/api/login", "/api/logout", "/api/session":
+	case "/api/health", "/api/login", "/api/logout", "/api/session", "/api/version":
+		// /api/version 只返回版本号/构建时间/平台，不含任何用户数据，
+		// 放在鉴权外是为了让登录页能显示版本（排查「问题出在旧版本」非常有用）。
 		return false
 	}
 	return strings.HasPrefix(path, "/api/") || strings.HasPrefix(path, "/ws")
