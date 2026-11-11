@@ -405,7 +405,11 @@ async function pickPlayableLive(): Promise<string> {
 // ---------- 播放器 ----------
 
 function proxiedFinal(): string {
-  return proxied(finalUrl, directMode ? player.header?.auth : undefined)
+  // 认证信息与「是否直连」无关：只要上游需要 Basic Auth（WebDAV 网盘就是），
+  // 无论直连还是走 /api/proxy 都必须带上。
+  // 之前写成 directMode ? auth : undefined —— 网盘走的是普通代理模式，
+  // 代理拿不到认证 → 上游 401 → <video> 触发 error → 被误报成「视频解码失败」。
+  return proxied(finalUrl, player.header?.auth || undefined)
 }
 
 async function initPlayer() {
@@ -535,7 +539,21 @@ function bindVideoEvents(vid: HTMLVideoElement) {
     }
   }
   vid.onerror = () => {
-    onPlayError('mediaError')
+    // 区分真正的解码失败与「上游返回了错误页」：
+    // <video> 对 401/403/404 的响应体同样会抛 MEDIA_ERR_SRC_NOT_SUPPORTED，
+    // 一律说成「解码失败」会把人往编码格式上带偏（实际是认证或地址问题）。
+    const code = vid.error?.code
+    const msg = vid.error?.message || ''
+    if (code === MediaError.MEDIA_ERR_NETWORK) {
+      onPlayError('networkError')
+      return
+    }
+    if (code === MediaError.MEDIA_ERR_DECODE) {
+      onPlayError('mediaError')
+      return
+    }
+    // MEDIA_ERR_SRC_NOT_SUPPORTED：地址不通/需要认证/格式不支持，三种都可能
+    onPlayError(/401|403/.test(msg) ? 'authError' : 'srcNotSupported')
   }
   vid.onenterpictureinpicture = () => { isPip.value = true }
   vid.onleavepictureinpicture = () => { isPip.value = false }
@@ -556,6 +574,8 @@ function onPlayError(errKind?: string) {
     levelLoadError: '视频分片加载失败，源站可能不稳定',
     fragLoadError: '视频分片加载中断，可能是网络波动',
     manifestIncompatibleCodecsError: '编码格式不支持当前浏览器',
+    authError: '资源需要认证或没有访问权限，请检查网盘账号密码',
+    srcNotSupported: '这个文件无法直接播放。可能是 MKV/HEVC 等浏览器不支持的格式，或地址已失效',
   }
   errMsg.value = tips[errKind || ''] || '播放失败，可能是链接失效或编码不支持'
   showOsd.value = true

@@ -260,6 +260,19 @@ TVBoxWeb/
 
 ---
 
+## 🆕 v1.8.2 · 修复网盘视频播放报「解码失败」
+
+- **现象**：网盘里的视频点播放，提示「视频解码失败，可能是编码格式不支持」。
+- **根因**：`PlayerView` 里写成 `proxied(finalUrl, directMode ? player.header?.auth : undefined)` —— **只有直链模式才带认证**。网盘播走的是普通代理模式，认证被丢掉 → `/api/proxy` 不带 Basic Auth → 上游返回 401 → `<video>` 抛 `MEDIA_ERR_SRC_NOT_SUPPORTED` → 被统一误报成「解码失败」。
+- **排查结论**：源文件本身完全正常（H.264 High / 4K / AAC-LC，`moov` 在文件头可边下边播，大文件 Range 请求返回 206）。问题只在认证透传。
+- **修复**：`proxied(finalUrl, player.header?.auth || undefined)` —— 认证与「是否直连」无关，只要上游需要就带。
+- **顺带改进错误提示**：`vid.onerror` 不再一律报 `mediaError`，改为按 `MediaError.code` 区分：
+  - `MEDIA_ERR_NETWORK` → 网络问题
+  - `MEDIA_ERR_DECODE` → 真的解码失败
+  - `MEDIA_ERR_SRC_NOT_SUPPORTED` → 进一步看是否 401/403，提示「需要认证」或「格式不支持（MKV/HEVC 等）」
+
+  旧行为会把人往「编码格式」方向带偏，而实际可能是认证或地址问题。
+- **防回归**：新增 `web/scripts/check-wd-auth.cjs`，静态检查「代理 URL 必须透传 auth」「video error 不能一进来就报 mediaError」，接入 CI。已验证：回退修复后 4 项失败。
 ## 🆕 v1.8.1 · 安全加固 + 清晰度解析修复 + 补测试
 
 ### 安全：会话 Cookie 支持 Secure
