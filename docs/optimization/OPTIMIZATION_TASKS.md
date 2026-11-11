@@ -10,7 +10,7 @@
 > 结果 76 个 `- [ ]` 依旧会让人误以为全部未做。本次把每一条都对着代码核过，已完成项直接打勾，
 > **确实没做的 3 条保留未勾并标注原因**（见文末「剩余待办」）。
 >
-> 结论：12 个任务里 11 个已完整落地，1 个（任务 12 骨架屏扩展）部分落地。
+> 结论：12 个任务已全部完整落地；K8s 探针一条因本仓库不含部署清单而留空（单机场景由 Dockerfile 的 `HEALTHCHECK` 覆盖）。
 > 实现方式与原始设想不完全一致的地方已在各任务的「落地位置」里写明（例如任务 4 用 Pinia 播放列表
 > 代替组件内 `playlist` ref，任务 7 的函数名是 `RankAllConcurrent` 而不是 `RankSourcesConcurrent`）。
 
@@ -305,7 +305,8 @@
 **任务清单：**
 - [x] 后端新增 `/api/health` 端点
 - [x] 返回：status、uptime、sites、lastCrawl
-- [ ] Kubernetes 部署配置：livenessProbe + readinessProbe　**（未做：仓库内没有 k8s 清单，探针未配置）**
+- [x] 容器健康检查（Dockerfile `HEALTHCHECK` → `wget --spider /api/health`）
+- [ ] Kubernetes 部署配置：livenessProbe + readinessProbe　**（未做：本仓库没有任何 k8s 清单，无从配置）**
 - [x] 测试健康检查流程
 - [x] 提交代码
 
@@ -325,9 +326,9 @@ K8s 能正确探测服务状态
 **风险等级：** 低
 
 **任务清单：**
-- [ ] 在 LiveView、SearchView 等加载中显示骨架屏　**（未做：直播页/搜索页仍是纯文字加载态）**
+- [x] 在 LiveView、SearchView 等加载中显示骨架屏
 - [x] 统一骨架屏动画（shimmer 效果）
-- [ ] CSS 组件化可复用　**（未做：Skeleton 仍内联在 VodGrid.vue）**
+- [x] CSS 组件化可复用
 - [x] 测试各页面加载动画
 - [x] 提交代码
 
@@ -477,10 +478,14 @@ cd web && npm run dev
 
 ---
 
-## 剩余待办（2026-11-11 核对后仅剩这些）
+## 剩余待办（2026-11-11 二次核对）
 
-| # | 项 | 现状 | 为什么还没做 |
+| # | 项 | 现状 | 说明 |
 |---|---|---|---|
-| 1 | 任务 11 · Kubernetes liveness/readiness 探针 | `/api/health` 已可用（含 status/uptime/sites/lastCrawl），但本仓库没有 k8s 清单 | 部署编排不在本仓库内，加在这里会误导 |
-| 2 | 任务 12 · 直播页/搜索页骨架屏 | 只有点播栅格 `VodGrid.vue` 有骨架屏；直播页与搜索页仍是「加载中…」文字态 | 直播页是树形频道列表、搜索页结果区高度不定，需要单独设计骨架形态 |
-| 3 | 任务 12 · 骨架屏 CSS 组件化 | shimmer 动画目前内联在 `VodGrid.vue` 的 scoped 样式里 | 要和上一条一起做，抽 `SkeletonCard.vue` 才有意义 |
+| 1 | 任务 11 · Kubernetes liveness/readiness 探针 | `/api/health` 已可用（status/uptime/sites/lastCrawl 齐全），Dockerfile 也已有 `HEALTHCHECK --interval=30s … wget --spider /api/health` | 本仓库不含任何 k8s 清单，探针无处可配。真要上 k8s，把 `HEALTHCHECK` 那行翻译成 `livenessProbe.httpGet.path=/api/health` 即可，服务端不需要改 |
+
+> **修正记录**：本文档 11-11 首次回勾时，把「直播页/搜索页骨架屏」与「骨架屏 CSS 组件化」误标为未做。
+> 原因是核对时用了区分大小写的 `grep skeleton`，而组件名是 `SkeletonList`，大小写不匹配导致漏检。
+> 实际上 `SkeletonList.vue` 早已是三形态（channel/search/card）共享组件，LiveView（`type="channel"`）、
+> SearchView（`type="search"`）、HomeView/DetailView（`type="card"`）都在用。二次核对已改正，
+> 同时把 `VodGrid.vue` 里残留的那份内联骨架屏 CSS（25 行）换成复用 `SkeletonList`。

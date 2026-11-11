@@ -3,6 +3,7 @@ import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import type { Vod } from '@/types'
 import VodCard from './VodCard.vue'
+import SkeletonList from './SkeletonList.vue'
 
 const props = defineProps<{
   vods: Vod[]
@@ -170,13 +171,8 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <!-- 加载中：骨架屏 -->
-  <div v-if="loading" class="vod-grid">
-    <div v-for="n in (skeletonCount ?? 20)" :key="n" class="skeleton-card">
-      <div class="skeleton-poster"></div>
-      <div class="skeleton-name"></div>
-    </div>
-  </div>
+  <!-- 加载中：复用全局骨架屏组件，不再内联一份 shimmer CSS -->
+  <SkeletonList v-if="loading" type="card" :count="skeletonCount ?? 20" />
 
   <!-- 有内容 -->
   <div v-else-if="vods.length" ref="wrapEl" class="vod-grid-wrap" :style="{ height: useVirtual ? totalH + 'px' : undefined }">
@@ -224,31 +220,6 @@ onUnmounted(() => {
   color: var(--dim);
   text-align: center;
   padding: 60px 0;
-}
-
-/* 骨架屏 */
-@keyframes shimmer {
-  0% { background-position: -200% 0; }
-  100% { background-position: 200% 0; }
-}
-.skeleton-card {
-  cursor: default;
-}
-.skeleton-poster {
-  aspect-ratio: 2 / 3;
-  border-radius: var(--radius);
-  background: linear-gradient(90deg, var(--card) 25%, var(--card-hi) 50%, var(--card) 75%);
-  background-size: 200% 100%;
-  animation: shimmer 1.4s infinite;
-}
-.skeleton-name {
-  margin-top: 8px;
-  height: 14px;
-  border-radius: 4px;
-  width: 70%;
-  background: linear-gradient(90deg, var(--card) 25%, var(--card-hi) 50%, var(--card) 75%);
-  background-size: 200% 100%;
-  animation: shimmer 1.4s infinite 0.2s;
 }
 
 @media (max-width: 640px) {
