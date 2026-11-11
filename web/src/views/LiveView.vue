@@ -9,6 +9,7 @@ import type { LiveDir, Channel, RawLive, LiveScore, EpgResult, EpgProgram } from
 import type { HealthUpdate } from '@/ws'
 import TopBar from '@/components/TopBar.vue'
 import SkeletonList from '@/components/SkeletonList.vue'
+import VirtualGrid from '@/components/VirtualGrid.vue'
 
 const router = useRouter()
 const app = useAppStore()
@@ -465,26 +466,30 @@ const epgVisible = computed<EpgProgram[]>(() => {
           <p>暂无收藏的频道</p>
           <p class="empty-sub">可以点频道右侧的 ⭐ 收藏常用频道</p>
         </div>
-        <!-- 频道列表 -->
-        <template v-else>
-          <div
-            v-for="ch in (showFavs ? favChannels : channels)"
-            :key="ch.name + ch.url"
-            class="channel"
-            :class="{ dead: isDead(ch) }"
-            @click="playChannel(ch)"
-          >
-            <span class="ch-name">{{ ch.name }}</span>
-            <span v-if="ch.urls.length > 1" class="ch-alts">{{ ch.urls.length }} 线路</span>
-            <span class="ch-epg" title="查看节目单" @click.stop="openEpg(ch)">▤</span>
-            <span
-              class="ch-fav"
-              :class="{ on: isFav(ch) }"
-              :title="isFav(ch) ? '取消收藏' : '收藏频道'"
-              @click.stop="toggleFav(ch)"
-            >{{ isFav(ch) ? '★' : '☆' }}</span>
-          </div>
-        </template>
+        <!-- 频道列表（虚拟滚动：上千频道只渲染可视区） -->
+        <VirtualGrid
+          v-else
+          class="ch-virtual"
+          :items="showFavs ? favChannels : channels"
+          :item-height="46"
+          :item-min-width="150"
+          :gap="8"
+          :overscan="3"
+        >
+          <template #default="{ item: ch }">
+            <div class="channel" :class="{ dead: isDead(ch) }" @click="playChannel(ch)">
+              <span class="ch-name">{{ ch.name }}</span>
+              <span v-if="ch.urls.length > 1" class="ch-alts">{{ ch.urls.length }} 线路</span>
+              <span class="ch-epg" title="查看节目单" @click.stop="openEpg(ch)">▤</span>
+              <span
+                class="ch-fav"
+                :class="{ on: isFav(ch) }"
+                :title="isFav(ch) ? '取消收藏' : '收藏频道'"
+                @click.stop="toggleFav(ch)"
+              >{{ isFav(ch) ? '★' : '☆' }}</span>
+            </div>
+          </template>
+        </VirtualGrid>
       </div>
     </div>
 
@@ -630,6 +635,7 @@ const epgVisible = computed<EpgProgram[]>(() => {
   max-height: calc(100vh - 160px);
   overflow-y: auto;
 }
+.ch-virtual { grid-column: 1 / -1; }
 .ch-search {
   grid-column: 1 / -1;
   display: flex;

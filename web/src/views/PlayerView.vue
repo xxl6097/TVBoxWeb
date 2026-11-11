@@ -129,6 +129,33 @@ async function togglePip() {
   }
 }
 
+// ===== 投屏（Remote Playback API）=====
+const castConnected = ref(false)
+function remoteApi(): any {
+  return (videoEl.value as any)?.remote
+}
+function supportsCast(): boolean {
+  return !!remoteApi()
+}
+async function toggleCast() {
+  const remote = remoteApi()
+  if (!remote) {
+    app.showTip('当前浏览器不支持投屏，可以用 Chrome / Edge 连接 Chromecast 设备')
+    return
+  }
+  try {
+    if (remote.state === 'connected') {
+      await remote.disconnect()
+      app.showTip('已断开投屏')
+    } else {
+      app.showTip('正在搜索投屏设备…')
+      await remote.prompt()
+    }
+  } catch {
+    app.showTip('投屏已取消，或没有可用设备')
+  }
+}
+
 // ===== 全屏 =====
 const playerEl = ref<HTMLElement>()
 const isFullscreen = ref(false)
@@ -190,6 +217,13 @@ onMounted(async () => {
   resolving.value = false
   initPlayer()
   if (videoEl.value) videoEl.value.volume = volume.value
+  // 监听投屏连接状态（Remote Playback API）
+  const remote = remoteApi()
+  if (remote) {
+    remote.addEventListener?.('connect', () => { castConnected.value = true; app.showTip('已连接投屏设备') })
+    remote.addEventListener?.('disconnect', () => { castConnected.value = false; app.showTip('投屏已断开') })
+    castConnected.value = remote.state === 'connected'
+  }
 })
 
 onUnmounted(() => {
@@ -1398,6 +1432,7 @@ onUnmounted(() => {
             <div class="vol-track"><div class="vol-fill" :style="{ width: (muted ? 0 : volume * 100) + '%' }"></div></div>
           </div>
           <button class="ctl" @click="showQ = !showQ">画质</button>
+          <button v-if="supportsCast()" class="ctl" :class="{ primary: castConnected }" @click="toggleCast">{{ castConnected ? '断开投屏' : '投屏' }}</button>
           <button class="ctl" @click="switchEpisode(1)">{{ isLive ? '下一台' : '下一集' }}</button>
           <button class="ctl fullscreen-btn" :title="isFullscreen ? '退出全屏 (F)' : '全屏 (F)'" @click="toggleFullscreen">
             {{ isFullscreen ? '⤓' : '⛶' }}
@@ -1597,6 +1632,10 @@ onUnmounted(() => {
         <button class="m-aux-btn" @click="showQ = !showQ">
           <span class="m-aux-icon">⚙</span>
           <span>画质</span>
+        </button>
+        <button v-if="supportsCast()" class="m-aux-btn" @click="toggleCast">
+          <span class="m-aux-icon">⧉</span>
+          <span>{{ castConnected ? '断开投屏' : '投屏' }}</span>
         </button>
         <button v-if="supportsPip()" class="m-aux-btn" @click="togglePip">
           <span class="m-aux-icon">{{ isPip ? '⤦' : '⧉' }}</span>

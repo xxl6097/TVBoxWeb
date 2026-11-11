@@ -174,6 +174,30 @@ TVBoxWeb/
 
 ---
 
+---
+
+## 🆕 v1.4.0 · 三批体验优化
+
+**第一批（基础体验）**
+- 音量偏好持久化：`/api/prefs` 新增 `volumePref`，起播恢复、调整后 500ms 防抖落盘
+- 结构化错误码：后端所有错误响应返回 `{ error, code }`（`ERR_TIMEOUT` / `ERR_UPSTREAM` / `ERR_SITE` / `ERR_AUTH` / `ERR_NETWORK` / `ERR_BAD_REQUEST` / `ERR_NOT_FOUND` / `ERR_INTERNAL`），前端 `humanizeApiError()` 统一转成带解决建议的中文提示
+- 空态文案统一为「暂无 X，可以 Y」并补引导按钮（首页 / 点播 / 直播 / 收藏 / 历史 / 网盘 / 设置）
+
+**第二批（播放与内容）**
+- 外挂字幕：播放设置里可选本地字幕文件或填网络地址，SRT / VTT / ASS 转 WebVTT 后用 `<track>` 渲染；支持 16/20/26/32px 字号、±0.5s 同步、移除字幕；文件只在本机解析，不上传
+- 观看历史：按「今天 / 昨天 / 近 7 天 / 更早」分组显示，兼容秒级与毫秒级时间戳
+- 直播 EPG 节目单：直播页「节目单」按钮，按频道名宽松匹配（忽略大小写、空格、清晰度后缀），显示正在播出、接下来与当天节目表；XMLTV 源 30 分钟内存缓存，避免每次切台重复下载
+  - 配置：面板内填 XMLTV 地址并保存（写入 `prefs.epgUrl`）
+  - 接口：`GET /api/live/epg?name=频道名&url=EPG地址`（`url` 可省略，用已保存地址）
+
+**第三批（大列表与外设）**
+- 虚拟滚动：新增 `web/src/components/VirtualGrid.vue`（零依赖、固定行高网格，只渲染可视区 + overscan），直播频道列表已接入，上千频道不再一次性挂载 DOM
+- 投屏：基于浏览器 Remote Playback API，桌面控制条与移动端辅助按钮行出现「投屏 / 断开投屏」；仅当浏览器暴露 `video.remote` 时显示（Chrome / Edge + Chromecast），不支持时自动隐藏
+
+**验证**：`go build ./...`、`go vet ./...`、`go test ./internal/live`（EPG 解析 + 缓存单测）、`npm run build`（含 `vue-tsc --noEmit`）全部通过。
+
+---
+
 ## 🚀 开发
 
 ```bash
