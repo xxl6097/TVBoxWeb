@@ -1,8 +1,13 @@
 // Package netguard 提供服务端请求上游 URL 的安全校验，防止 SSRF。
 //
-// 影视聚合类服务天然需要请求用户填写的订阅/直播源地址，因此采用分级策略：
-//   - /api/proxy、/api/peek 属「内容回显型」接口，默认拒绝私有网络地址；
-//   - 订阅、EPG、WebDAV 等允许用户指向内网 NAS，可通过 WithAllowPrivateUpstreams 放开。
+// 影视聚合类服务天然需要请求用户填写的订阅/直播源/NAS 地址，因此采用分级策略：
+//   - Check：严格模式，给「内容回显型」接口用（/api/proxy、m3u8 解析）。
+//     默认拒绝私有网络地址，否则等于把内网暴露成开放代理。
+//   - CheckSource：源配置模式，给 WebDAV / 订阅 / 直播源 / EPG 等
+//     「用户指向自己服务器」的接口用，允许私有地址。
+//   - TrustedHosts：用户已保存的源域名。即使解析到内网地址也放行——
+//     家里 NAS 的公网域名在内网被 DNS 解析成 ULA/IPv4 私网是常态
+//     （分域解析 / hairpin NAT），这类地址不该被当成攻击。
 package netguard
 
 import (
@@ -18,11 +23,14 @@ import (
 
 // Config 是全局安全配置，由 api.SetSecurity 注入。
 type Config struct {
-	// AllowPrivate 为 true 时允许目标解析到私有/保留 IP 段。
+	// AllowPrivate 为 true 时允许目标解析到私有/保留 IP 段（全局放开，-allow-private）。
 	AllowPrivate bool
 	// AllowHosts 非空时只允许这些域名（支持 "example.com" 与 "*.example.com"），
 	// 其余一律拒绝；为空表示不限制公网域名。
 	AllowHosts []string
+	// TrustedHosts 用户自己配置过的源域名（WebDAV / 订阅 / 直播源 / EPG / 站源 API）。
+	// 这些域名解析到内网地址时依然放行，且在严格模式下也放行。
+	TrustedHosts []string
 }
 
 var (
@@ -46,6 +54,24 @@ func SetConfig(c Config) {
 	mu.Lock()
 	defer mu.Unlock()
 	config = c
+	resetCacheLocked()
+}
+
+// SetTrustedHosts 刷新「用户配置过的源域名」。
+// 配置变更（导入订阅、保存网盘源、切直播源/EPG）后应调用它；
+// 同时清空 DNS 判定缓存，避免旧的拒绝结果继续生效。
+func SetTrustedHosts(list []string) {
+	mu.Lock()
+	config.TrustedHosts = list
+	mu.Unlock()
+	cacheMu.Lock()
+	resetCacheLocked()
+	cacheMu.Unlock()
+}
+
+// resetCacheLocked 清空 DNS 判定缓存；调用方需持有 cacheMu。
+func resetCacheLocked() {
+	cache = make(map[string]cacheItem)
 }
 
 func current() Config {
@@ -54,8 +80,15 @@ func current() Config {
 	return config
 }
 
-// Check 校验一个上游 URL 是否允许被服务端请求。
-func Check(raw string) error {
+// Check 严格模式：内容回显型接口使用，默认拒绝私有/内网地址。
+func Check(raw string) error { return check(raw, false) }
+
+// CheckSource 源配置模式：WebDAV、订阅、直播源、EPG 等接口使用。
+// 这些接口的目标地址由用户自己填写，指向家里 NAS/路由器是正常用法，
+// 因此允许私有地址（域名白名单仍然生效）。
+func CheckSource(raw string) error { return check(raw, true) }
+
+func check(raw string, allowPrivate bool) error {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
 		return fmt.Errorf("URL 格式不合法：%v", err)
@@ -75,7 +108,8 @@ func Check(raw string) error {
 	if len(cfg.AllowHosts) > 0 && !hostAllowed(host, cfg.AllowHosts) {
 		return fmt.Errorf("目标域名 %s 不在允许列表中", host)
 	}
-	if cfg.AllowPrivate {
+	// 用户自己配置过的源：解析到内网也放行（NAS 公网域名在内网解析成 ULA 的场景）
+	if allowPrivate || cfg.AllowPrivate || hostAllowed(host, cfg.TrustedHosts) {
 		return nil
 	}
 

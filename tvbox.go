@@ -190,6 +190,10 @@ func New(opts ...Option) (*Server, error) {
 		crawler.Restore()
 	}
 
+	// store 就绪后再同步可信域名（含网盘源/订阅/直播/EPG），
+	// 否则「NAS 公网域名在内网解析成 ULA」会被严格模式拒绝。
+	api.RefreshTrustedHosts()
+
 	s := &Server{opts: o, mux: api.Handler(), stop: make(chan struct{})}
 
 	// WebSocket 端点

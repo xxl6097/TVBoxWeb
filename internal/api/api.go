@@ -34,7 +34,7 @@ import (
 
 // 版本信息（通过 ldflags -X 注入，默认值兜底）。
 var (
-	AppVersion = "v1.6.0"
+	AppVersion = "v1.6.1"
 	BuildTime  = "unknown"
 )
 
@@ -356,17 +356,56 @@ func hReset(w http.ResponseWriter, r *http.Request) {
 	ok(w, map[string]any{"ok": true})
 }
 
-// guardURL 对所有「客户端可指定上游地址」的接口做统一 SSRF 校验。
+// guardURL 严格模式：给「内容回显型」接口用（/api/proxy、m3u8 解析）。
+// 这类接口会把上游响应原样返回，允许访问内网等于把内网暴露成开放代理。
 // 校验失败时写入结构化错误并返回 false，调用方直接 return。
 func guardURL(w http.ResponseWriter, raw string) bool {
 	if raw == "" {
 		return true
 	}
 	if err := netguard.Check(raw); err != nil {
-		failWith(w, http.StatusBadRequest, ErrBadRequest, "目标地址不安全："+err.Error())
+		failWith(w, http.StatusBadRequest, ErrBadRequest,
+			"目标地址不安全："+err.Error()+"（若是你自己的 NAS/内网服务，请把它保存为 WebDAV 或订阅源，"+
+				"保存后该域名会自动加入可信列表；或用 -allow-private 启动）")
 		return false
 	}
 	return true
+}
+
+// guardSourceURL 源配置模式：给 WebDAV / 订阅 / 直播源 / EPG 等
+// 「用户指向自己服务器」的接口用，允许私有/内网地址。
+// 这一层不做内网判定，是因为拦在这里会让「家里 NAS」这个主流用法直接不可用；
+// 真正需要防的是内容回显型接口，那一层由 guardURL 严格把关。
+func guardSourceURL(w http.ResponseWriter, raw string) bool {
+	if raw == "" {
+		return true
+	}
+	if err := netguard.CheckSource(raw); err != nil {
+		failWith(w, http.StatusBadRequest, ErrBadRequest, "目标地址不合法："+err.Error())
+		return false
+	}
+	return true
+}
+
+// RefreshTrustedHosts 把用户已保存的源域名同步给 netguard。
+// 导入订阅、保存网盘源、切换直播源/EPG 之后都要调用，否则
+// 「公网域名在内网解析成 ULA」的地址仍会被严格模式拒绝。
+func RefreshTrustedHosts() {
+	seen := make(map[string]bool)
+	var out []string
+	for _, raw := range store.SourceURLs() {
+		u, err := url.Parse(strings.TrimSpace(raw))
+		if err != nil {
+			continue
+		}
+		h := strings.ToLower(u.Hostname())
+		if h == "" || seen[h] {
+			continue
+		}
+		seen[h] = true
+		out = append(out, h)
+	}
+	netguard.SetTrustedHosts(out)
 }
 
 func body(r *http.Request, v any) error {
@@ -623,6 +662,7 @@ func hConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cms.ClearCache()
+	RefreshTrustedHosts()
 	ok(w, map[string]any{"count": n})
 }
 
@@ -640,6 +680,7 @@ func hSubscription(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cms.ClearCache()
+	RefreshTrustedHosts()
 	ok(w, res)
 }
 
@@ -1091,6 +1132,7 @@ func hLiveURL(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = body(r, &req)
 		store.SetLiveURL(req.URL)
+		RefreshTrustedHosts()
 		ok(w, map[string]any{"ok": true})
 	}
 }
@@ -1119,7 +1161,7 @@ func hLiveEpg(w http.ResponseWriter, r *http.Request) {
 	if u == "" {
 		u = store.EpgURL()
 	}
-	if !guardURL(w, u) {
+	if !guardSourceURL(w, u) {
 		return
 	}
 	res, err := live.FetchEPGCtx(r.Context(), u, q(r, "name"))
@@ -1158,7 +1200,7 @@ func hLiveChannels(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "暂无直播源，先去「设置 → 订阅」导入")
 		return
 	}
-	if !guardURL(w, u) {
+	if !guardSourceURL(w, u) {
 		return
 	}
 	groups, err := live.LoadCtx(r.Context(), u, 25*time.Second)
@@ -1226,7 +1268,7 @@ func hPeek(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "缺少 url")
 		return
 	}
-	if !guardURL(w, u) {
+	if !guardSourceURL(w, u) {
 		return
 	}
 	alive := live.ProbeCtx(r.Context(), u, 2500*time.Millisecond)
@@ -1328,6 +1370,8 @@ func hPrefs(w http.ResponseWriter, r *http.Request) {
 		if v, ok := req["tapVibrate"]; ok {
 			store.SetTapVibrate(int(toFloat(v)))
 		}
+		// EPG 地址可能指向内网 NAS，变了就刷新可信域名
+		RefreshTrustedHosts()
 		ok(w, map[string]any{"ok": true})
 	}
 }
@@ -1370,7 +1414,7 @@ func hWdSources(w http.ResponseWriter, r *http.Request) {
 			fail(w, 400, "参数错误")
 			return
 		}
-		if !guardURL(w, src.URL) {
+		if !guardSourceURL(w, src.URL) {
 			return
 		}
 		// 前端回传掩码时保留服务端已存的真实密码，避免「查看即清空密码」
@@ -1383,9 +1427,11 @@ func hWdSources(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		store.SaveWebdavSource(src)
+		RefreshTrustedHosts()
 		ok(w, map[string]any{"ok": true})
 	case http.MethodDelete:
 		store.RemoveWebdavSource(q(r, "id"))
+		RefreshTrustedHosts()
 		ok(w, map[string]any{"ok": true})
 	}
 }
@@ -1396,7 +1442,7 @@ func hWdProbe(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "参数错误")
 		return
 	}
-	if !guardURL(w, src.URL) {
+	if !guardSourceURL(w, src.URL) {
 		return
 	}
 	n, err := webdav.ProbeCtx(r.Context(), src)

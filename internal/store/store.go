@@ -387,7 +387,27 @@ func BuildParses(cfg model.RawConfig) {
 	parseList = out
 }
 
-func Sites() []model.Site       { return siteList }
+func Sites() []model.Site { return siteList }
+
+// SourceURLs 返回所有「用户自己配置过的上游地址」：站源 API、订阅、直播源、EPG、网盘源。
+// 供 netguard 构造可信域名列表——这些域名即使在内网被解析成 ULA/私网地址也应允许访问，
+// 否则家用 NAS 的公网域名会在 SSRF 防护下被误杀。
+func SourceURLs() []string {
+	mu.RLock()
+	defer mu.RUnlock()
+	out := make([]string, 0, len(siteList)+len(data.SubLives)+len(data.WebdavList)+3)
+	for i := range siteList {
+		out = append(out, siteList[i].API)
+	}
+	for _, l := range data.SubLives {
+		out = append(out, l.URL)
+	}
+	for _, w := range data.WebdavList {
+		out = append(out, w.URL)
+	}
+	out = append(out, data.LiveURL, data.EpgURL, data.CfgURL)
+	return out
+}
 func TotalSites() int           { return rawSites }
 func Parses() []model.ParseRule { return parseList }
 func SitesVersion() int64       { mu.Lock(); defer mu.Unlock(); return sitesVersion }
