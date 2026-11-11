@@ -46,6 +46,10 @@ setUnauthorizedHandler(() => {
   router.replace({ name: 'login', query: cur.fullPath !== '/' ? { redirect: cur.fullPath } : {} })
 })
 
+// 移除 index.html 的首屏骨架；Vue 挂载后由 App.vue 的启动态接力，
+// 两者视觉一致，所以用户看不到跳变。
+document.getElementById('boot')?.remove()
+
 app.mount('#app')
 
 // 初始化 WebSocket 连接（非阻塞）

@@ -6,6 +6,8 @@ const router = useRouter()
 const route = useRoute()
 
 const clock = ref('')
+// 拆成 时/分/秒 三段渲染：秒用等宽字形，避免每秒跳动时整行数字左右晃
+const clockParts = ref({ h: '00', m: '00', s: '00' })
 const menuOpen = ref(false)
 let timer = 0
 
@@ -20,16 +22,29 @@ const navs = [
   { name: 'settings', label: '设置', path: '/settings' }
 ]
 
+const pad = (n: number) => (n < 10 ? '0' + n : '' + n)
+
 function tick() {
   const d = new Date()
-  const h = d.getHours() < 10 ? '0' + d.getHours() : '' + d.getHours()
-  const m = d.getMinutes() < 10 ? '0' + d.getMinutes() : '' + d.getMinutes()
-  clock.value = `${h}:${m}`
+  const h = pad(d.getHours())
+  const m = pad(d.getMinutes())
+  const s = pad(d.getSeconds())
+  clockParts.value = { h, m, s }
+  clock.value = `${h}:${m}:${s}`
 }
 
 onMounted(() => {
   tick()
-  timer = window.setInterval(tick, 30000)
+  // 显示到秒，就必须每秒刷新；用 1s 间隔会累积漂移，
+  // 这里对齐到下一个整秒再起定时器，保证翻秒尽量贴近真实时间。
+  const startAligned = () => {
+    timer = window.setInterval(tick, 1000)
+  }
+  const now = new Date()
+  window.setTimeout(() => {
+    tick()
+    startAligned()
+  }, 1000 - now.getMilliseconds())
 })
 onUnmounted(() => clearInterval(timer))
 
@@ -69,7 +84,9 @@ function navigate(path: string) {
         {{ n.label }}
       </span>
     </nav>
-    <span class="clock desktop-only">{{ clock }}</span>
+    <span class="clock desktop-only" :aria-label="`当前时间 ${clock}`">
+      <span class="c-hm">{{ clockParts.h }}:{{ clockParts.m }}</span><span class="c-s">:{{ clockParts.s }}</span>
+    </span>
 
     <!-- 移动端汉堡按钮 -->
     <button class="hamburger mobile-only" :class="{ open: menuOpen }" @click="menuOpen = !menuOpen" aria-label="菜单">
@@ -160,9 +177,18 @@ function navigate(path: string) {
 .clock {
   font-size: 15px;
   color: var(--dim);
-  min-width: 44px;
+  /* 固定宽 + 等宽数字：秒数每秒变化时不会推挤后面的元素，也不会左右抖动 */
+  min-width: 76px;
   flex-shrink: 0;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  user-select: none;
 }
+/* 秒比时分淡一档，视觉主体仍是时分 */
+.clock .c-s { opacity: 0.65; }
 
 /* 汉堡菜单 */
 .hamburger {
