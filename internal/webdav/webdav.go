@@ -166,10 +166,27 @@ func ProbeCtx(ctx context.Context, src model.WebdavSource) (int, error) {
 func isVideo(name string) bool {
 	dot := strings.LastIndex(name, ".")
 	if dot < 0 {
+		// 没有扩展名：可能是无扩展名的视频文件（网盘里常见），
+		// 也可能是目录。这里保持「当视频」的宽松语义，
+		// 供 aggregate 兜住无扩展名文件。
+		// ⚠️ 判断「是不是目录」时不能用这个函数，见 hasVideoExt。
 		return true
 	}
 	ext := strings.ToLower(name[dot+1:])
 	return videoExt[ext]
+}
+
+// hasVideoExt 严格判断名字是否带已知视频扩展名（无扩展名返回 false）。
+//
+// 专门用于「IsDir 标记是否可信」的判定：有些网盘会把 .mp4 标成目录，
+// 需要按扩展名纠正；但目录通常没有扩展名，此时必须返回 false，
+// 否则所有目录都会被当成视频，扫描直接瘫痪（踩过）。
+func hasVideoExt(name string) bool {
+	dot := strings.LastIndex(name, ".")
+	if dot < 0 || dot == len(name)-1 {
+		return false
+	}
+	return videoExt[strings.ToLower(name[dot+1:])]
 }
 
 func dirName(href string) string {
@@ -304,9 +321,19 @@ func ScanCtx(ctx context.Context, src model.WebdavSource, maxDepth int, onProgre
 			}
 			for _, rr := range results {
 				for _, e := range rr.entries {
-					if e.IsDir {
+					// 有些网盘（实测极空间的某些文件）会把 .mp4 之类**标成目录**返回：
+					// isDir=true 但名字带视频扩展名。按目录处理会继续下钻，
+					// 拿到的是「文件内部的虚拟目录」，文件本身反而漏掉，
+					// 最终把文件名当成目录名。
+					//
+					// 用 hasVideoExt 而不是 isVideo：后者对无扩展名返回 true，
+					// 会把普通目录也当成视频（直接导致扫描只认出顶层 2 项）。
+					switch {
+					case e.IsDir && hasVideoExt(e.Name):
+						files = append(files, e) // 被误标为目录的视频文件
+					case e.IsDir:
 						next = append(next, e.Href)
-					} else if isVideo(e.Name) {
+					case isVideo(e.Name):
 						files = append(files, e)
 					}
 				}
@@ -347,9 +374,25 @@ func aggregate(src model.WebdavSource, files []model.WebdavEntry) []model.Webdav
 	var vods []model.WebdavVod
 	idx := map[string]int{}
 
+	// mountPath 是挂载根在服务端的 URL 路径（已编码，如 /dav/%E8%BF%85%E9%9B%B7%E4%B8%8B%E8%BD%BD）。
+	// 用来把每个条目的绝对目录裁成「相对挂载根」的多级路径，
+	// 供前端按原来的目录层级分组展示，而不是一路平铺。
+	//
+	// 注意用 URLPath(src.URL) 而不是 URLPath(MountHref(src))：
+	// MountHref 返回值已经过 safePath 编码，再喂给 URLPath 会二次编码，前缀对不上。
+	mountPath := strings.TrimRight(safePath(URLPath(src.URL)), "/")
+
 	for i, f := range files {
 		p := parse(f.Name)
+		// 文件所在目录。
+		//
+		// dirOf 取「最后一个 / 之前的部分」。但对被网盘误标成目录的视频文件
+		//（极空间实测：.mp4 返回 isDir=true 且 href 带尾斜杠 ".../某片.mp4/"），
+		// 直接 dirOf 得到的是文件自身（".../电影/某片.mp4"），必须再退一级。
 		dir := dirOf(f.Href)
+		if f.IsDir && hasVideoExt(f.Name) {
+			dir = dirOf(strings.TrimRight(dir, "/"))
+		}
 
 		// 归属键：文件所在目录。同一目录下的所有视频归为一部。
 		// 电影这类「一个文件就是一部」的，各自独立成条目。
@@ -376,7 +419,13 @@ func aggregate(src model.WebdavSource, files []model.WebdavEntry) []model.Webdav
 					title = dn
 				}
 			}
-			vods = append(vods, model.WebdavVod{Name: title, Kind: kind, Year: p.year, Dir: dir})
+			vods = append(vods, model.WebdavVod{
+				Name:   title,
+				Kind:   kind,
+				Year:   p.year,
+				Dir:    dir, // 所在目录（早期版本电影这里误存了文件路径，已修正）
+				RelDir: relPathOf(dir, mountPath),
+			})
 			pos = len(vods) - 1
 			idx[key] = pos
 		}
@@ -403,11 +452,87 @@ func aggregate(src model.WebdavSource, files []model.WebdavEntry) []model.Webdav
 		})
 	}
 
+	// 兜底：如果挂载根填的是域名根（mount="/"），relDir 会带上服务端的完整路径
+	// （如 "dav/迅雷下载/凡人/01 风起天南"），前端展示就很丑。
+	// 这种情况把所有 relDir 统一砍掉第一段（服务端的 mount 前缀），
+	// 让层级从「用户实际看到的目录」开始。
+	if mountPath == "" || mountPath == "/" {
+		// 找出所有 relDir 的最长公共前缀段数
+		common := commonPrefixSegs(vods)
+		if common > 0 {
+			for i := range vods {
+				segs := strings.Split(vods[i].RelDir, "/")
+				if len(segs) > common {
+					vods[i].RelDir = strings.Join(segs[common:], "/")
+				} else {
+					vods[i].RelDir = ""
+				}
+			}
+		}
+	}
+
 	// 整体按片名排序，让目录结构在列表里也保持可预期的顺序
 	sort.SliceStable(vods, func(a, b int) bool {
 		return naturalLess(vods[a].Name, vods[b].Name)
 	})
 	return vods
+}
+
+// commonPrefixSegs 返回所有条目 relDir 的公共前缀目录段数。
+// 用于挂载根为 "/" 时剥掉服务端路径前缀（如 "dav/迅雷下载"）。
+func commonPrefixSegs(vods []model.WebdavVod) int {
+	if len(vods) == 0 {
+		return 0
+	}
+	first := strings.Split(vods[0].RelDir, "/")
+	n := len(first)
+	for _, v := range vods[1:] {
+		segs := strings.Split(v.RelDir, "/")
+		i := 0
+		for i < n && i < len(segs) && segs[i] == first[i] {
+			i++
+		}
+		n = i
+	}
+	// 全相同时（所有条目在同一目录），保留最后一段作为目录名，不要全砍掉
+	if n >= len(first) {
+		n = len(first) - 1
+	}
+	if n < 0 {
+		n = 0
+	}
+	return n
+}
+
+// relPathOf 把绝对目录裁成「相对挂载根」的路径，并解码成可展示的中文。
+//
+//	mount       = /dav/迅雷下载
+//	dir         = /dav/迅雷下载/凡人/01 风起天南
+//	→ 返回      凡人/01 风起天南
+//
+// 位于挂载根本身的条目（dir == mount）返回空串。
+// 若 dir 不在 mount 之下（理论上不该发生），返回空串而不是乱码路径。
+func relPathOf(dir, mount string) string {
+	d := strings.TrimRight(dir, "/")
+	m := strings.TrimRight(mount, "/")
+	if m != "" {
+		if d == m {
+			return ""
+		}
+		if !strings.HasPrefix(d, m+"/") {
+			return ""
+		}
+		d = strings.TrimPrefix(d, m+"/")
+	}
+	d = strings.TrimPrefix(d, "/")
+	// 逐段解码：整串 PathUnescape 遇到 %2F 会解码成 /，破坏层级，所以按段处理
+	segs := strings.Split(d, "/")
+	for i, seg := range segs {
+		if dec, err := url.PathUnescape(seg); err == nil {
+			segs[i] = dec
+		}
+	}
+	return strings.Join(segs, "/")
 }
 
 // naturalLess 按「自然顺序」比较字符串：数字段按数值比，

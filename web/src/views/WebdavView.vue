@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api, humanizeApiError } from '@/api'
 import { useAppStore } from '@/stores/app'
@@ -49,6 +49,7 @@ onMounted(async () => {
     cur.value = s
     curPath.value = '/'
     vods.value = cache
+    resetCollapsed()
     view.value = 'scan'
     msg.value = `已识别 ${cache.length} 部影视`
   } else {
@@ -139,6 +140,7 @@ async function enterSource(src: WebdavSource) {
   const cache = await api.webdavVods(src.id).catch(() => [])
   if (cache.length > 0) {
     vods.value = cache
+    resetCollapsed()
     view.value = 'scan'
     msg.value = `上次识别到 ${cache.length} 部影视，点「重新扫描」可刷新`
     return
@@ -324,12 +326,147 @@ async function scanVods() {
   try {
     const result = await api.webdavScan(cur.value, 6)
     vods.value = result
+    resetCollapsed()
     view.value = 'scan'
     msg.value = `识别到 ${result.length} 部影视`
   } catch (e: any) {
     msg.value = humanizeApiError(e)
   }
   loading.value = false
+}
+
+// ---------- 识别结果的目录层级 ----------
+//
+// 扫描结果本身是平铺的（每条一个 dir），直接列出来会丢掉用户自己的目录组织。
+// 这里按 relDir 还原成树：同一层的条目归到一个分组，可以在界面上折叠展开。
+// 例：
+//   迅雷下载/凡人/01 风起天南/1.mp4   → 目录「凡人 / 01 风起天南」
+//   迅雷下载/电影/某片.mp4            → 目录「电影」
+
+interface VodNode {
+  /** 本层目录名（最后一段） */
+  label: string
+  /** 从根到本层的完整相对路径，用于 key 与默认展开判断 */
+  path: string
+  /** 深度，用于缩进 */
+  depth: number
+  /** 本层直接包含的影视 */
+  vods: WebdavVod[]
+  /** 子目录 */
+  children: VodNode[]
+}
+
+/** 取条目的相对目录路径；老后端没有 relDir 时按 dir 的最后一级兜底 */
+function relDirOf(v: WebdavVod): string {
+  if (typeof v.relDir === 'string') return v.relDir
+  // 退化：用 dir 的最后一段
+  const d = (v.dir || '').replace(/\/+$/, '')
+  const seg = d.slice(d.lastIndexOf('/') + 1)
+  try {
+    return decodeURIComponent(seg)
+  } catch {
+    return seg
+  }
+}
+
+/** 把平铺结果按目录层级组装成树 */
+function buildVodTree(list: WebdavVod[]): VodNode[] {
+  const root: VodNode = { label: '', path: '', depth: 0, vods: [], children: [] }
+  const byPath = new Map<string, VodNode>([['', root]])
+
+  const ensure = (path: string): VodNode => {
+    const hit = byPath.get(path)
+    if (hit) return hit
+    const segs = path.split('/')
+    const parentPath = segs.slice(0, -1).join('/')
+    const parent = ensure(parentPath)
+    const node: VodNode = {
+      label: segs[segs.length - 1],
+      path,
+      depth: segs.length,
+      vods: [],
+      children: [],
+    }
+    parent.children.push(node)
+    byPath.set(path, node)
+    return node
+  }
+
+  for (const v of list) {
+    const rel = relDirOf(v).replace(/^\/+|\/+$/g, '')
+    ensure(rel).vods.push(v)
+  }
+
+  // 同一层的目录按自然顺序（01 < 02 < 10），条目按名称
+  const sortNode = (n: VodNode) => {
+    n.children.sort((a, b) => a.label.localeCompare(b.label, 'zh-CN', { numeric: true }))
+    n.vods.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN', { numeric: true }))
+    n.children.forEach(sortNode)
+  }
+  sortNode(root)
+  return root.children
+}
+
+// 折叠状态：key = 节点完整路径，true 表示已折叠
+const collapsed = ref<Set<string>>(new Set())
+
+const vodTree = computed(() => buildVodTree(vods.value))
+
+/** 统计某个节点下（含子目录）的影视总数与集数 */
+function countUnder(n: VodNode): { vods: number; eps: number } {
+  let nv = n.vods.length
+  let ne = n.vods.reduce((a, v) => a + v.eps.length, 0)
+  for (const c of n.children) {
+    const r = countUnder(c)
+    nv += r.vods
+    ne += r.eps
+  }
+  return { vods: nv, eps: ne }
+}
+
+function toggleNode(path: string) {
+  const s = new Set(collapsed.value)
+  if (s.has(path)) s.delete(path)
+  else s.add(path)
+  collapsed.value = s
+}
+
+const isCollapsed = (path: string) => collapsed.value.has(path)
+
+/** 正在扫描或刚换源时，重置折叠状态（全部展开） */
+function resetCollapsed() {
+  collapsed.value = new Set()
+}
+
+/** 一行渲染项：目录行或影视行 */
+type Row =
+  | { type: 'dir'; node: VodNode }
+  | { type: 'vod'; vod: WebdavVod; depth: number }
+
+/**
+ * 把树按当前折叠状态压平成渲染列表。
+ * 不用递归组件：单文件里递归要额外抽组件，压平更简单也不会踩栈深度。
+ */
+const vodRows = computed<Row[]>(() => {
+  const out: Row[] = []
+  const walk = (nodes: VodNode[]) => {
+    for (const n of nodes) {
+      out.push({ type: 'dir', node: n })
+      if (!isCollapsed(n.path)) {
+        // 目录下直接挂的影视（如「电影」目录里的一堆片子）
+        for (const v of n.vods) out.push({ type: 'vod', vod: v, depth: n.depth })
+        walk(n.children)
+      }
+    }
+  }
+  walk(vodTree.value)
+  return out
+})
+
+/** 目录行显示的统计文案 */
+function dirMeta(n: VodNode): string {
+  const c = countUnder(n)
+  return `${c.vods} 部 · ${c.eps} 集`
 }
 
 function vodMeta(v: WebdavVod): string {
@@ -461,14 +598,32 @@ function back() {
       </div>
       <div v-else-if="!vods.length" class="wd-empty">{{ msg || '没有识别到视频资源。' }}</div>
       <div v-else class="vod-list">
-        <div v-for="(v, i) in vods" :key="v.name + i" class="vod-row" @click="openEp(v)">
-          <span class="v-kind">{{ v.kind === 'series' ? '剧集' : '电影' }}</span>
-          <div class="v-info">
-            <div class="v-name">{{ v.name }}</div>
-            <div class="v-meta">{{ vodMeta(v) }}</div>
+        <!-- 保留原目录层级：目录行可折叠，影视行缩进在所属目录下 -->
+        <template v-for="(row, i) in vodRows" :key="row.type === 'dir' ? 'd:' + row.node.path : 'v:' + (row.vod.dir + '#') + i">
+          <div
+            v-if="row.type === 'dir'"
+            class="dir-row"
+            :style="{ paddingLeft: 14 + (row.node.depth - 1) * 16 + 'px' }"
+            @click="toggleNode(row.node.path)"
+          >
+            <span class="dir-caret" :class="{ closed: isCollapsed(row.node.path) }">▾</span>
+            <span class="dir-name">{{ row.node.label }}</span>
+            <span class="dir-meta">{{ dirMeta(row.node) }}</span>
           </div>
-          <span class="v-go">播放</span>
-        </div>
+          <div
+            v-else
+            class="vod-row"
+            :style="{ marginLeft: 14 + row.depth * 16 + 'px' }"
+            @click="openEp(row.vod)"
+          >
+            <span class="v-kind">{{ row.vod.kind === 'series' ? '剧集' : '电影' }}</span>
+            <div class="v-info">
+              <div class="v-name">{{ row.vod.name }}</div>
+              <div class="v-meta">{{ vodMeta(row.vod) }}</div>
+            </div>
+            <span class="v-go">播放</span>
+          </div>
+        </template>
       </div>
     </div>
 
@@ -663,6 +818,45 @@ function back() {
   overflow-y: auto;
 }
 .entry-row,
+/* 目录行：表示一层目录，可折叠 */
+.dir-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 14px;
+  margin-bottom: 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  background: var(--card);
+  border-left: 2px solid var(--border);
+  user-select: none;
+}
+.dir-row:hover { border-left-color: var(--selected); }
+.dir-caret {
+  font-size: 12px;
+  color: var(--dim);
+  width: 12px;
+  flex-shrink: 0;
+  transition: transform 0.15s;
+  display: inline-block;
+}
+.dir-caret.closed { transform: rotate(-90deg); }
+.dir-name {
+  font-size: 14px;
+  color: var(--txt);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dir-meta {
+  font-size: 11.5px;
+  color: var(--dim);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
 .vod-row {
   display: flex;
   align-items: center;

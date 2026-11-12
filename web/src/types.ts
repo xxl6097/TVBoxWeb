@@ -167,7 +167,14 @@ export interface WebdavVod {
   name: string
   kind: string
   year: string
+  /** 所在绝对目录（URL 路径） */
   dir: string
+  /**
+   * 相对挂载根的目录路径（已解码），如「凡人/01 风起天南」。
+   * 用于还原目录层级分组；直接位于挂载根下时为空串。
+   * 老版本后端不返回该字段，前端会退化为按 dir 推断。
+   */
+  relDir?: string
   eps: WebdavEp[]
 }
 

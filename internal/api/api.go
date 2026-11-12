@@ -35,7 +35,7 @@ import (
 
 // 版本信息（通过 ldflags -X 注入，默认值兜底）。
 var (
-	AppVersion = "v1.10.1"
+	AppVersion = "v1.11.0"
 	BuildTime  = "unknown"
 )
 

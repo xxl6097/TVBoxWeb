@@ -230,3 +230,128 @@ func nameList(vods []model.WebdavVod) []string {
 	}
 	return out
 }
+
+// ---------- 目录层级（relDir）----------
+
+// relPathOf 把绝对目录裁成相对挂载根的多级路径，并解码中文。
+func TestRelPathOf(t *testing.T) {
+	mount := "/dav/迅雷下载"
+	cases := map[string]string{
+		"/dav/迅雷下载":            "",
+		"/dav/迅雷下载/":           "",
+		"/dav/迅雷下载/凡人":         "凡人",
+		"/dav/迅雷下载/凡人/01 风起天南": "凡人/01 风起天南",
+		"/dav/迅雷下载/电影":         "电影",
+		"/other/path/xxx":      "", // 不在挂载根下 → 空串，不瞎猜
+	}
+	for in, want := range cases {
+		// 输入是 URL 路径，先把中文编码成真实 WebDAV 形式
+		enc := encodePath(in)
+		if got := relPathOf(enc, encodePath(mount)); got != want {
+			t.Errorf("relPathOf(%q) = %q，期望 %q", in, got, want)
+		}
+	}
+}
+
+// 识别结果必须带上 relDir，前端才能还原目录层级。
+func TestAggregateFillsRelDir(t *testing.T) {
+	// 挂载根就是 /dav/迅雷下载，与文件路径一致，relDir 才不会被裁成完整路径。
+	src := model.WebdavSource{ID: "t", Name: "t", URL: "https://dav.example.com/dav/迅雷下载/", User: "u", Pass: "p"}
+	root := "/dav/迅雷下载"
+	files := []model.WebdavEntry{
+		mkFile(root + "/凡人/01 风起天南/1.mp4"),
+		mkFile(root + "/凡人/02 燕家堡之战/1.mp4"),
+		mkFile(root + "/电影/某片.mp4"),
+		mkFile(root + "/根目录电影.mp4"),
+	}
+	vods := aggregate(src, files)
+	if len(vods) != 4 {
+		t.Fatalf("应为 4 部，实际 %d：%+v", len(vods), nameList(vods))
+	}
+	got := map[string]string{}
+	for _, v := range vods {
+		got[v.Name] = v.RelDir
+	}
+	want := map[string]string{
+		"01 风起天南":  "凡人/01 风起天南",
+		"02 燕家堡之战": "凡人/02 燕家堡之战",
+		"某片":       "电影",
+		"根目录电影":    "", // 直接在挂载根下
+	}
+	for name, w := range want {
+		if got[name] != w {
+			t.Errorf("%q 的 relDir = %q，期望 %q", name, got[name], w)
+		}
+	}
+}
+
+// 电影的 Dir 必须是「所在目录」，不能是文件路径本身。
+// （早期版本这里取错了，导致前端按目录分组时把电影当成一层目录。）
+func TestMovieDirIsDirectoryNotFile(t *testing.T) {
+	src := model.WebdavSource{ID: "t", Name: "t", URL: "https://dav.example.com/dav/迅雷下载/", User: "u", Pass: "p"}
+	root := "/dav/迅雷下载"
+	files := []model.WebdavEntry{
+		mkFile(root + "/电影/侏罗纪世界：重生-2025.mp4"),
+	}
+	vods := aggregate(src, files)
+	if len(vods) != 1 {
+		t.Fatalf("应为 1 部，实际 %d", len(vods))
+	}
+	v := vods[0]
+	if strings.HasSuffix(strings.ToLower(v.Dir), ".mp4") {
+		t.Fatalf("电影的 Dir 不应是文件路径，实际 %q", v.Dir)
+	}
+	if v.RelDir != "电影" {
+		t.Errorf("电影的 relDir 应为「电影」，实际 %q", v.RelDir)
+	}
+}
+
+// ---------- 网盘把视频文件误标成目录 ----------
+
+// hasVideoExt 只认真实视频扩展名，无扩展名必须返回 false。
+// （若返回 true，扫描时所有目录都会被当成视频文件，扫描直接瘫痪。）
+func TestHasVideoExt(t *testing.T) {
+	yes := []string{"1.mp4", "A.MKV", "x.avi", "b.rmvb", "c.wmv", "d.ts", "e.m2ts"}
+	no := []string{"凡人", "01 风起天南", "电影", "剧集", "noext", "file.", ".hidden"}
+	for _, n := range yes {
+		if !hasVideoExt(n) {
+			t.Errorf("hasVideoExt(%q) 应为 true", n)
+		}
+	}
+	for _, n := range no {
+		if hasVideoExt(n) {
+			t.Errorf("hasVideoExt(%q) 应为 false（否则目录会被当视频）", n)
+		}
+	}
+}
+
+// 极空间等网盘会把 .mp4 标成 IsDir=true。
+// 这种条目必须按文件处理，且它的 Dir 要取父目录，而不是文件自身路径。
+func TestVideoMarkedAsDirHandledAsFile(t *testing.T) {
+	src := model.WebdavSource{ID: "t", URL: "https://dav.example.com/dav/迅雷下载/", User: "u", Pass: "p"}
+	root := "/dav/迅雷下载"
+	// 模拟极空间的真实返回：.mp4 被标成 IsDir，且 href **带尾斜杠**
+	//（实测：href 以 "/" 结尾，直接 dirOf 会取到文件自身）
+	f := mkFile(root + "/电影/某片.mp4")
+	f.IsDir = true
+	f.Href = encodePath(root+"/电影/某片.mp4") + "/"
+	files := []model.WebdavEntry{f}
+
+	vods := aggregate(src, files)
+	if len(vods) != 1 {
+		t.Fatalf("应为 1 部，实际 %d", len(vods))
+	}
+	v := vods[0]
+	if v.Kind != "movie" {
+		t.Errorf("应为 movie，实际 %s", v.Kind)
+	}
+	if strings.HasSuffix(strings.ToLower(v.Dir), ".mp4") {
+		t.Errorf("Dir 不应是文件路径，实际 %q", v.Dir)
+	}
+	if v.RelDir != "电影" {
+		t.Errorf("relDir 应为「电影」，实际 %q", v.RelDir)
+	}
+	if len(v.Eps) != 1 {
+		t.Errorf("应有 1 集，实际 %d", len(v.Eps))
+	}
+}

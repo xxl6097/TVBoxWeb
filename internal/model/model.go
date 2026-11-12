@@ -46,10 +46,10 @@ type RawSite struct {
 }
 
 type RawParse struct {
-	Name string       `json:"name"`
-	Type int          `json:"type"`
-	URL  string       `json:"url"`
-	Ext  RawParseExt  `json:"ext"`
+	Name string      `json:"name"`
+	Type int         `json:"type"`
+	URL  string      `json:"url"`
+	Ext  RawParseExt `json:"ext"`
 }
 
 type RawParseExt struct {
@@ -132,20 +132,20 @@ type Category struct {
 }
 
 type Vod struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Pic       string `json:"pic"`
-	Remark    string `json:"remark"`
-	Year      string `json:"year"`
-	Area      string `json:"area"`
-	Actor     string `json:"actor"`
-	Director  string `json:"director"`
-	Content   string `json:"content"`
-	TypeName  string `json:"typeName"`
-	From      string `json:"from"`
-	PlayURL   string `json:"playUrl"`
-	SiteKey   string `json:"siteKey"`
-	SiteName  string `json:"siteName"`
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Pic      string `json:"pic"`
+	Remark   string `json:"remark"`
+	Year     string `json:"year"`
+	Area     string `json:"area"`
+	Actor    string `json:"actor"`
+	Director string `json:"director"`
+	Content  string `json:"content"`
+	TypeName string `json:"typeName"`
+	From     string `json:"from"`
+	PlayURL  string `json:"playUrl"`
+	SiteKey  string `json:"siteKey"`
+	SiteName string `json:"siteName"`
 }
 
 type Episode struct {
@@ -227,19 +227,24 @@ type WebdavEntry struct {
 }
 
 type WebdavVod struct {
-	Name string     `json:"name"`
-	Kind string     `json:"kind"` // movie / series
-	Year string     `json:"year"`
-	Dir  string     `json:"dir"`
-	Eps  []WebdavEp `json:"eps"`
+	Name string `json:"name"`
+	Kind string `json:"kind"` // movie / series
+	Year string `json:"year"`
+	// Dir 是条目所在的绝对目录（URL 路径，已保留原有编码）。
+	Dir string `json:"dir"`
+	// RelDir 是相对「网盘挂载根」的目录路径（已 URL 解码），如「凡人/01 风起天南」。
+	// 前端用它还原目录层级分组，避免把子目录里的内容一路平铺。
+	// 直接放在挂载根下的条目为空串。
+	RelDir string     `json:"relDir"`
+	Eps    []WebdavEp `json:"eps"`
 }
 
 type WebdavEp struct {
-	Name     string `json:"name"`
-	URL      string `json:"url"`
-	Href     string `json:"href"`
-	Season   int    `json:"season"`
-	Episode  int    `json:"episode"`
+	Name    string `json:"name"`
+	URL     string `json:"url"`
+	Href    string `json:"href"`
+	Season  int    `json:"season"`
+	Episode int    `json:"episode"`
 }
 
 type WdHistory struct {
