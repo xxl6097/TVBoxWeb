@@ -108,6 +108,9 @@ void switchSubtitle // 内嵌字幕轨道切换，保留给将来 UI 使用
 // ===== 倍速播放 =====
 const playbackRate = ref(1.0)
 const PLAYBACK_RATES = [0.5, 0.75, 1, 1.25, 1.5, 2]
+// 1 → "1"，1.25 → "1.25"（不要显示成 1.0x 那种多余小数）
+const rateLabel = computed(() => String(playbackRate.value))
+
 let introDone = false
 let outroFired = false
 let skipTimer = 0
@@ -129,7 +132,6 @@ const SEEK_THROTTLE = 5000     // 最终落盘节流 5s，避免频繁网络请�
 let lastSeekMs = 0             // 上次成功 seek 的时间戳
 let seekPendingTimer = 0       // 等待中的 seek timer
 
-const isLivePlaying = computed(() => isLive)
 const playPauseText = computed(() => (playing.value ? '暂停' : '播放'))
 const muteText = computed(() => (muted.value ? '取消静音' : '静音'))
 const volPct = computed(() => (muted.value ? '静音' : Math.round(volume.value * 100) + '%'))
@@ -1084,9 +1086,11 @@ let autoplayTimer = 0
 let castHandlers: { onConnect: () => void; onDisconnect: () => void } | null = null
 
 async function jumpToEpisode(i: number) {
-  if (i === player.idx) { showEps.value = false; return }
-  await switchEpisode(i - player.idx)
+  // 先关抽屉再切集：switchEpisode 里要解析地址、重新建流，可能卡几秒。
+  // 原来放在 await 之后，抽屉会一直开着，用户以为没点中，容易连点好几下。
   showEps.value = false
+  if (i === player.idx) return
+  await switchEpisode(i - player.idx)
 }
 
 async function switchEpisode(delta: number) {
@@ -1326,7 +1330,26 @@ function fmtSec(sec: number): string {
 }
 
 // 键盘
+/**
+ * 当前焦点是否在可编辑元素上。
+ *
+ * 播放页里有输入框（画质面板的字幕地址、选集搜索等），在这些地方打字时
+ * 不能把按键当成播放器快捷键 —— 否则输入 "m" 会静音、敲空格会暂停、
+ * 按方向键会跳进度，输入框基本没法用。
+ */
+function isTypingTarget(el: EventTarget | null): boolean {
+  const node = el as HTMLElement | null
+  if (!node || !node.tagName) return false
+  const tag = node.tagName.toUpperCase()
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true
+  return !!node.isContentEditable
+}
+
 function onKey(e: KeyboardEvent) {
+  // 输入态下完全放行，连 preventDefault 都不做
+  if (isTypingTarget(e.target)) return
+  // 带修饰键的（Ctrl+C 等）也不劫持
+  if (e.ctrlKey || e.metaKey || e.altKey) return
   if (e.key === ' ' || e.key === 'Enter') {
     e.preventDefault()
     if (!showOsd.value) popOsd()
@@ -1430,8 +1453,17 @@ onUnmounted(() => {
           <div class="vol-slider" @pointerdown="onVolDown" @pointermove="onVolMove" @pointerup="onVolUp">
             <div class="vol-track"><div class="vol-fill" :style="{ width: (muted ? 0 : volume * 100) + '%' }"></div></div>
           </div>
+          <button class="ctl" @click="togglePlaySpeed" :title="`当前 ${rateLabel}x，点击切换倍速`">{{ rateLabel }}x</button>
           <button class="ctl" @click="showQ = !showQ">画质</button>
           <button v-if="!isLive && player.count > 1" class="ctl" @click="showEps = true">选集</button>
+          <!-- 自动连播开关：原来只有移动端有，桌面端播完只好被动连播，
+               想逐集看完再停下也没法设置。 -->
+          <button
+            v-if="!isLive && player.hasNext"
+            class="ctl"
+            :title="autoPlayNext ? '播完自动下一集，点击改为手动' : '播完停在当集，点击改为自动'"
+            @click="autoPlayNext = !autoPlayNext"
+          >{{ autoPlayNext ? '自动连播' : '手动切集' }}</button>
           <button v-if="supportsCast()" class="ctl" :class="{ primary: castConnected }" @click="toggleCast">{{ castConnected ? '断开投屏' : '投屏' }}</button>
           <button class="ctl" @click="switchEpisode(1)">{{ isLive ? '下一台' : '下一集' }}</button>
           <button class="ctl fullscreen-btn" :title="isFullscreen ? '退出全屏 (F)' : '全屏 (F)'" @click="toggleFullscreen">
@@ -1473,9 +1505,18 @@ onUnmounted(() => {
       @outro-skip="setOutroSkip"
       @mark-skip="markSkip"
     />
-  </div>
 
-  <!-- 移动端：视频 + 控制面板垂直流式布局 -->
+    <!-- 选集抽屉：桌面端也要挂。
+         之前只挂在移动端模板里，桌面端点「选集」只把 showEps 置 true，
+         没有任何组件去渲染它 —— 按钮等于点了没反应。 -->
+    <EpisodeDrawer
+      v-model="showEps"
+      :title="`选集 · ${player.vodTitle || ''}（${player.count} 集）`"
+      :episodes="player.eps"
+      :current-idx="player.idx"
+      @select="jumpToEpisode"
+    />
+  </div>
   <div v-else ref="playerEl" class="m-player" :class="{ 'm-fullscreen': isFullscreen }">
     <!-- 视频区域 -->
     <div
@@ -1534,18 +1575,27 @@ onUnmounted(() => {
           </div>
           <div v-if="dragging" class="m-seek-hint">{{ fmtMs(previewMs) }}</div>
           <div class="m-fs-controls">
-            <span class="m-time">{{ fmtMs(curMs) }}</span>
-            <button class="m-ctl-icon" @click="seekBy(-1)">
+            <!-- 全屏下也要能切集，否则每换一集都得先退出全屏 -->
+            <button v-if="player.count > 1" class="m-ctl-icon" :title="isLive ? '上一台' : '上一集'" @click="switchEpisode(-1)">
               <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="11 17 2 12 11 7"/><line x1="22" y1="7" x2="22" y2="17"/><polyline points="22 17 13 12 22 7"/></svg>
+            </button>
+            <span class="m-time">{{ fmtMs(curMs) }}</span>
+            <!-- 这两个是「快退/快进 10 秒」，图标要用回转箭头，
+                 原来画的是「上/下一集」的双三角，和实际功能不符，容易误导。 -->
+            <button class="m-ctl-icon" title="快退 10 秒" @click="seekBy(-1)">
+              <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-3.96"/></svg>
             </button>
             <button class="m-play-btn" @click="togglePlay">
               <svg v-if="!playing" viewBox="0 0 24 24" width="32" height="32" fill="currentColor"><polygon points="5 3 19 12 5 21"/></svg>
               <svg v-else viewBox="0 0 24 24" width="32" height="32" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
             </button>
-            <button class="m-ctl-icon" @click="seekBy(1)">
-              <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="13 17 22 12 13 7"/><line x1="2" y1="7" x2="2" y2="17"/><polyline points="2 17 11 12 2 7"/></svg>
+            <button class="m-ctl-icon" title="快进 10 秒" @click="seekBy(1)">
+              <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-.49-3.96"/></svg>
             </button>
             <span class="m-time">{{ durMs > 0 ? fmtMs(durMs) : (isLive ? '直播' : '--:--') }}</span>
+            <button v-if="player.count > 1" class="m-ctl-icon" :title="isLive ? '下一台' : '下一集'" @click="switchEpisode(1)">
+              <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="13 17 22 12 13 7"/><line x1="2" y1="7" x2="2" y2="17"/><polyline points="2 17 11 12 2 7"/></svg>
+            </button>
             <button class="m-icon-btn" style="margin-left:auto" @click="showQ = !showQ">⚙</button>
           </div>
         </div>
@@ -1608,6 +1658,10 @@ onUnmounted(() => {
           <span class="m-aux-icon">{{ autoPlayNext ? '▶' : '⏸' }}</span>
           <span>{{ autoPlayNext ? '自动连播' : '手动切集' }}</span>
         </button>
+        <button class="m-aux-btn" @click="togglePlaySpeed">
+          <span class="m-aux-icon">{{ rateLabel }}x</span>
+          <span>倍速</span>
+        </button>
         <button class="m-aux-btn" @click="showQ = !showQ">
           <span class="m-aux-icon">⚙</span>
           <span>画质</span>
@@ -1617,11 +1671,11 @@ onUnmounted(() => {
           <span>选集</span>
         </button>
         <button v-if="supportsCast()" class="m-aux-btn" @click="toggleCast">
-          <span class="m-aux-icon">⧉</span>
+          <span class="m-aux-icon">{{ castConnected ? '⇄' : '⤴' }}</span>
           <span>{{ castConnected ? '断开投屏' : '投屏' }}</span>
         </button>
         <button v-if="supportsPip()" class="m-aux-btn" @click="togglePip">
-          <span class="m-aux-icon">{{ isPip ? '⤦' : '⧉' }}</span>
+          <span class="m-aux-icon">{{ isPip ? '▣' : '⧉' }}</span>
           <span>{{ isPip ? '退出PiP' : '画中画' }}</span>
         </button>
         <button class="m-aux-btn" @click="toggleFullscreen">

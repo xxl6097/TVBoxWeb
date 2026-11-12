@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 选集抽屉：关键词过滤 + 网格快速跳集。
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 export interface EpisodeItem {
   name?: string
@@ -20,6 +20,8 @@ const emit = defineEmits<{
 }>()
 
 const keyword = ref('')
+// 每次打开都从完整列表开始：上次搜过「12」，下次打开只剩一集会很困惑
+watch(() => props.modelValue, (open) => { if (open) keyword.value = '' })
 
 const filtered = computed(() => {
   const k = keyword.value.trim().toLowerCase()
@@ -37,8 +39,9 @@ const filtered = computed(() => {
   <el-dialog
     :model-value="props.modelValue"
     :title="props.title"
-    width="620px"
+    width="min(620px, 94vw)"
     append-to-body
+    destroy-on-close
     @update:model-value="emit('update:modelValue', $event)"
   >
     <el-input v-model="keyword" size="small" clearable placeholder="输入集数或名称快速定位" />
