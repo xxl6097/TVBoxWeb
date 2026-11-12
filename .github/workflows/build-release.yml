@@ -91,6 +91,10 @@ jobs:
         working-directory: web
         run: npm run check:seek
 
+      - name: 前端回归检查（设置页手机端适配）
+        working-directory: web
+        run: npm run check:mobile
+
       - name: 交叉编译后端（内嵌前端）
         env:
           GOOS: ${{ matrix.os }}

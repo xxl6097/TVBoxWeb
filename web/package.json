@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "check:panel": "node scripts/check-panel.cjs",
     "check:wd-auth": "node scripts/check-wd-auth.cjs",
-    "check:seek": "node scripts/check-seek.cjs"
+    "check:seek": "node scripts/check-seek.cjs",
+    "check:mobile": "node scripts/check-mobile.cjs"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.1",

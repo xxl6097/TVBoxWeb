@@ -680,7 +680,7 @@ async function clearHistory() {
                 type="password"
                 show-password
                 placeholder="留空表示未启用口令"
-                style="max-width: 260px"
+                class="token-input"
               />
               <el-button size="small" type="primary" @click="saveAuthToken">保存</el-button>
             </div>
@@ -796,7 +796,7 @@ async function clearHistory() {
   </div>
 
   <!-- ========== 识别影视弹窗 ========== -->
-  <el-dialog v-model="wdScanOpen" title="识别影视" width="520px" append-to-body>
+  <el-dialog v-model="wdScanOpen" title="识别影视" width="min(520px, 92vw)" append-to-body>
     <div class="wd-form">
       <p class="scan-tip">递归扫描所选网盘的目录树，把视频文件按命名规范聚合成「电影 / 剧集」，识别完成后可在网盘页选集播放。</p>
 
@@ -839,7 +839,7 @@ async function clearHistory() {
   <el-dialog
     v-model="wdEditOpen"
     :title="wdForm.id ? '编辑挂载' : '添加挂载'"
-    width="560px"
+    width="min(560px, 92vw)"
     append-to-body
   >
     <div class="wd-form">
@@ -1053,18 +1053,6 @@ async function clearHistory() {
   flex-direction: column;
   gap: 7px;
 }
-.scan-label {
-  font-size: 12px;
-  letter-spacing: 0.06em;
-  color: var(--sub);
-}
-.scan-cached {
-  margin: 2px 0 0;
-  font-size: 12.5px;
-  line-height: 1.6;
-  color: var(--dim);
-}
-
 /* ===== 识别影视 ===== */
 .srow-disabled {
   opacity: 0.55;
@@ -1120,6 +1108,9 @@ async function clearHistory() {
   align-items: center;
 }
 
+/* 访问口令输入框：桌面端限宽，移动端拉满（见 media 查询） */
+.token-input { max-width: 260px; }
+
 /* ===== 移动端响应式 ===== */
 @media (max-width: 640px) {
   /* 双栏布局 → 单栏（上方tab + 下方内容） */
@@ -1129,44 +1120,167 @@ async function clearHistory() {
     overflow: visible;
   }
   .nav-divider { display: none; }
+  /* 导航横向滚动但要能看出可滚：加个右侧渐隐提示 */
   .settings-nav {
     width: 100%;
-    padding: 8px 8px 0;
+    padding: 8px 12px 4px;
     overflow-x: auto;
-    overflow-y: visible;
+    overflow-y: hidden;
     display: flex;
-    gap: 4px;
+    gap: 6px;
     white-space: nowrap;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    /* 左右各留一点内阴影，暗示可以滑动 */
+    mask-image: linear-gradient(to right, transparent 0, #000 6px, #000 calc(100% - 14px), transparent 100%);
+    -webkit-mask-image: linear-gradient(to right, transparent 0, #000 6px, #000 calc(100% - 14px), transparent 100%);
   }
-  /* 导航项横排 tab 样式 */
+  .settings-nav::-webkit-scrollbar { display: none; }
+  /* 导航项横排 tab 样式（高度 ≥44px 满足触控规范） */
   .nav-item {
     height: auto;
-    padding: 8px 12px;
-    border-radius: 20px;
+    min-height: 44px;
+    padding: 10px 14px;
+    border-radius: 22px;
     flex-shrink: 0;
     margin-bottom: 0;
+    display: flex;
+    align-items: center;
   }
   .nav-bar { display: none; }
-  .nav-label { font-size: 13px; }
-  .nav-badge { font-size: 10px; padding: 0 4px; }
+  .nav-label { font-size: 14px; }
+  .nav-badge { font-size: 10px; padding: 0 5px; margin-left: 4px; }
+
   .settings-content {
-    padding: 0 12px 40px 12px;
+    padding: 4px 12px 40px 12px;
     overflow: visible;
   }
   .card { padding: 0; }
-  .srow { padding: 12px 14px; min-height: 48px; }
-  .srow-right {
-    flex-direction: column;
-    align-items: flex-start;
+
+  /* ---- 设置行：手机上改为「标题在上、内容在下」的两段式 ----
+     原来是 flex 单行，标题和右侧内容抢宽度：标题被压到 32~96px，
+     右侧只剩 8px（箭头），完全没法看。 */
+  .srow {
+    padding: 12px 14px;
+    min-height: 48px;
+    flex-wrap: wrap;
     gap: 8px;
-    max-width: 100%;
   }
-  .srow-right .el-input { width: 100% !important; }
-  .section-label { padding: 12px 14px 4px; }
-  .srow-sub-body { flex-wrap: wrap; }
+  /* 标题区占满整行，右侧内容换到下一行 */
+  .srow-left {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+  .srow-title {
+    font-size: 15px;
+    line-height: 1.45;
+    /* 长标题允许折行，不要截断 */
+    word-break: break-word;
+  }
+  .srow-val,
+  .srow-dim {
+    font-size: 12.5px;
+    line-height: 1.5;
+    word-break: break-word;
+  }
+  /* 允许长 URL / 长文本折行，不再用 ellipsis 单行截断 */
+  .srow-url {
+    max-width: 100%;
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    word-break: break-all;
+  }
+
+  /* 右侧/值区域：占满整行，左对齐 */
+  .srow-right {
+    flex: 1 1 100%;
+    width: auto;
+    min-width: 0;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+  .srow-right .el-input,
+  .srow-right .el-select { width: 100% !important; max-width: 100% !important; }
+  /* 访问口令输入框：手机上直接占满一行（内联 max-width 已移除） */
+  .token-input { max-width: 100% !important; width: 100%; }
+  .srow-right .el-button { width: 100%; margin-left: 0 !important; }
+
+  /* 纯值型行（如「版本 v1.10.0」）：值紧跟标题下方，不浪费一整行 */
+  .srow > .srow-val,
+  .srow > .srow-dim {
+    flex: 1 1 100%;
+  }
+
+  /* 只有「标题 + 箭头」的行（如导出备份、测速排行）：
+     保持单行，标题占满、箭头贴右，不要换行。 */
+  .srow > .srow-title:first-child {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .srow > .arrow {
+    margin-left: auto;
+    flex-shrink: 0;
+    align-self: center;
+  }
+
+  /* 带 srow-left 的行（标题+副标题，右侧箭头）：
+     箭头绝对定位贴右居中，标题区占满整行，避免箭头掉到第二行。
+     :has() 在 Safari 15.4+ / Chrome 105+ 都有，降级时箭头会自然落到
+     标题下方右侧 —— 仍可点，只是略占空间。 */
+  .srow:has(> .srow-left) {
+    position: relative;
+    padding-right: 34px;
+  }
+  .srow:has(> .srow-left) > .arrow {
+    position: absolute;
+    right: 14px;
+    top: 50%;
+    transform: translateY(-50%);
+    margin: 0;
+  }
+
+  .section-label { padding: 14px 14px 6px; }
+  .srow-sub { padding: 12px 14px; }
+  .srow-sub-head { flex-wrap: wrap; gap: 8px; }
+  .srow-sub-body {
+    flex-direction: column;
+    align-items: stretch;
+    flex-wrap: nowrap;
+    width: 100%;
+  }
+  .srow-sub-body .el-input { width: 100% !important; }
+  .srow-sub-body .el-button { width: 100%; margin-left: 0 !important; }
+  .sub-name { white-space: normal; word-break: break-word; }
+
   /* 站源列表在手机上紧凑 */
-  .site-meta { max-width: none; }
+  .site-meta { max-width: none; word-break: break-all; }
   .site-row { padding: 10px 14px; }
+  .site-name { font-size: 14px; }
+
+  /* 主题切换按钮：加大触控区 */
+  .theme-chips { gap: 8px; width: 100%; }
+  .theme-chips .chip {
+    min-height: 40px;
+    padding: 0 16px;
+    display: inline-flex;
+    align-items: center;
+  }
+
+  /* 说明文字：手机上左右留白小一点 */
+  .note { padding-left: 14px !important; padding-right: 14px !important; }
+
+  /* 隐私条款块 */
+  .privacy-block { padding: 12px 14px 14px; font-size: 13px; line-height: 1.7; }
+
+  /* 站源的小按钮（订阅/导入/保存）拉到 40px 高 */
+  .srow .el-button--small,
+  .srow-sub-body .el-button--small {
+    min-height: 40px;
+    padding: 0 16px;
+  }
+  .srow .el-input--small .el-input__wrapper { min-height: 40px; }
 }
 .theme-chips { display: flex; gap: 6px; flex-wrap: wrap; }
 .theme-chips .chip { cursor: pointer; }
