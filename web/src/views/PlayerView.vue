@@ -116,6 +116,11 @@ let flashTimer = 0
 let volTimer = 0
 let leave = false
 let lastSaveMs = 0
+/**
+ * 续播时要用作起点的位置（毫秒）。initPlayer 消费一次后清零。
+ * 必须在第一次 proxiedFinal() 之前就位，转封装流才能一次从目标位置起转。
+ */
+let pendingResumeMs = 0
 let saveTimer = 0 // savePos 防抖 timer
 
 // ===== Seek 防抖优化（三层防抖）=====
@@ -226,6 +231,12 @@ function toggleFullscreen() {
 }
 
 function onFullscreenChange() {
+  // 移动端全屏走 CSS 类（.m-fullscreen），与原生 Fullscreen API 无关。
+  // 这里如果也去读 document.fullscreenElement，某些浏览器（尤其是从原生全屏
+  // 退回、或外部触发的 fullscreenchange）会把 isFullscreen 改写成 false，
+  // 结果全屏 OSD 和底部面板同时渲染 —— 界面上就出现上下两条进度条。
+  // 所以移动端直接跳过，状态只由 toggleFullscreen 自己维护。
+  if (isMobile.value) return
   const doc = document as any
   isFullscreen.value = !!(
     doc.fullscreenElement ||
@@ -446,6 +457,15 @@ function proxiedFinal(): string {
 async function initPlayer() {
   if (!finalUrl || !videoEl.value) return
   const vid = videoEl.value
+  // 续播：必须在第一次 proxiedFinal() 之前把起点塞进 remuxSeek，
+  // 这样转封装那条流一次就从目标位置起转，不用「先拉 0 秒再跳」。
+  // 之前是等 loadedmetadata 之后再 applySeek，等于白白多请求一次，
+  // 而且那次跳转常常被 seekingRemux 的防重入窗口吃掉 → 续播失效。
+  if (player.seek > 0 && !isLive) {
+    pendingResumeMs = player.seek
+    player.seek = 0
+    remuxSeek.value = Math.max(0, Math.floor(pendingResumeMs / 1000))
+  }
   const src = proxiedFinal()
   if (src.includes('.m3u8') || via.value === '直播直连' || via.value === '补全 m3u8') {
     const HlsCls = await loadHls()
@@ -514,14 +534,18 @@ function bindVideoEvents(vid: HTMLVideoElement) {
     buffering.value = false
     playing.value = true
     popOsd()
-    // 网盘续播：起播后 seek 到上次进度。
-    // 转封装模式下走 applySeek（要重新请求），不能直接改 currentTime。
-    // player.seek 先清零再调用，避免重新加载后 loadedmetadata 再次触发造成循环。
-    if (player.seek > 0 && !isLive) {
-      const t = player.seek / 1000
-      player.seek = 0
+    // 网盘续播。
+    // 转封装模式：initPlayer 已经把起点塞给 remuxSeek，这条流本身就是
+    //   从目标位置起转的，vid.currentTime 从 0 开始算，不需要再跳，
+    //   这里只把进度条和提示补上。
+    // 普通流：直接改 currentTime 即可。
+    if (pendingResumeMs > 0 && !isLive) {
+      const ms = pendingResumeMs
+      pendingResumeMs = 0
+      curMs.value = ms
+      lastSaveMs = ms
       app.showTip('已从上次位置继续播放')
-      applySeek(t)
+      if (!remuxMode.value) vid.currentTime = ms / 1000
     }
     if (introSkipSec.value > 0 && !introDone && !isLive) {
       const skipMs = introSkipSec.value * 1000
@@ -532,8 +556,11 @@ function bindVideoEvents(vid: HTMLVideoElement) {
     // 转封装模式下服务端从 seek 点起转，视频时间戳从 0 开始，
     // 这里把跳转起点加回去，进度条与时间显示才是真实位置。
     curMs.value = (remuxMode.value ? remuxSeek.value : 0) * 1000 + vid.currentTime * 1000
-    // 进度保存：节流（5 秒）+ 防抖（300ms），保证最后一次 seek 后一定保存
-    if (curMs.value - lastSaveMs > 5000) {
+    // 进度保存：节流（5 秒）+ 防抖（300ms），保证最后一次 seek 后一定保存。
+    // 用绝对差值判断，不能写成 curMs - lastSaveMs > 5000：
+    // 往回拖进度时 curMs 会突然变小，差值变负，条件永远不成立，
+    // 于是「看了十分钟再往回拖几分钟」这段完全不落盘，退出后就从头开始。
+    if (Math.abs(curMs.value - lastSaveMs) > 5000) {
       lastSaveMs = curMs.value
       if (saveTimer) clearTimeout(saveTimer)
       saveTimer = window.setTimeout(() => { savePos(); saveTimer = 0 }, 300)
@@ -789,12 +816,14 @@ function onMouseMove() {
 const dragging = ref(false)
 const previewMs = ref(-1)
 // 进度条 DOM 引用：拖拽时用它算比例（window 监听拿不到 currentTarget）。
-// 用函数式 ref 而不是 ref="xxx"：桌面上有一个进度条，移动端模板里有两处，
-// 同名 ref 只会保留最后一个，容易取错元素。
-const progressEl = ref<HTMLElement>()
-function setProgressEl(el: any) {
-  if (el instanceof HTMLElement) progressEl.value = el
-}
+//
+// 注意：移动端模板里进度条可能出现两处（全屏浮动 OSD 一条 + 视频下方面板一条），
+// 桌面端也有一处。所有兄弟元素共用一个 ref 时，后挂载的会覆盖先挂载的，
+// pointerdown 时如果取到的是另一条（可能宽高/位置完全不同，甚至已被 v-if 移除），
+// 比例就算歪了 —— 表现为「拖着没反应」或「下面那条不动」。
+// 因此这里不在渲染期收集元素，而是在 pointerdown 时用 currentTarget 就地锁定，
+// 拖动全程只认这一个基准，彻底摆脱「谁最后挂载」的不确定性。
+const dragBarEl = ref<HTMLElement | null>(null)
 // ?debug=1 打开拖拽诊断日志
 const DEBUG = route.query.debug === '1'
 
@@ -809,6 +838,8 @@ function onProgressDown(e: PointerEvent) {
   if (!prepared.value || durMs.value <= 0 || isLive) return
   e.preventDefault()
   dragging.value = true
+  // 锁定本次拖动所用的进度条（currentTarget 一定是用户真正按下的那一条）
+  dragBarEl.value = e.currentTarget as HTMLElement
   previewMs.value = durMs.value * ratioFromEvent(e)
 
   // move/up 绑到 window 而不是进度条自己：
@@ -829,7 +860,7 @@ function ratioFromPoint(clientX: number, el: HTMLElement): number {
 
 function onProgressMove(e: PointerEvent) {
   if (!dragging.value) return
-  const el = progressEl.value
+  const el = dragBarEl.value
   if (!el) return
   previewMs.value = durMs.value * ratioFromPoint(e.clientX, el)
 }
@@ -930,7 +961,10 @@ function onVolUp() {
 function seekBy(dir: number) {
   const vid = videoEl.value
   if (!vid || !prepared.value || isLive) return
-  let t = vid.currentTime + (dir * SEEK_STEP) / 1000
+  // 转封装模式下 vid.currentTime 是从 seek 起点算起的相对时间，
+  // 必须加上 remuxSeek 偏移才是整片里的绝对位置，否则前后跳会越跳越偏。
+  const base = remuxMode.value ? remuxSeek.value : 0
+  let t = base + vid.currentTime + (dir * SEEK_STEP) / 1000
   if (t < 0) t = 0
   if (durMs.value > 0 && t > durMs.value / 1000 - 1) t = durMs.value / 1000 - 1
   applySeek(t)
@@ -1068,6 +1102,12 @@ async function switchEpisode(delta: number) {
   durMs.value = 0
   prepared.value = false
   playing.value = false
+  // 切集/换源必须把转封装偏移和保存节流基线一起归零：
+  // 否则上一集如果拖到 10 分钟再切下一集，下一集会从第 10 分钟起播；
+  // lastSaveMs 留着旧值也会让新一集的前 5 秒不落盘。
+  remuxSeek.value = 0
+  pendingResumeMs = 0
+  lastSaveMs = 0
   introDone = false
   outroFired = false
   skipShow.value = ''
@@ -1106,6 +1146,12 @@ async function switchLine(url: string) {
   durMs.value = 0
   prepared.value = false
   playing.value = false
+  // 切集/换源必须把转封装偏移和保存节流基线一起归零：
+  // 否则上一集如果拖到 10 分钟再切下一集，下一集会从第 10 分钟起播；
+  // lastSaveMs 留着旧值也会让新一集的前 5 秒不落盘。
+  remuxSeek.value = 0
+  pendingResumeMs = 0
+  lastSaveMs = 0
   introDone = false
   outroFired = false
   skipShow.value = ''
@@ -1149,9 +1195,28 @@ function destroyPlayer() {
   playFlash.value = ''
 }
 
+/**
+ * 当前真实播放位置（毫秒）。
+ *
+ * 不能直接用 curMs：它只在 ontimeupdate 里更新，而 timeupdate 是浏览器
+ * 按 ~250ms 节流触发的，离开页面那一刻的 curMs 往往落后实际进度好几百毫秒；
+ * 更关键的是转封装模式下视频时间戳从 seek 点重新从 0 开始，
+ * 必须把 remuxSeek 偏移加回去才是整片里的位置。
+ * 这里以 video.currentTime 为准实时换算，取不到时退回 curMs。
+ */
+function realPosMs(): number {
+  const vid = videoEl.value
+  if (!vid || !isFinite(vid.currentTime)) return curMs.value
+  const base = remuxMode.value ? remuxSeek.value : 0
+  return Math.max(0, (base + vid.currentTime) * 1000)
+}
+
 function savePos() {
   if (isLive) return
-  if (curMs.value <= 0) return
+  // 用实时位置而不是 curMs，避免存进去的是几秒前的旧值
+  const pos = realPosMs()
+  if (pos <= 0) return
+  curMs.value = pos
   // 网盘播放：保存续播记录（网盘页「继续观看」）
   if (siteKey === 'webdav') {
     if (!player.wdVod) return
@@ -1164,7 +1229,7 @@ function savePos() {
         epIndex: player.idx,
         epName: player.current?.name || '',
         url: player.current?.url || '',
-        pos: Math.floor(curMs.value),
+        pos: Math.floor(pos),
         dur: durMs.value > 0 ? Math.floor(durMs.value) : 0,
         time: Date.now()
       })
@@ -1182,7 +1247,7 @@ function savePos() {
       epName: player.current?.name || '',
       epIndex: player.idx,
       from: '',
-      pos: Math.floor(curMs.value),
+      pos: Math.floor(pos),
       dur: durMs.value > 0 ? Math.floor(durMs.value) : 0,
       time: Date.now()
     })
@@ -1340,7 +1405,7 @@ onUnmounted(() => {
         <span class="osd-title">{{ title }}</span>
         <span class="osd-meta">{{ epLabel }} {{ via ? '· ' + via : '' }}</span>
       </div>
-      <div :ref="setProgressEl" class="osd-progress" @pointerdown="onProgressDown">
+      <div class="osd-progress" @pointerdown="onProgressDown">
         <div class="progress-track">
           <div class="progress-fill" :style="{ width: (dragging ? (previewMs / durMs) * 100 : progressPct) + '%' }"></div>
         </div>
@@ -1453,7 +1518,8 @@ onUnmounted(() => {
           <button class="m-icon-btn" @click="toggleFullscreen">⤓</button>
         </div>
         <div class="m-fs-bottom">
-          <div :ref="setProgressEl" class="m-progress-wrap" @pointerdown="onProgressDown">
+          <!-- 直播没有可拖动的时长，不渲染进度条（否则会多出一条永远不动的空条） -->
+          <div v-if="!isLive" class="m-progress-wrap" @pointerdown="onProgressDown">
             <div class="m-progress-track">
               <div class="m-progress-fill" :style="{ width: (dragging ? (previewMs / durMs) * 100 : progressPct) + '%' }"></div>
             </div>
@@ -1495,7 +1561,7 @@ onUnmounted(() => {
       <!-- 进度条 -->
       <div v-if="!isLive" class="m-progress-row">
         <span class="m-time-sm">{{ fmtMs(curMs) }}</span>
-        <div :ref="setProgressEl" class="m-progress-wrap" @pointerdown="onProgressDown">
+        <div class="m-progress-wrap" @pointerdown="onProgressDown">
           <div class="m-progress-track">
             <div class="m-progress-fill" :style="{ width: (dragging ? (previewMs / durMs) * 100 : progressPct) + '%' }"></div>
           </div>

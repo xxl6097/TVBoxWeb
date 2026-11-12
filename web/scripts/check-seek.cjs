@@ -55,8 +55,26 @@ check(downs >= 3, `找到 ${downs} 处 @pointerdown（桌面 1 + 移动端 2）`
 
 console.log('\n[静态] 跳转走统一入口')
 check(/applySeek\(t\)/.test(code), '松手后调用 applySeek')
-const direct = (code.match(/currentTime\s*=/g) || []).length
-check(direct === 1, `直接改 currentTime 的位置只剩 ${direct} 处（applySeek 内部）`)
+// currentTime 赋值只允许出现在两个地方，二者都有明确理由：
+//  ① applySeek 内部 —— 普通流的跳转本体；
+//  ② onloadedmetadata 的续播分支 —— 流已就绪后一次性定位，此时不能再走
+//     applySeek（转封装流已在 initPlayer 里带 seek 起转，再跳会重载一遍）。
+// 除这两处以外任何 currentTime 赋值都算绕过统一入口，会导致转封装模式跳转失效。
+const ctLines = code
+  .split('\n')
+  .map((l, i) => ({ l, n: i + 1 }))
+  .filter((x) => /currentTime\s*=/.test(x.l))
+check(
+  ctLines.length === 2,
+  `直接改 currentTime 的位置只剩 ${ctLines.length} 处（applySeek + 续播）`,
+  ctLines.map((x) => `第 ${x.n} 行: ${x.l.trim()}`).join('\n      ')
+)
+const resumeAtMeta = /pendingResumeMs\s*>?\s*0[\s\S]{0,400}?vid\.currentTime\s*=/.test(code)
+check(resumeAtMeta, '续播定位在 loadedmetadata 内一次性完成（不重复走 applySeek）')
+check(/player\.seek\s*>\s*0[\s\S]{0,300}?remuxSeek\.value\s*=[\s\S]{0,200}?const\s+src\s*=\s*proxiedFinal\(\)/.test(code),
+  '续播起点在第一次请求前写入 remuxSeek（转封装一次起转到位）')
+check(/Math\.abs\(\s*curMs\.value\s*-\s*lastSaveMs\s*\)/.test(code),
+  '保存节流用绝对差值（往回拖也能落盘）')
 
 console.log(failed === 0 ? '\n全部通过' : `\n${failed} 项失败`)
 process.exit(failed === 0 ? 0 : 1)
