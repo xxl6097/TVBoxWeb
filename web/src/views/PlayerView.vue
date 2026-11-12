@@ -205,8 +205,14 @@ function toggleFullscreen() {
   // 移动端统一走 CSS 全屏类，避免原生 Fullscreen API 与 isFullscreen 状态不同步
   if (isMobile.value) {
     isFullscreen.value = !isFullscreen.value
-    if (isFullscreen.value) tryLockLandscape()
-    else tryUnlockOrientation()
+    if (isFullscreen.value) {
+      tryLockLandscape()
+      // 进全屏要重新计时 OSD：否则会接着竖屏那条 12s 定时器倒数，
+      // 可能刚铺满屏、OSD 连进度条一起消失，用户想拖都找不到地方下手。
+      popOsd()
+    } else {
+      tryUnlockOrientation()
+    }
     return
   }
   const el = playerEl.value
@@ -1257,7 +1263,9 @@ function savePos() {
 // ---------- 提示 ----------
 
 function popOsd() {
-  curMs.value = videoEl.value?.currentTime ? videoEl.value.currentTime * 1000 : curMs.value
+  // 用 realPosMs() 而不是裸的 currentTime：转封装模式下视频时间戳从
+  // seek 点重新计数，直接取会让进度条在每次唤出 OSD 时瞬间往回跳。
+  curMs.value = realPosMs()
   showOsd.value = true
   if (osdTimer) clearTimeout(osdTimer)
   osdTimer = window.setTimeout(() => {

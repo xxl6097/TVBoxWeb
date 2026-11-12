@@ -204,5 +204,19 @@ console.log('\n[9] 移动端全屏进度条对直播隐藏')
 expect(/v-if="!isLive" class="m-progress-wrap"/.test(code),
   '全屏 OSD 的进度条带 v-if="!isLive"（直播不出空条）')
 
+console.log('\n[10] 进全屏要重新计时 OSD')
+{
+  const fn = extractFn('toggleFullscreen')
+  expect(!!fn, '能取到 toggleFullscreen')
+  expect(/isFullscreen\.value = !isFullscreen\.value[\s\S]{0,220}?popOsd\(\)/.test(fn || ''),
+    '移动端进全屏后调用 popOsd()（接着竖屏的 12s 计时会让 OSD 刚铺满就消失）')
+  const pop = extractFn('popOsd')
+  expect(!!pop, '能取到 popOsd')
+  expect(/curMs\.value = realPosMs\(\)/.test(pop || ''),
+    'popOsd 用 realPosMs() 取位置（裸 currentTime 在转封装下会让进度条往回跳）')
+  expect(!/videoEl\.value\?\.currentTime \* 1000/.test(pop || ''),
+    'popOsd 不再直接拿 currentTime*1000')
+}
+
 console.log(failed === 0 ? '\n全部通过' : `\n${failed} 项失败`)
 process.exit(failed === 0 ? 0 : 1)
