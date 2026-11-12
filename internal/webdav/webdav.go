@@ -334,6 +334,14 @@ func ScanCtx(ctx context.Context, src model.WebdavSource, maxDepth int, onProgre
 //
 // 抽成独立函数便于单测：归并规则写错时，一部剧会被拆成十几部，
 // 或者不同电影被并成一部，这类退化必须能被测试发现。
+// dirSpan 表示「一个子目录内视频的集号区间」。
+// 包级类型：seqMatchesOrder 等辅助函数也要用它。
+type dirSpan struct {
+	min, max int
+	title    string // 子目录名去掉序号前缀后的部分
+	raw      string // 子目录原始名（含序号）
+}
+
 func aggregate(src model.WebdavSource, files []model.WebdavEntry) []model.WebdavVod {
 	var vods []model.WebdavVod
 	idx := map[string]int{}
@@ -363,12 +371,7 @@ func aggregate(src model.WebdavSource, files []model.WebdavEntry) []model.Webdav
 	seasonSplit := map[string]bool{} // 剧名目录 → 是否属于「分季结构」
 	{
 		// 父目录 → 各子目录的集号区间
-		type span struct {
-			min, max int
-			title    string // 子目录名去掉序号前缀后的部分
-			raw      string // 子目录原始名（含序号）
-		}
-		spans := map[string]map[string]*span{} // parent → childDir → 区间
+		spans := map[string]map[string]*dirSpan{} // parent → childDir → 区间
 		for _, f := range files {
 			p := parse(f.Name)
 			if !p.isSeries || p.episode <= 0 {
@@ -377,12 +380,12 @@ func aggregate(src model.WebdavSource, files []model.WebdavEntry) []model.Webdav
 			child := dirOf(f.Href)
 			parent := dirOf(child)
 			if spans[parent] == nil {
-				spans[parent] = map[string]*span{}
+				spans[parent] = map[string]*dirSpan{}
 			}
 			sp := spans[parent][child]
 			if sp == nil {
 				raw := dirName(child)
-				sp = &span{min: p.episode, max: p.episode, title: cleanDirName(raw), raw: raw}
+				sp = &dirSpan{min: p.episode, max: p.episode, title: cleanDirName(raw), raw: raw}
 				spans[parent][child] = sp
 				continue
 			}
@@ -403,7 +406,7 @@ func aggregate(src model.WebdavSource, files []model.WebdavEntry) []model.Webdav
 			//
 			// 注意用切片而不是 map[min]max：两部不同的剧都从第 1 集开始时，
 			// map 的键会互相覆盖，导致「看起来连续」的假象（踩过）。
-			segs := make([]*span, 0, len(children))
+			segs := make([]*dirSpan, 0, len(children))
 			shared := ""
 			sharedOK := true
 			for _, sp := range children {
@@ -421,35 +424,68 @@ func aggregate(src model.WebdavSource, files []model.WebdavEntry) []model.Webdav
 
 			// 集号连续：按起点排序后逐段检查衔接，且必须从第 1 集开始
 			sort.Slice(segs, func(a, b int) bool { return segs[a].min < segs[b].min })
-			contiguous := segs[0].min == 1
-			prevMax := 0
-			for _, sp := range segs {
-				if sp.min != prevMax+1 {
-					contiguous = false
+
+			// 【否决条件】集号区间互相重叠 → 一定是不同的剧。
+			// 同一部剧的两个篇章不可能同时包含第 5 集；
+			// 而「A 剧 1~20 + B 剧 1~30」「A 剧 1~20 + B 剧 15~40」这类
+			// 平铺结构经常出现重叠。这条比任何名字启发式都可靠。
+			overlap := false
+			for i := 1; i < len(segs); i++ {
+				if segs[i].min <= segs[i-1].max {
+					overlap = true
 					break
-				}
-				prevMax = sp.max
-			}
-			// 起点的重复也要判掉：若两段都从 1 开始，排序后第二段的 min 不等于 prevMax+1
-			if contiguous && len(segs) > 1 {
-				for i := 1; i < len(segs); i++ {
-					if segs[i].min <= segs[i-1].max {
-						contiguous = false
-						break
-					}
 				}
 			}
 
-			// 条件三：子目录名带「季」特征（第一季 / Season 2 / S02 / 第二季…）
-			// 这种结构下集号通常每季重新从 1 开始，只能靠名字判断。
+			contiguous := false
+			if !overlap {
+				contiguous = segs[0].min == 1
+				prevMax := 0
+				for _, sp := range segs {
+					if sp.min != prevMax+1 {
+						contiguous = false
+						break
+					}
+					prevMax = sp.max
+				}
+			}
+
+			// ===== 判定：这些子目录是不是「同一部剧」 =====
+			//
+			// 默认**不合并**（一个文件夹 = 一部）。只有拿到正面证据才合并，
+			// 且必须通过否决检查。这样即使规则没覆盖某种命名，最多是「分得细」，
+			// 而不是把不相关的剧混在一起（后者更糟：选集错乱、无法纠正）。
+			decision := false
+
+			// ① 季名结构：子目录名全是「第一季/第二季/Season 1/S02」
+			//    这类集号通常每季重排，区间必然重叠，因此要放在否决检查之前。
 			seasonNamed := 0
 			for _, sp := range children {
 				if reSeasonName.MatchString(sp.raw) {
 					seasonNamed++
 				}
 			}
+			if seasonNamed == len(children) {
+				decision = true
+			}
 
-			if contiguous || sharedOK || seasonNamed == len(children) {
+			// ② 集号跨目录连续（1~17 / 18~31 / 32~56），且从第 1 集开始。
+			//    注意「连续」必须配合「名字不同」的反向检查：
+			//    A 剧 1~20 + B 剧 21~50 也「连续」，但它们是两部剧。
+			if !decision && contiguous {
+				// 只有在子目录名带序号、且序号与集号顺序一致时才认可。
+				// 否则「01 A剧 / 02 B剧」这种平铺会被集号偶然相接骗过去。
+				decision = seqMatchesOrder(segs)
+				if decision {
+				}
+			}
+
+			// ③ 剧名前缀一致：子目录去序号后共享同一前缀，且集号不重叠（已被否决排除）
+			if !decision && sharedOK {
+				decision = true
+			}
+
+			if decision {
 				seasonSplit[parent] = true
 			}
 		}
@@ -527,6 +563,31 @@ func aggregate(src model.WebdavSource, files []model.WebdavEntry) []model.Webdav
 		}
 	}
 	return vods
+}
+
+// seqMatchesOrder 判断「目录序号」是否严格递增。
+//
+// 用来挡掉一种误判：A 剧 1~20 放在「01 A剧」、B 剧 21~50 放在「02 B剧」，
+// 集号看起来完全连续，但它们是两部不同的剧。
+//
+// 真正的分季结构里，篇章目录**都带序号**且递增：
+//
+//	01 风起天南   → 1~17
+//	02 燕家堡之战 → 18~31
+//	03 魔道争锋   → 32~56
+//
+// 平铺的多部剧不一定满足「每个子目录都带递增序号」，
+// 因此这条检查能挡掉相当一部分平铺场景（配合集号重叠否决，覆盖更全）。
+func seqMatchesOrder(segs []*dirSpan) bool {
+	prev := 0
+	for _, sp := range segs {
+		n := dirOrder(sp.raw)
+		if n == 0 || n <= prev {
+			return false // 目录不带序号，或序号不递增 → 不认为是分季
+		}
+		prev = n
+	}
+	return true
 }
 
 func dirOrder(name string) int {

@@ -324,3 +324,60 @@ func TestAggregateSeasonNamedDirsMerge(t *testing.T) {
 		t.Errorf("片名应为「某剧」，实际 %q", vods[0].Name)
 	}
 }
+
+// 各种「集号范围」组合下，平铺的多部剧必须各自独立。
+// 用户反馈「每部的集号范围」差异很大，这里穷举常见组合。
+func TestAggregateFlatVariousEpisodeRanges(t *testing.T) {
+	cases := []struct {
+		name  string
+		dirs  map[string][2]int // 子目录名 → [起, 止]
+		wantN int
+	}{
+		{
+			name:  "都从1开始",
+			dirs:  map[string][2]int{"01 庆余年": {1, 20}, "02 狂飙": {1, 30}},
+			wantN: 2,
+		},
+		{
+			name:  "都从1开始且集数相同",
+			dirs:  map[string][2]int{"01 A剧": {1, 10}, "02 B剧": {1, 10}},
+			wantN: 2,
+		},
+		{
+			name:  "区间重叠（A 1~20, B 15~40）",
+			dirs:  map[string][2]int{"01 A剧": {1, 20}, "02 B剧": {15, 40}},
+			wantN: 2,
+		},
+		{
+			name:  "区间相接但不对齐（A 1~20, B 21~50）",
+			dirs:  map[string][2]int{"01 A剧": {1, 20}, "02 B剧": {21, 50}},
+			wantN: 2, // 名字不同 → 仍是两部；不能因为集号接上就合并
+		},
+		{
+			name:  "完全不相接（A 1~10, B 100~120）",
+			dirs:  map[string][2]int{"01 A剧": {1, 10}, "02 B剧": {100, 120}},
+			wantN: 2,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			root := "/dav/剧集"
+			var files []model.WebdavEntry
+			for dir, rng := range c.dirs {
+				for ep := rng[0]; ep <= rng[1] && ep <= rng[0]+3; ep++ {
+					files = append(files, mkFile(root+"/"+dir+"/"+itoa(ep)+".mp4"))
+				}
+			}
+			vods := aggregate(testSrc, files)
+			if len(vods) != c.wantN {
+				t.Fatalf("%s：期望 %d 部，实际 %d 部：%+v", c.name, c.wantN, len(vods), nameList(vods))
+			}
+			for _, v := range vods {
+				if v.Name == "剧集" {
+					t.Fatalf("%s：不应合并成父目录名《剧集》：%d 集", c.name, len(v.Eps))
+				}
+			}
+		})
+	}
+}
