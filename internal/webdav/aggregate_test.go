@@ -247,3 +247,80 @@ func itoa(n int) string {
 	}
 	return string(b)
 }
+
+// 用户实际场景：某个文件夹下平铺着几部不同的剧，每部一个子文件夹。
+//
+// 关键难点：这些子目录**恰好带序号前缀**（01 庆余年 / 02 狂飙），
+// 光看目录名和「01 风起天南 / 02 燕家堡之战」一模一样，
+// 但前者是不同的剧、后者是同一部剧的篇章。
+//
+// 区分靠集号：同一部剧的篇章集号跨目录连续（1..17, 18..31），
+// 不同的剧各自从 1 重新开始。用 map[min]max 会因键冲突漏判（踩过）。
+func TestAggregateFlatNumberedDifferentShows(t *testing.T) {
+	root := "/dav/剧集"
+	files := []model.WebdavEntry{
+		mkFile(root + "/01 庆余年/1.mp4"),
+		mkFile(root + "/01 庆余年/2.mp4"),
+		mkFile(root + "/01 庆余年/3.mp4"),
+		mkFile(root + "/02 狂飙/1.mp4"),
+		mkFile(root + "/02 狂飙/2.mp4"),
+	}
+	vods := aggregate(testSrc, files)
+
+	if len(vods) != 2 {
+		t.Fatalf("平铺的两部不同剧应各自独立（2 部），实际 %d 部：%+v", len(vods), nameList(vods))
+	}
+	got := map[string]int{}
+	for _, v := range vods {
+		got[v.Name] = len(v.Eps)
+	}
+	if got["庆余年"] != 3 || got["狂飙"] != 2 {
+		t.Fatalf("应识别「庆余年」3 集、「狂飙」2 集，实际 %v", got)
+	}
+	for _, v := range vods {
+		if v.Name == "剧集" {
+			t.Fatalf("不应合并成父目录名《剧集》：%d 集", len(v.Eps))
+		}
+	}
+}
+
+// 对照组：同样是带序号的子目录，但集号跨目录连续 → 是同一部剧的篇章，应合并。
+func TestAggregateNumberedContiguousMerges(t *testing.T) {
+	root := "/dav/凡人"
+	files := []model.WebdavEntry{
+		mkFile(root + "/01 风起天南/1.mp4"),
+		mkFile(root + "/01 风起天南/17.mp4"),
+		mkFile(root + "/02 燕家堡之战/18.mp4"),
+		mkFile(root + "/02 燕家堡之战/31.mp4"),
+		mkFile(root + "/03 魔道争锋/32.mp4"),
+	}
+	vods := aggregate(testSrc, files)
+
+	if len(vods) != 1 {
+		t.Fatalf("集号连续应合并成 1 部，实际 %d 部：%+v", len(vods), nameList(vods))
+	}
+	if vods[0].Name != "凡人" {
+		t.Errorf("片名应为「凡人」，实际 %q", vods[0].Name)
+	}
+	if len(vods[0].Eps) != 5 {
+		t.Errorf("应有 5 集，实际 %d", len(vods[0].Eps))
+	}
+}
+
+// 「第一季 / 第二季」这种结构：集号各自从 1 开始，但目录名带季特征，应合并。
+func TestAggregateSeasonNamedDirsMerge(t *testing.T) {
+	root := "/dav/某剧"
+	files := []model.WebdavEntry{
+		mkFile(root + "/第一季/1.mp4"),
+		mkFile(root + "/第一季/2.mp4"),
+		mkFile(root + "/第二季/1.mp4"),
+		mkFile(root + "/第二季/2.mp4"),
+	}
+	vods := aggregate(testSrc, files)
+	if len(vods) != 1 {
+		t.Fatalf("带季名的子目录应合并成 1 部，实际 %d 部：%+v", len(vods), nameList(vods))
+	}
+	if vods[0].Name != "某剧" {
+		t.Errorf("片名应为「某剧」，实际 %q", vods[0].Name)
+	}
+}

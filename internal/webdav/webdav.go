@@ -189,6 +189,13 @@ func dirName(href string) string {
 // 用 \b 边界 + 长度 ≤3 限制：避免把「2024」这种四位年份当成序号。
 var reDirPrefix = regexp.MustCompile(`^(\d{1,3})(?:\s*[-_. ]\s*|\s+)`)
 
+// reSeasonName 匹配「带季特征」的目录名，用于识别「某长篇/第一季、第二季」这种结构：
+// 这类目录下集号通常每季重新从 1 开始，无法靠集号连续性判断，只能看名字。
+//
+// 覆盖：第一季 / 第2季 / 第二部 / Season 1 / season02 / S01 / S2
+// 不覆盖：普通剧名（如「风起天南」），避免把平铺的多部剧误合并。
+var reSeasonName = regexp.MustCompile(`(?i)(第\s*[0-9一二三四五六七八九十百]+\s*[季部]|season\s*\d+|s\d{1,2}$)`)
+
 func cleanDirName(name string) string {
 	return strings.TrimSpace(reDirPrefix.ReplaceAllString(name, ""))
 }
@@ -333,41 +340,116 @@ func aggregate(src model.WebdavSource, files []model.WebdavEntry) []model.Webdav
 
 	// ---------- 归并策略 ----------
 	//
-	// 目标：以「文件夹」为识别单位 —— 一个含视频的文件夹 = 一部影视。
-	// 唯一的例外是「同一部剧按篇章/季度拆成多个子文件夹」的结构：
+	// 基本规则：**以「文件夹」为识别单位 —— 一个含视频的文件夹 = 一部影视。**
+	//
+	// 唯一的例外是「同一部剧按篇章/季度拆成多个子文件夹」：
 	//
 	//   迅雷下载/凡人/01 风起天南/1.mp4
-	//   迅雷下载/凡人/02 燕家堡之战/1.mp4
-	//   迅雷下载/凡人/03 魔道争锋/1.mp4
+	//   迅雷下载/凡人/02 燕家堡之战/18.mp4
+	//   迅雷下载/凡人/03 魔道争锋/32.mp4
 	//
-	// 这种应当合并成一部《凡人》、篇章目录作为季。
-	// 而下面这种必须保持独立：
+	// 这种应合并成一部《凡人》，篇章目录作为季。而下面这种必须保持独立：
 	//
-	//   迅雷下载/电影/侏罗纪世界重生.mp4
-	//   迅雷下载/电影/制暴无限杀机.mp4      ← 各是各的电影，绝不能合并
+	//   剧集/01 庆余年/1.mp4
+	//   剧集/02 狂飙/1.mp4
 	//
-	// 判断「是不是同一部剧的分季」不能只看「父目录下有几个子目录」
-	// （那会把电影目录整个合并成一部），要看**子目录名是否构成序列**：
-	// 剧集篇章几乎总带递增序号前缀（01/02/03…），普通影片不会。
-	// 因此这里统计每个父目录下「带序号前缀的子目录」数量，
-	// 达到 2 个及以上才认定为分季结构。
-	seasonSplit := map[string]bool{} // 剧名目录 → 是否分季结构
+	// 两者目录名**都带序号前缀**，光看名字无法区分 —— 但集号可以：
+	//   · 同一部剧的篇章：集号跨目录**连续**（1..17、18..31、32..56…）
+	//   · 不同的剧：各自**从 1 重新开始**
+	//
+	// 所以判定改为「集号是否连续」，比看目录名可靠得多。
+	// 同时保留一个更弱的辅助信号：子目录名去序号后如果都以同一剧名开头
+	//（如「凡人 01 风起天南」），也认定为同一部剧。
+	seasonSplit := map[string]bool{} // 剧名目录 → 是否属于「分季结构」
 	{
-		// 每个父目录（剧名层）下出现过的序号集合
-		orders := map[string]map[int]bool{}
+		// 父目录 → 各子目录的集号区间
+		type span struct {
+			min, max int
+			title    string // 子目录名去掉序号前缀后的部分
+			raw      string // 子目录原始名（含序号）
+		}
+		spans := map[string]map[string]*span{} // parent → childDir → 区间
 		for _, f := range files {
-			child := dirOf(f.Href) // 文件所在目录（可能是篇章目录）
-			parent := dirOf(child) // 上一层（可能是剧名目录）
-			if n := dirOrder(dirName(child)); n > 0 {
-				if orders[parent] == nil {
-					orders[parent] = map[int]bool{}
-				}
-				orders[parent][n] = true
+			p := parse(f.Name)
+			if !p.isSeries || p.episode <= 0 {
+				continue // 无法判断集号的文件不参与统计
+			}
+			child := dirOf(f.Href)
+			parent := dirOf(child)
+			if spans[parent] == nil {
+				spans[parent] = map[string]*span{}
+			}
+			sp := spans[parent][child]
+			if sp == nil {
+				raw := dirName(child)
+				sp = &span{min: p.episode, max: p.episode, title: cleanDirName(raw), raw: raw}
+				spans[parent][child] = sp
+				continue
+			}
+			if p.episode < sp.min {
+				sp.min = p.episode
+			}
+			if p.episode > sp.max {
+				sp.max = p.episode
 			}
 		}
-		for parent, set := range orders {
-			// 至少要 2 个不同的序号，才说明「01 xxx / 02 yyy」这种成组结构
-			if len(set) >= 2 {
+
+		for parent, children := range spans {
+			if len(children) < 2 {
+				continue // 只有一个子目录，谈不上合并
+			}
+			// 条件一：集号首尾相接（后一段的起点紧接前一段的终点）
+			// 条件二：所有子目录名去序号后共享同一前缀（剧名）
+			//
+			// 注意用切片而不是 map[min]max：两部不同的剧都从第 1 集开始时，
+			// map 的键会互相覆盖，导致「看起来连续」的假象（踩过）。
+			segs := make([]*span, 0, len(children))
+			shared := ""
+			sharedOK := true
+			for _, sp := range children {
+				segs = append(segs, sp)
+				if sp.title == "" {
+					sharedOK = false
+					continue
+				}
+				if shared == "" {
+					shared = sp.title
+				} else if shared != sp.title {
+					sharedOK = false
+				}
+			}
+
+			// 集号连续：按起点排序后逐段检查衔接，且必须从第 1 集开始
+			sort.Slice(segs, func(a, b int) bool { return segs[a].min < segs[b].min })
+			contiguous := segs[0].min == 1
+			prevMax := 0
+			for _, sp := range segs {
+				if sp.min != prevMax+1 {
+					contiguous = false
+					break
+				}
+				prevMax = sp.max
+			}
+			// 起点的重复也要判掉：若两段都从 1 开始，排序后第二段的 min 不等于 prevMax+1
+			if contiguous && len(segs) > 1 {
+				for i := 1; i < len(segs); i++ {
+					if segs[i].min <= segs[i-1].max {
+						contiguous = false
+						break
+					}
+				}
+			}
+
+			// 条件三：子目录名带「季」特征（第一季 / Season 2 / S02 / 第二季…）
+			// 这种结构下集号通常每季重新从 1 开始，只能靠名字判断。
+			seasonNamed := 0
+			for _, sp := range children {
+				if reSeasonName.MatchString(sp.raw) {
+					seasonNamed++
+				}
+			}
+
+			if contiguous || sharedOK || seasonNamed == len(children) {
 				seasonSplit[parent] = true
 			}
 		}
