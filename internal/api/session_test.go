@@ -380,3 +380,94 @@ func TestIsMediaEndpointIsMinimal(t *testing.T) {
 		}
 	}
 }
+
+// 登录限流不能把正常用户锁死。
+//
+// 线上真实问题：用户输错几次密码（或在多个标签页/设备上试）后，
+// 同一 IP 被锁 10 分钟，之后**即使密码完全正确也登不进去**，
+// 表现为整个服务不可用、只能重启进程。家用/内网部署所有设备共用一个出口 IP，
+// 这个阈值必须足够宽松，并且给出「还要等多久」而不是干等。
+func TestLoginFailLimitIsLenient(t *testing.T) {
+	SetSecurity(SecurityConfig{LoginUser: "u", LoginPass: "p"})
+	defer SetSecurity(SecurityConfig{})
+	clearFails("198.51.100.7")
+	ip := "198.51.100.7"
+
+	// ① 前 3 次失败不应触发限流（正常人手滑能立刻重试）
+	for i := 1; i <= 3; i++ {
+		recordFail(ip)
+		if tooManyFails(ip) {
+			t.Fatalf("第 %d 次失败就被锁定，阈值过严", i)
+		}
+		if wait := failCooldown(ip); wait > 0 {
+			t.Fatalf("第 %d 次失败就要求冷却 %v，正常用户会以为密码错了", i, wait)
+		}
+	}
+
+	// ② 第 4 次起开始温和冷却，但冷却时间必须很短（秒级）
+	recordFail(ip)
+	if wait := failCooldown(ip); wait <= 0 || wait > 16*time.Second {
+		t.Fatalf("第 4 次失败后的冷却应在 (0, 16s]，实际 %v", wait)
+	}
+
+	// ③ 远未达到锁定阈值前，密码正确必须仍能登录（冷却到期即可）
+	for i := 5; i < loginMaxFails; i++ {
+		recordFail(ip)
+	}
+	if tooManyFails(ip) {
+		t.Fatalf("累计 %d 次失败不应锁定（阈值 %d）", loginMaxFails-1, loginMaxFails)
+	}
+
+	// ④ 达到阈值才锁定
+	recordFail(ip)
+	if !tooManyFails(ip) {
+		t.Fatalf("累计 %d 次失败应触发锁定", loginMaxFails)
+	}
+}
+
+// 登录成功必须清零失败计数，否则长期使用会「攒」到阈值。
+func TestLoginSuccessClearsFails(t *testing.T) {
+	SetSecurity(SecurityConfig{LoginUser: "u", LoginPass: "p"})
+	defer SetSecurity(SecurityConfig{})
+	ip := "203.0.113.9"
+	clearFails(ip)
+	for i := 0; i < 5; i++ {
+		recordFail(ip)
+	}
+	clearFails(ip)
+
+	body := `{"user":"u","pass":"p"}`
+	req := httptest.NewRequest("POST", "/api/login", strings.NewReader(body))
+	req.RemoteAddr = ip + ":1234"
+	rec := httptest.NewRecorder()
+	secured().ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("前面有 %d 次失败，但刚清零过，正确密码应能登录；实际 %d: %s", 5, rec.Code, rec.Body.String())
+	}
+}
+
+// 冷却期内的 429 必须告诉用户等几秒，否则用户只会一直点，
+// 点得越多冷却越久，体验更差。
+func TestLoginCooldownMessageHasSeconds(t *testing.T) {
+	SetSecurity(SecurityConfig{LoginUser: "u", LoginPass: "p"})
+	defer SetSecurity(SecurityConfig{})
+	ip := "192.0.2.44"
+	clearFails(ip)
+	for i := 0; i < 5; i++ {
+		recordFail(ip)
+	}
+
+	body := `{"user":"u","pass":"p"}`
+	req := httptest.NewRequest("POST", "/api/login", strings.NewReader(body))
+	req.RemoteAddr = ip + ":1"
+	rec := httptest.NewRecorder()
+	secured().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("冷却期内应返回 429，实际 %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "秒") {
+		t.Fatalf("429 提示应包含等待秒数，实际 %s", rec.Body.String())
+	}
+	clearFails(ip)
+}

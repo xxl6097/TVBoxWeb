@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { authState, login } from '@/auth'
 
@@ -16,8 +16,28 @@ const userEl = ref<HTMLInputElement>()
 const passEl = ref<HTMLInputElement>()
 // 版本号：排查「用户说的是旧版本问题」时，登录页就能看到，很省事
 const appVersion = ref('')
+// 服务端限流的倒计时（秒）。>0 时禁用提交按钮。
+// 没有这个的话，用户被限流后只会一直点「进入」，反而让冷却越攒越长。
+const cooldown = ref(0)
+let cooldownTimer = 0
 
-const canSubmit = computed(() => user.value.trim() !== '' && pass.value !== '' && !loading.value)
+function startCooldown(sec: number) {
+  cooldown.value = sec > 0 ? sec : 0
+  if (cooldownTimer) window.clearInterval(cooldownTimer)
+  if (cooldown.value <= 0) return
+  cooldownTimer = window.setInterval(() => {
+    cooldown.value -= 1
+    if (cooldown.value <= 0) {
+      window.clearInterval(cooldownTimer)
+      cooldownTimer = 0
+      cooldown.value = 0
+    }
+  }, 1000)
+}
+
+const canSubmit = computed(
+  () => user.value.trim() !== '' && pass.value !== '' && !loading.value && cooldown.value <= 0
+)
 
 onMounted(async () => {
   // 记住上次登录的用户名（只记名字，不记密码）
@@ -59,7 +79,15 @@ async function submit() {
     // 只接受站内路径，避免被 ?redirect= 带到外部站点
     router.replace(redirect.startsWith('/') && !redirect.startsWith('//') ? redirect : '/')
   } catch (e: any) {
-    fail(e?.message || '登录失败，请重试')
+    const msg: string = e?.message || '登录失败，请重试'
+    fail(msg)
+    // 服务端限流会回「请 N 秒后再试」/「请 15 分钟后再试」，解析出秒数做倒计时。
+    // 拿不到具体数字时给个保守的 5 秒，避免用户连点把冷却越攒越长。
+    const sec = /(\d+)\s*秒/.exec(msg)
+    const min = /(\d+)\s*分钟/.exec(msg)
+    if (sec) startCooldown(parseInt(sec[1], 10))
+    else if (min) startCooldown(parseInt(min[1], 10) * 60)
+    else if (/频繁|次数过多/.test(msg)) startCooldown(5)
     pass.value = ''
     await nextTick()
     passEl.value?.focus()
@@ -67,6 +95,10 @@ async function submit() {
     loading.value = false
   }
 }
+
+onUnmounted(() => {
+  if (cooldownTimer) window.clearInterval(cooldownTimer)
+})
 </script>
 
 <template>
@@ -146,7 +178,8 @@ async function submit() {
         </transition>
 
         <button class="submit" type="submit" :disabled="!canSubmit">
-          <span v-if="!loading">进入</span>
+          <span v-if="cooldown > 0">{{ cooldown }} 秒后可重试</span>
+          <span v-else-if="!loading">进入</span>
           <span v-else class="dots" aria-label="登录中">
             <i></i><i></i><i></i>
           </span>

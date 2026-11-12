@@ -331,16 +331,46 @@ func aggregate(src model.WebdavSource, files []model.WebdavEntry) []model.Webdav
 	var vods []model.WebdavVod
 	idx := map[string]int{}
 
-	// 剧集归并：把「剧名/01 篇章/1.mp4」「剧名/02 篇章/2.mp4」合成同一部剧。
-	// 目录层级（实测）：
-	//   dir       = …/迅雷下载/凡人/01 风起天南   ← 文件所在目录（篇章）
-	//   up1       = …/迅雷下载/凡人              ← 剧名目录（归并键 + 片名来源）
-	//   dirOf(up1)= …/迅雷下载                   ← 媒体根，不能再往上合并
-	// 只有当 up1 的父目录（媒体根）下存在 ≥2 个含视频的子目录时，才认为
-	// up1 是「剧名」层级；否则（如「迅雷下载/电影/xx.mp4」）保持按目录分组。
-	subCount := map[string]int{}
-	for _, f := range files {
-		subCount[dirOf(dirOf(f.Href))]++ // 键 = up1（剧名目录）
+	// ---------- 归并策略 ----------
+	//
+	// 目标：以「文件夹」为识别单位 —— 一个含视频的文件夹 = 一部影视。
+	// 唯一的例外是「同一部剧按篇章/季度拆成多个子文件夹」的结构：
+	//
+	//   迅雷下载/凡人/01 风起天南/1.mp4
+	//   迅雷下载/凡人/02 燕家堡之战/1.mp4
+	//   迅雷下载/凡人/03 魔道争锋/1.mp4
+	//
+	// 这种应当合并成一部《凡人》、篇章目录作为季。
+	// 而下面这种必须保持独立：
+	//
+	//   迅雷下载/电影/侏罗纪世界重生.mp4
+	//   迅雷下载/电影/制暴无限杀机.mp4      ← 各是各的电影，绝不能合并
+	//
+	// 判断「是不是同一部剧的分季」不能只看「父目录下有几个子目录」
+	// （那会把电影目录整个合并成一部），要看**子目录名是否构成序列**：
+	// 剧集篇章几乎总带递增序号前缀（01/02/03…），普通影片不会。
+	// 因此这里统计每个父目录下「带序号前缀的子目录」数量，
+	// 达到 2 个及以上才认定为分季结构。
+	seasonSplit := map[string]bool{} // 剧名目录 → 是否分季结构
+	{
+		// 每个父目录（剧名层）下出现过的序号集合
+		orders := map[string]map[int]bool{}
+		for _, f := range files {
+			child := dirOf(f.Href) // 文件所在目录（可能是篇章目录）
+			parent := dirOf(child) // 上一层（可能是剧名目录）
+			if n := dirOrder(dirName(child)); n > 0 {
+				if orders[parent] == nil {
+					orders[parent] = map[int]bool{}
+				}
+				orders[parent][n] = true
+			}
+		}
+		for parent, set := range orders {
+			// 至少要 2 个不同的序号，才说明「01 xxx / 02 yyy」这种成组结构
+			if len(set) >= 2 {
+				seasonSplit[parent] = true
+			}
+		}
 	}
 
 	for i, f := range files {
@@ -354,17 +384,17 @@ func aggregate(src model.WebdavSource, files []model.WebdavEntry) []model.Webdav
 
 		var key string
 		if p.isSeries {
-			// 默认按所在目录分组
+			// 默认：按所在文件夹分组（一个文件夹 = 一部）
 			key = dir + "|" + title
-			// 上两级有多个含视频的子目录 → 认为它们是同一部剧的篇章，向上归并
-			up1 := dirOf(dir) // 剧名目录
-			if n := subCount[up1]; n >= 2 {
-				// 片名取剧名目录本身的名字（dirName(up1) 而非 dirName(dir)）
-				upTitle := cleanDirName(dirName(up1))
+
+			// 例外：父目录是「分季结构」时，向上归并成一部
+			parent := dirOf(dir)
+			if p.isSeries && seasonSplit[parent] {
+				upTitle := cleanDirName(dirName(parent))
 				if upTitle != "" {
 					title = upTitle
 				}
-				key = up1 + "|" + title
+				key = parent + "|" + title
 			}
 		} else {
 			key = "#" + strconv.Itoa(i)

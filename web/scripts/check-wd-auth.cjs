@@ -94,5 +94,22 @@ const authTs = read('src/auth.ts')
 check(/mediaToken/.test(authTs), '登录响应的 mediaToken 被保存')
 check(/sessionStorage/.test(authTs), '媒体令牌存在 sessionStorage（关标签页即失效）')
 
+// ---- 登录限流与并发去重 ----
+// 线上问题：输错几次密码后整个 IP 被锁，密码正确也登不进去。
+// 前端必须：① 429 时倒计时禁用按钮（否则连点让冷却越攒越长）
+//          ② ensureSession 并发去重（否则两次请求互相覆盖，刷新即被踢回登录页）
+console.log('\n[登录] 限流倒计时与并发去重')
+const lv = stripComments(read('src/views/LoginView.vue'))
+check(/cooldown/.test(lv), 'LoginView 有冷却倒计时状态')
+check(/秒后可重试/.test(lv), '冷却时按钮显示剩余秒数')
+check(/startCooldown/.test(lv), '429 后启动倒计时')
+check(/!loading\.value\s*&&\s*cooldown\.value\s*<=\s*0|cooldown\.value\s*<=\s*0\s*&&\s*!loading/.test(lv),
+  '冷却期间禁用提交')
+
+const au = stripComments(read('src/auth.ts'))
+check(/inflight/.test(au), 'ensureSession 用 inflight 做并发去重')
+check(!/catch\s*\{\s*authState\.checked\s*=\s*true\s*\n?\s*return true/.test(au),
+  '网络异常分支不再只设 checked 而漏掉 authed')
+
 console.log(failed === 0 ? '\n全部通过' : `\n${failed} 项失败`)
 process.exit(failed === 0 ? 0 : 1)

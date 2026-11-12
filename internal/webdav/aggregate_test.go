@@ -135,6 +135,75 @@ func TestParseEpisodeForms(t *testing.T) {
 	}
 }
 
+// 关键回归：不同影视放在同一个父目录下，且子目录名**没有序号前缀**时，
+// 必须各自独立成一部。
+//
+// 典型场景：网盘里「影视/」下面平铺着好几部剧，像
+//
+//	影视/庆余年/1.mp4
+//	影视/狂飙/1.mp4
+//
+// 旧策略只看「父目录下有几个含视频的子目录」，≥2 就往上合并，
+// 结果这两部毫不相干的剧被并成一部《影视》，选集里混在一起。
+func TestAggregateKeepsUnnumberedDirsSeparate(t *testing.T) {
+	root := "/dav/影视"
+	var files []model.WebdavEntry
+	for _, ep := range []string{"1.mp4", "2.mp4"} {
+		files = append(files, mkFile(root+"/庆余年/"+ep))
+	}
+	for _, ep := range []string{"1.mp4", "2.mp4"} {
+		files = append(files, mkFile(root+"/狂飙/"+ep))
+	}
+	vods := aggregate(testSrc, files)
+
+	if len(vods) != 2 {
+		t.Fatalf("两个无序号目录应各自独立（共 2 部），实际 %d 部：%+v", len(vods), nameList(vods))
+	}
+	names := map[string]int{}
+	for _, v := range vods {
+		names[v.Name] = len(v.Eps)
+	}
+	if names["庆余年"] != 2 || names["狂飙"] != 2 {
+		t.Fatalf("应识别出「庆余年」和「狂飙」各 2 集，实际 %v", names)
+	}
+	// 绝不能出现以父目录命名的合并结果
+	for _, v := range vods {
+		if v.Name == "影视" {
+			t.Fatalf("不应把整个父目录合并成一部，实际出现 %q（%d 集）", v.Name, len(v.Eps))
+		}
+	}
+}
+
+// 对比：子目录名**带序号**时才认定为同一部剧的分季结构。
+// 这保证「01 篇章 / 02 篇章」仍能正确合并（见 TestAggregateMergesSeasons）。
+func TestAggregateMergeRequiresNumberedDirs(t *testing.T) {
+	root := "/dav/剧集"
+	// 混合场景：有序号的分季剧 + 无序号的独立剧同处一个父目录
+	var files []model.WebdavEntry
+	files = append(files, mkFile(root+"/某长篇/01 第一季/1.mp4"))
+	files = append(files, mkFile(root+"/某长篇/02 第二季/1.mp4"))
+	files = append(files, mkFile(root+"/另一部剧/1.mp4"))
+
+	vods := aggregate(testSrc, files)
+	if len(vods) != 2 {
+		t.Fatalf("分季剧应合成 1 部、独立剧保持 1 部，共 2 部；实际 %d 部：%+v", len(vods), nameList(vods))
+	}
+	for _, v := range vods {
+		switch v.Name {
+		case "某长篇":
+			if len(v.Eps) != 2 {
+				t.Errorf("「某长篇」应有 2 集，实际 %d", len(v.Eps))
+			}
+		case "另一部剧":
+			if len(v.Eps) != 1 {
+				t.Errorf("「另一部剧」应有 1 集，实际 %d", len(v.Eps))
+			}
+		default:
+			t.Errorf("出现了意料之外的条目：%q", v.Name)
+		}
+	}
+}
+
 // dirOrder：目录名前缀序号 → 季号
 func TestDirOrder(t *testing.T) {
 	cases := map[string]int{

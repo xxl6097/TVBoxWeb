@@ -31,6 +31,7 @@ async function clearCaches(): Promise<void> {
 
 async function callSession(): Promise<AuthState> {
   const res = await fetch('/api/session', { credentials: 'same-origin' })
+  // 带上状态码：上层要区分「401 明确拒绝」与「网络异常保守放行」
   if (!res.ok) throw new Error('session ' + res.status)
   const j = (await res.json()) as { needLogin: boolean; authed: boolean; user: string }
   authState.needLogin = !!j.needLogin
@@ -43,16 +44,40 @@ async function callSession(): Promise<AuthState> {
 /**
  * 确保登录态已知。失败（网络异常）时保守放行：
  * 宁可让用户看到「接口 401」的真实报错，也不要因为一次网络抖动把人锁在登录页出不去。
+ *
+ * 这里必须用「并发去重」：应用启动时路由守卫和 App.vue 会几乎同时调用，
+ * 两次请求各拿一份结果，后返回的会覆盖先返回的 —— 一旦其中一次撞上
+ * Cookie 尚未生效的瞬间（返回 authed:false），就会把另一次的正确结果冲掉，
+ * 表现为「明明已登录，刷新后却被踢回登录页」。
  */
+let inflight: Promise<boolean> | null = null
+
 export async function ensureSession(force = false): Promise<boolean> {
   if (authState.checked && !force) return authState.authed
-  try {
-    const st = await callSession()
-    return st.authed
-  } catch {
-    authState.checked = true
-    return true
-  }
+  // 已在查询中：复用同一个 Promise，绝不并发打两次
+  if (inflight) return inflight
+
+  inflight = (async () => {
+    try {
+      const st = await callSession()
+      return st.authed
+    } catch (e) {
+      // 网络异常（服务重启、临时断网）时保守放行，但**状态要一致**：
+      // 之前的写法只设了 checked、没动 authed，于是这里返回 true，
+      // 而后续任何读 authState.authed 的地方仍认为未登录，行为自相矛盾。
+      authState.checked = true
+      authState.authed = true
+      if ((e as Error)?.message?.startsWith('session 401')) {
+        // 401 是明确的服务端拒绝，不能当成「已登录」放行
+        authState.authed = false
+        return false
+      }
+      return true
+    } finally {
+      inflight = null
+    }
+  })()
+  return inflight
 }
 
 /**

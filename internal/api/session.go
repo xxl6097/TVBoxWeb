@@ -29,9 +29,11 @@ const (
 	sessionCookieName = "yz_session"
 	sessionTTL        = 7 * 24 * time.Hour
 
-	// 登录失败限流：同一 IP 在窗口期内失败这么多次就暂时锁住
-	loginMaxFails   = 8
-	loginFailWindow = 10 * time.Minute
+	// 登录失败限流：同一 IP 累计失败这么多次就锁一段时间。
+	// 阈值刻意放宽到 20——家用/内网部署所有设备共用一个出口 IP，
+	// 太紧会把正常用户一起锁死（见 tooManyFails 的说明）。
+	loginMaxFails   = 20
+	loginFailWindow = 15 * time.Minute
 )
 
 var sessionKey = func() []byte {
@@ -102,6 +104,9 @@ func loginEnabled() bool {
 type failRecord struct {
 	count int
 	first time.Time
+	// last 上次失败时间：用于「失败后必须间隔一定时间才能再试」的节流，
+	// 比单纯计数更温和——正常用户输错一次，第二次不用等太久。
+	last time.Time
 }
 
 var (
@@ -117,6 +122,16 @@ func clientIP(r *http.Request) string {
 }
 
 // tooManyFails 判断该来源是否已被临时锁定。
+//
+// 设计取舍：阈值不能太紧。家用/内网部署时所有设备共用一个出口 IP，
+// 浏览器刷新、多次尝试输错密码都会打到同一个计数器上。原来的
+// 「8 次 / 10 分钟」实测很容易被误伤——用户一旦被锁就完全登不进去，
+// 连「密码正确」也不行，表现为整个服务不可用。
+//
+// 现在的策略：
+//   - 前 3 次失败：无限制，正常人手滑能立刻重试
+//   - 第 4 次起：每次要求间隔 3 秒（递增到最多 15 秒），温和节流
+//   - 累计 20 次：锁定 15 分钟（暴力破解靠这个兜底）
 func tooManyFails(ip string) bool {
 	failMu.Lock()
 	defer failMu.Unlock()
@@ -131,19 +146,51 @@ func tooManyFails(ip string) bool {
 	return rec.count >= loginMaxFails
 }
 
-func recordFail(ip string) {
+// failCooldown 返回到下次可以尝试还需等待的时间；0 表示可以立刻尝试。
+// 与 tooManyFails 分开，是为了给用户「还要等几秒」的明确提示。
+func failCooldown(ip string) time.Duration {
 	failMu.Lock()
 	defer failMu.Unlock()
 	rec, ok := fails[ip]
 	if !ok || time.Since(rec.first) > loginFailWindow {
-		fails[ip] = &failRecord{count: 1, first: time.Now()}
+		return 0
+	}
+	// 前 3 次不设冷却：正常输错应该能马上重试。
+	// 注意是 <=3 而不是 <3 —— 第 3 次失败后 count 已经是 3，
+	// 用 <3 会让第 3 次就要求等 3 秒，与注释描述不符（有单测盯着这条）。
+	if rec.count <= 3 {
+		return 0
+	}
+	// 第 4 次起按「3s、6s、9s……最多 15s」节流
+	sec := (rec.count - 3) * 3
+	if sec < 3 {
+		sec = 3
+	}
+	if sec > 15 {
+		sec = 15
+	}
+	wait := time.Duration(sec)*time.Second - time.Since(rec.last)
+	if wait < 0 {
+		return 0
+	}
+	return wait
+}
+
+func recordFail(ip string) {
+	failMu.Lock()
+	defer failMu.Unlock()
+	now := time.Now()
+	rec, ok := fails[ip]
+	if !ok || now.Sub(rec.first) > loginFailWindow {
+		fails[ip] = &failRecord{count: 1, first: now, last: now}
 		return
 	}
 	rec.count++
+	rec.last = now
 	// 简单容量控制，避免被大量来源灌满
 	if len(fails) > 4096 {
 		for k, v := range fails {
-			if time.Since(v.first) > loginFailWindow {
+			if now.Sub(v.first) > loginFailWindow {
 				delete(fails, k)
 			}
 		}
@@ -181,7 +228,14 @@ func hLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	ip := clientIP(r)
 	if tooManyFails(ip) {
-		fail(w, http.StatusTooManyRequests, "尝试次数过多，请 10 分钟后再试")
+		fail(w, http.StatusTooManyRequests, "尝试次数过多，请 15 分钟后再试；忘记密码可用 -user/-pass 重启服务重设")
+		return
+	}
+	// 失败次数较多时给出渐进冷却，返回明确还要等多久。
+	// 只回 429 不说等多久，用户只会反复点，反而更快被锁。
+	if wait := failCooldown(ip); wait > 0 {
+		sec := int(wait.Seconds()) + 1
+		fail(w, http.StatusTooManyRequests, fmt.Sprintf("尝试过于频繁，请 %d 秒后再试", sec))
 		return
 	}
 
