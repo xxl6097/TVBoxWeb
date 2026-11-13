@@ -154,5 +154,74 @@ expect(/v-if="hint"/.test(mvTpl), '移动端渲染 hint')
 expect(/\.player-hint\s*\{/.test(code), '有 .player-hint 样式')
 expect(/hint\.value\s*=/.test(code), 'hint 仍被赋值（不是死变量）')
 
+console.log('\n[18] 竖屏视频区不能太矮、面板不能留大片空白')
+{
+  // 原来 .m-video-wrap 锁 16:9（390 屏只有 219px，占 26%），
+  // .m-panel 又是 flex:1 撑满剩余空间，内容仅 266px 却占 625px，
+  // 底部空出 359px，看着像页面没加载完。
+  const css = code.slice(code.indexOf('.m-player:not(.m-fullscreen) .m-video-wrap'))
+  expect(/flex:\s*1/.test(css.slice(0, 400)), '竖屏视频区用 flex 吃掉剩余高度')
+  expect(!/aspect-ratio:\s*16\s*\/\s*9/.test(css.slice(0, 400)),
+    '竖屏视频区不再锁死 16:9')
+  const panel = code.slice(code.indexOf('.m-panel {'), code.indexOf('.m-panel {') + 500)
+  expect(/flex:\s*0\s+0\s+auto/.test(panel), '面板按内容高度排布（不再 flex:1 撑满）')
+  expect(/max-height/.test(panel), '面板有高度上限，内容过多时内部滚动')
+}
+
+console.log('\n[19] 定时器必须先停表再走后续逻辑')
+{
+  // 只把 id 置 0 而不 clearInterval，一旦后续提前 return 就会一直跑下去
+  const ended = code.slice(code.indexOf('vid.onended'), code.indexOf('vid.onended') + 1200)
+  expect(/clearInterval\(autoplayTimer\)[\s\S]{0,80}?autoplayTimer\s*=\s*0/.test(ended),
+    '连播倒计时到点时先 clearInterval 再置 0')
+  const skip = code.slice(code.indexOf('function showSkipBtn'), code.indexOf('function showSkipBtn') + 600)
+  expect(/clearInterval\(skipTimer\)[\s\S]{0,120}?skipTimer\s*=\s*0[\s\S]{0,120}?doSkip/.test(skip),
+    '跳过倒计时先停表并归零，再调 doSkip')
+}
+
+console.log('\n[20] 键盘快捷键')
+{
+  const k = code.slice(code.indexOf('function onKey'), code.indexOf('function onKey') + 1400)
+  for (const key of ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown']) {
+    const seg = k.slice(k.indexOf(key))
+    expect(/preventDefault/.test(seg.slice(0, 260)), `${key} 会 preventDefault（不滚动背景）`)
+  }
+  expect(/toLowerCase\(\)/.test(k), '按键统一转小写（M/F/P 都能用）')
+  expect(/supportsPip\(\)/.test(k.slice(k.indexOf("'p'"), k.indexOf("'p'") + 300)),
+    '按 P 前检查是否支持画中画')
+}
+
+console.log('\n[21] 解析失败时不能卡在「正在解析」')
+{
+  expect(/function safeResolve/.test(code), '有 safeResolve 统一包装')
+  const sr = code.slice(code.indexOf('function safeResolve'), code.indexOf('function safeResolve') + 700)
+  expect(/finally/.test(sr) && /resolving\.value\s*=\s*false/.test(sr),
+    'safeResolve 在 finally 里复位 resolving')
+  // 唯一允许出现裸调的地方就是 safeResolve 自己
+  const total = (code.match(/await resolveUrl\(\)/g) || []).length
+  const inside = (sr.match(/await resolveUrl\(\)/g) || []).length
+  expect(total === inside, `safeResolve 以外没有裸调 await resolveUrl()（共 ${total} 处，其中 safeResolve 内 ${inside} 处）`)
+}
+
+console.log('\n[22] 音量滑块拖动')
+{
+  const down = code.slice(code.indexOf('function onVolDown'), code.indexOf('function onVolDown') + 900)
+  expect(/addEventListener\('pointermove'/.test(down), '拖动时 pointermove 绑 window')
+  expect(/addEventListener\('pointerup'/.test(down), 'pointerup 绑 window（移出元素也能收尾）')
+  const up = code.slice(code.indexOf('function onVolUp'), code.indexOf('function onVolUp') + 400)
+  expect(/removeEventListener\('pointermove'/.test(up), 'onVolUp 解绑 window 监听')
+  const un = code.slice(code.indexOf('onUnmounted('), code.indexOf('onUnmounted(') + 1400)
+  expect(/onVolUp\(\)/.test(un), '卸载时解绑音量拖动监听')
+}
+
+console.log('\n[23] 网盘历史保存兜底')
+{
+  const sp = code.slice(code.indexOf('function savePos'), code.indexOf('function savePos') + 1600)
+  expect(!/siteKey === 'webdav'\) \{\s*if \(!player\.wdVod\) return/.test(sp),
+    'wdVod 为空时不再直接 return（会落到点播历史分支）')
+  expect(/siteKey === 'webdav' && player\.wdVod/.test(sp),
+    '只有 wdVod 有值时才写网盘历史')
+}
+
 console.log(failed === 0 ? '\n全部通过' : `\n${failed} 项失败`)
 process.exit(failed === 0 ? 0 : 1)

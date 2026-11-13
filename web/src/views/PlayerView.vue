@@ -275,8 +275,7 @@ onMounted(async () => {
   // 应用音量偏好（持久化，0=未设置用 1.0）
   volume.value = Math.min(1, Math.max(0, prefs.volumePref || 1))
   syncEpLabel()
-  await resolveUrl()
-  resolving.value = false
+  await safeResolve()
   initPlayer()
   if (videoEl.value) videoEl.value.volume = volume.value
   // 监听投屏连接状态（Remote Playback API）
@@ -303,6 +302,10 @@ onUnmounted(() => {
   if (skipTimer) { clearInterval(skipTimer); skipTimer = 0 }
   if (flashTimer) { clearTimeout(flashTimer); flashTimer = 0 }
   if (volTimer) { clearTimeout(volTimer); volTimer = 0 }
+  // 音量拖动把 move/up 绑到了 window，卸载时必须解绑，否则离开播放页后
+  // 任何一次 pointermove 都会调到已销毁组件的 setVolumeFromEvent。
+  onVolUp()
+  detachProgressListeners()
   cancelAutoplay()
   removeExternalSub()
   disposeSubtitles()
@@ -380,6 +383,28 @@ async function resolveUrl() {
   } catch {
     finalUrl = rawUrl
     via.value = '直链'
+  }
+}
+
+/**
+ * 解析地址的统一包装：保证 resolving 一定被复位。
+ *
+ * 之前三处调用点都写成 `resolving = true; await resolveUrl(); resolving = false`。
+ * resolveUrl 内部虽然大部分分支自己 catch 了，但 pickPlayableLive 里对
+ * player.current 的访问、以及个别 await 仍可能抛出去 —— 一旦抛出，
+ * resolving 永远停在 true，界面就卡在「正在解析播放地址…」不动，
+ * 连重试按钮都出不来。
+ */
+async function safeResolve() {
+  try {
+    await resolveUrl()
+  } catch (e) {
+    if (!finalUrl) {
+      errMsg.value = '解析播放地址失败，请点击重试或返回换一个源'
+      showOsd.value = true
+    }
+  } finally {
+    resolving.value = false
   }
 }
 
@@ -607,6 +632,11 @@ function bindVideoEvents(vid: HTMLVideoElement) {
         if (countdown > 0) {
           hint.value = `即将播放下一集（${countdown}s）`
         } else {
+          // 必须先 clearInterval 再置 0：只把 id 清掉而不停表的话，
+          // 一旦下面的 switchEpisode 走不到 destroyPlayer（比如
+          // player.count 为 0 时提前 return），这个 interval 会一直
+          // 每秒跑下去，反复调 switchEpisode 并重复弹提示。
+          clearInterval(autoplayTimer)
           autoplayTimer = 0
           hint.value = ''
           switchEpisode(1)
@@ -942,6 +972,9 @@ function onProgressUp(e: PointerEvent) {
 // ---------- 音量滑块 ----------
 
 const volDragging = ref(false)
+// 音量条 DOM：拖动中要拿它算比例。move 事件现在绑在 window 上，
+// event.currentTarget 是 window 而不是音量条，所以必须单独记住元素。
+let volBarEl: HTMLElement | null = null
 let volSaveTimer = 0
 
 // 音量变化后防抖落盘，避免拖动时每帧都请求后端
@@ -953,8 +986,11 @@ function persistVolume() {
 }
 
 function setVolumeFromEvent(e: PointerEvent) {
-  const el = e.currentTarget as HTMLElement
+  // 优先用拖动时锁定的音量条；没有（非拖动的单次点击）再退回 currentTarget
+  const el = volBarEl || (e.currentTarget as HTMLElement | null)
+  if (!el || typeof el.getBoundingClientRect !== 'function') return
   const rect = el.getBoundingClientRect()
+  if (rect.width <= 0) return
   let r = (e.clientX - rect.left) / rect.width
   r = Math.min(1, Math.max(0, r))
   volume.value = r
@@ -967,17 +1003,29 @@ function setVolumeFromEvent(e: PointerEvent) {
 }
 
 function onVolDown(e: PointerEvent) {
+  e.preventDefault()
   volDragging.value = true
+  volBarEl = e.currentTarget as HTMLElement
   setVolumeFromEvent(e)
-  ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+  // 与进度条一致：move/up 绑 window 而不是元素自己。
+  // 只靠 setPointerCapture 时，元素一被重渲染/Vue 重排就会丢事件，
+  // 表现为「拖着拖着音量就不跟手了」，松手也收不到 pointerup。
+  window.addEventListener('pointermove', onVolMove, { passive: true })
+  window.addEventListener('pointerup', onVolUp, { passive: true })
+  window.addEventListener('pointercancel', onVolUp, { passive: true })
 }
 
 function onVolMove(e: PointerEvent) {
-  if (volDragging.value) setVolumeFromEvent(e)
+  if (!volDragging.value || !volBarEl) return
+  setVolumeFromEvent(e)
 }
 
 function onVolUp() {
   volDragging.value = false
+  volBarEl = null
+  window.removeEventListener('pointermove', onVolMove)
+  window.removeEventListener('pointerup', onVolUp)
+  window.removeEventListener('pointercancel', onVolUp)
 }
 
 function seekBy(dir: number) {
@@ -1181,8 +1229,7 @@ async function switchEpisode(delta: number) {
   }
   syncEpLabel()
   resolving.value = true
-  await resolveUrl()
-  resolving.value = false
+  await safeResolve()
   initPlayer()
 }
 
@@ -1222,8 +1269,7 @@ async function switchLine(url: string) {
   rawUrl = url
   app.showTip('切换线路中…')
   resolving.value = true
-  await resolveUrl()
-  resolving.value = false
+  await safeResolve()
   initPlayer()
 }
 
@@ -1236,10 +1282,7 @@ function retry() {
   durMs.value = 0
   errMsg.value = ''
   resolving.value = true
-  resolveUrl().then(() => {
-    resolving.value = false
-    initPlayer()
-  })
+  safeResolve().then(() => initPlayer())
 }
 
 function destroyPlayer() {
@@ -1282,9 +1325,11 @@ function savePos() {
   const pos = realPosMs()
   if (pos <= 0) return
   curMs.value = pos
-  // 网盘播放：保存续播记录（网盘页「继续观看」）
-  if (siteKey === 'webdav') {
-    if (!player.wdVod) return
+  // 网盘播放：保存续播记录（网盘页「继续观看」）。
+  // 但 wdVod 为空时（老数据、或从直链进来的网盘资源）不能直接 return ——
+  // 那样连点播历史也不会写，结果是「看过但哪都没有记录」。让它落到下面的
+  // 点播历史分支，至少首页「继续观看」还能看到。
+  if (siteKey === 'webdav' && player.wdVod) {
     api
       .updateWdHistory({
         srcId: player.wdSrcId,
@@ -1347,7 +1392,10 @@ function showSkipBtn(kind: string, totalSec: number) {
   skipTimer = window.setInterval(() => {
     skipLeft.value -= 0.1
     if (skipLeft.value <= 0) {
+      // 先停表再执行：doSkip 在 skipShow 已变化时会提前 return，
+      // 那样 skipTimer 永远停不下来，之后每秒都会再调一次 doSkip。
       clearInterval(skipTimer)
+      skipTimer = 0
       doSkip(kind)
     }
   }, 100)
@@ -1405,21 +1453,34 @@ function onKey(e: KeyboardEvent) {
   if (isTypingTarget(e.target)) return
   // 带修饰键的（Ctrl+C 等）也不劫持
   if (e.ctrlKey || e.metaKey || e.altKey) return
+  const k = e.key.toLowerCase()
   if (e.key === ' ' || e.key === 'Enter') {
     e.preventDefault()
     if (!showOsd.value) popOsd()
     else togglePlay()
   } else if (e.key === 'ArrowLeft') {
+    e.preventDefault()
     if (isLive) switchEpisode(-1)
     else seekBy(-1)
   } else if (e.key === 'ArrowRight') {
+    e.preventDefault()
     if (isLive) switchEpisode(1)
     else seekBy(1)
-  } else if (e.key === 'ArrowUp') changeVolume(0.05)
-  else if (e.key === 'ArrowDown') changeVolume(-0.05)
-  else if (e.key === 'm') toggleMute()
-  else if (e.key === 'f' || e.key === 'F') toggleFullscreen()
-  else if (e.key === 'p' || e.key === 'P') togglePip()
+  } else if (e.key === 'ArrowUp') {
+    // 不 preventDefault 的话方向键会连带滚动背景页面（播放页本身不滚动，
+    // 但浏览器会把滚动传给文档，桌面端表现为画面轻微位移）
+    e.preventDefault()
+    changeVolume(0.05)
+  } else if (e.key === 'ArrowDown') {
+    e.preventDefault()
+    changeVolume(-0.05)
+  } else if (k === 'm') toggleMute()
+  else if (k === 'f') toggleFullscreen()
+  else if (k === 'p') {
+    // 不支持画中画的环境直接忽略，不要静默失败
+    if (supportsPip()) togglePip()
+    else app.showTip('当前浏览器不支持画中画')
+  }
 }
 
 onMounted(() => {
@@ -1512,7 +1573,7 @@ onUnmounted(() => {
           <button class="ctl primary" @click="togglePlay">{{ playPauseText }}</button>
           <button class="ctl" @click="seekBy(1)">+10 秒</button>
           <button class="ctl" @click="toggleMute">{{ muteText }}</button>
-          <div class="vol-slider" @pointerdown="onVolDown" @pointermove="onVolMove" @pointerup="onVolUp">
+          <div class="vol-slider" @pointerdown="onVolDown">
             <div class="vol-track"><div class="vol-fill" :style="{ width: (muted ? 0 : volume * 100) + '%' }"></div></div>
           </div>
           <button class="ctl" @click="togglePlaySpeed" :title="`当前 ${rateLabel}x，点击切换倍速`">{{ rateLabel }}x</button>
@@ -2044,8 +2105,20 @@ onUnmounted(() => {
   flex-shrink: 0;
   background: #000;
 }
+/* 竖屏非全屏时，视频区原来锁死 16:9 —— 390 宽的屏只有 219px 高（占 26%），
+   而下面控制面板内容才 266px 却靠 flex:1 撑到 625px，底部空出 359px 纯白。
+   现在视频区吃掉面板之外的全部剩余高度（视频用 contain 居中，多出的
+   上下留黑边而不是白色空白），面板按内容高度贴着底部。 */
 .m-player:not(.m-fullscreen) .m-video-wrap {
-  aspect-ratio: 16 / 9;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.m-player:not(.m-fullscreen) .m-video-wrap > .video {
+  width: 100%;
+  height: 100%;
 }
 .m-player.m-fullscreen .m-video-wrap {
   flex: 1;
@@ -2077,10 +2150,16 @@ onUnmounted(() => {
 }
 
 .m-panel {
-  flex: 1;
+  /* 原来是 flex:1 —— 会把面板拉伸到占满剩余空间，内容只有 266px
+     却在 844 高的屏上占 625px，底部留出 359px 空白，视频被压到 219px。
+     改成按内容自然高度（不放大），富余高度留给上面的视频区。 */
+  flex: 0 0 auto;
   background: var(--surface);
   padding: 12px 16px 16px;
   overflow-y: auto;
+  /* 横屏或小屏时面板内容可能比可用空间高，给个上限并允许滚动，
+     否则会顶出视口（body 是 overflow:hidden，溢出部分直接看不到）。 */
+  max-height: 62dvh;
   display: flex;
   flex-direction: column;
   gap: 12px;
