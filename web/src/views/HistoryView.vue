@@ -17,9 +17,29 @@ let delTimer = 0
 onMounted(load)
 
 async function load() {
-  const all = await api.history()
-  // 过滤空名称的历史记录（旧格式或测试遗留）
-  hist.value = all.filter((h: HistItem) => h.name && h.name.trim())
+  // 网盘历史和点播历史分开存，这里合并展示（与首页「继续观看」一致），
+  // 否则在网盘看过的片子在这儿也找不到。
+  const [all, wd] = await Promise.all([
+    api.history(),
+    api.webdavHistory().catch(() => [])
+  ])
+  const normal = all.filter((h: HistItem) => h.name && h.name.trim())
+  const wdItems: HistItem[] = (wd || [])
+    .filter((x: any) => x.vodName && x.pos > 0)
+    .map((x: any) => ({
+      siteKey: 'webdav',
+      siteName: x.srcName || '网盘',
+      vodId: `${x.srcId}:${x.vodName}`,
+      name: x.vodName,
+      pic: '',
+      epName: x.epName || '',
+      epIndex: x.epIndex,
+      from: '',
+      pos: x.pos,
+      dur: x.dur || 0,
+      time: x.time || 0
+    } as HistItem))
+  hist.value = [...normal, ...wdItems].sort((a, b) => (b.time || 0) - (a.time || 0))
 }
 
 
@@ -55,6 +75,11 @@ function progressOf(h: HistItem): number {
 }
 
 function open(h: HistItem) {
+  // 网盘记录没有详情页，交给网盘页续播
+  if (h.siteKey === 'webdav') {
+    router.push({ name: 'webdav', query: { continue: h.vodId } })
+    return
+  }
   router.push({ name: 'detail', query: { site: h.siteKey, siteName: h.siteName, id: h.vodId } })
 }
 
@@ -82,6 +107,14 @@ function remove(h: HistItem) {
   }
   confirmDel.value = ''
   if (delTimer) clearTimeout(delTimer)
+  if (h.siteKey === 'webdav') {
+    const [srcId, ...rest] = h.vodId.split(':')
+    api.removeWdHistory({ srcId, vodName: rest.join(':') }).then(() => {
+      app.showTip('已删除「' + h.name + '」')
+      load()
+    })
+    return
+  }
   api.removeHistory(h).then(() => {
     app.showTip('已删除「' + h.name + '」')
     load()
@@ -98,7 +131,11 @@ function clearAll() {
   }
   confirming.value = false
   if (confirmTimer) clearTimeout(confirmTimer)
-  api.clearHistory().then(() => {
+  // 两套历史一起清
+  Promise.all([
+    api.clearHistory().catch(() => {}),
+    api.clearWebdavHistory().catch(() => {})
+  ]).then(() => {
     app.showTip('历史已清空')
     load()
   })

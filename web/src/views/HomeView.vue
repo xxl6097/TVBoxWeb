@@ -43,9 +43,34 @@ function goCat(tid: string) {
 
 async function loadFeed() {
   try {
-    const [h, f] = await Promise.all([api.history(), api.feed()])
+    // 网盘历史和点播历史是两套存储（/api/webdav/history vs /api/history）。
+    // 首页「继续观看」原来只读后者，所以在网盘里看过的片子在这里永远看不到，
+    // 用户会以为「网盘没记录播放历史」。这里把两边合并，按时间倒序。
+    const [h, f, wd] = await Promise.all([
+      api.history(),
+      api.feed(),
+      api.webdavHistory().catch(() => [])
+    ])
     // 过滤掉影片名为空的记录（来自旧格式或测试遗留）
-    history.value = h.filter((x: HistItem) => x.name && x.name.trim())
+    const normal = h.filter((x: HistItem) => x.name && x.name.trim())
+    // 网盘记录转成首页卡片能用的形状。用 siteKey='webdav' 做标记，
+    // 点击时走网盘续播而不是跳详情页。
+    const wdItems: HistItem[] = (wd || [])
+      .filter((x: any) => x.vodName && x.pos > 0)
+      .map((x: any) => ({
+        siteKey: 'webdav',
+        siteName: x.srcName || '网盘',
+        vodId: `${x.srcId}:${x.vodName}`,
+        name: x.vodName,
+        pic: '',
+        epName: x.epName || '',
+        epIndex: x.epIndex,
+        from: '',
+        pos: x.pos,
+        dur: x.dur || 0,
+        time: x.time || 0
+      } as HistItem))
+    history.value = [...normal, ...wdItems].sort((a, b) => (b.time || 0) - (a.time || 0))
     feed.value = f.feed
     feedSummary.value = f.summary
   } finally {
@@ -118,12 +143,25 @@ function continueVods(): Vod[] {
 }
 
 function openHistory(h: HistItem) {
+  // 网盘记录没有点播详情页，直接交给网盘页的续播流程：
+  // WebdavView 支持 ?continue=<srcId>:<vodName> 自动续播。
+  if (h.siteKey === 'webdav') {
+    router.push({ name: 'webdav', query: { continue: h.vodId } })
+    return
+  }
   router.push({ name: 'detail', query: { site: h.siteKey, siteName: h.siteName, id: h.vodId } })
 }
 
 async function removeHist(h: HistItem) {
+  if (h.siteKey === 'webdav') {
+    const [srcId, ...rest] = h.vodId.split(':')
+    await api.removeWdHistory({ srcId, vodName: rest.join(':') })
+    await loadFeed()
+    app.showTip('已删除「' + h.name + '」')
+    return
+  }
   await api.removeHistory(h)
-  history.value = await api.history()
+  await loadFeed()
   app.showTip('已删除「' + h.name + '」')
 }
 
@@ -139,7 +177,11 @@ async function clearHist() {
   confirmClear.value = false
   if (confirmTimer) clearTimeout(confirmTimer)
   const n = history.value.length
-  await api.clearHistory()
+  // 两套历史都要清，否则点「清空」后网盘那几条还留在列表里
+  await Promise.all([
+    api.clearHistory().catch(() => {}),
+    api.clearWebdavHistory().catch(() => {})
+  ])
   history.value = []
   app.showTip('已清空 ' + n + ' 条记录')
 }
@@ -212,7 +254,11 @@ function refresh() {
           @click="openHistory(h)"
         >
           <div class="poster">
-            <img :src="h.pic" :alt="h.name" loading="lazy" />
+            <img v-if="h.pic" :src="h.pic" :alt="h.name" loading="lazy" />
+            <!-- 网盘记录没有封面图，用图标占位，避免一片空白让人以为加载失败 -->
+            <div v-else class="poster-ph" aria-hidden="true">
+              <span>{{ h.siteKey === 'webdav' ? '☁' : '🎬' }}</span>
+            </div>
             <div v-if="histRatio(h) > 0" class="progress"><div class="bar" :style="{ width: histRatio(h) * 100 + '%' }"></div></div>
             <div class="ep">{{ h.epName || '继续观看' }}</div>
             <div class="del" @click.stop="removeHist(h)">✕</div>
@@ -299,6 +345,16 @@ function refresh() {
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+/* 网盘记录没有封面：给个居中图标占位 */
+.poster-ph {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 30px;
+  opacity: 0.55;
 }
 .progress {
   position: absolute;

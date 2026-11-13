@@ -38,6 +38,19 @@ const form = ref<WebdavSource>({ id: '', name: '', url: '', user: '', pass: '', 
 
 onMounted(async () => {
   await refreshData()
+  // 从首页「继续观看」点网盘记录跳过来时带 ?continue=<srcId>:<vodName>：
+  // 直接走续播，不用让用户再点一遍「继续播放」。
+  const cont = route.query.continue as string | undefined
+  if (cont) {
+    const idx = cont.indexOf(':')
+    const srcId = idx > 0 ? cont.slice(0, idx) : ''
+    const vodName = idx > 0 ? cont.slice(idx + 1) : ''
+    const h = wdHist.value.find((x) => x.srcId === srcId && x.vodName === vodName)
+    if (h) {
+      await continueWatch(h)
+      return
+    }
+  }
   // 从设置页「识别影视 → 查看结果」跳过来时带 ?src=<id>：
   // 该源已有识别缓存就直接进识别视图（不重扫）；缓存为空就停在源列表并说明。
   const srcId = route.query.src as string | undefined
@@ -628,7 +641,7 @@ function back() {
     </div>
 
     <!-- 选集弹窗 -->
-    <el-dialog v-model="epOpen" :title="selVod?.name" width="480px" append-to-body>
+    <el-dialog v-model="epOpen" :title="selVod?.name" width="min(480px, 92vw)" append-to-body>
       <div class="ep-list">
         <div
           v-for="(ep, i) in selVod?.eps || []"
@@ -643,7 +656,7 @@ function back() {
     </el-dialog>
 
     <!-- 源表单弹窗 -->
-    <el-dialog v-model="formOpen" title="网盘源" width="480px" append-to-body>
+    <el-dialog v-model="formOpen" title="网盘源" width="min(480px, 92vw)" append-to-body>
       <el-form label-width="80px">
         <el-form-item label="名称">
           <el-input v-model="form.name" placeholder="留空自动用主机名" />

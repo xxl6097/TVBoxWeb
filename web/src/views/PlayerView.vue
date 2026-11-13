@@ -72,8 +72,7 @@ const errMsg = ref('')
 const hint = ref('')
 const playFlash = ref('')
 const skipShow = ref('')
-// 画面比例：0 拉伸铺满 / 1 裁剪铺满 / 2 等比适应
-const scaleMode = ref(0)
+// 画面比例（默认值见下方 scaleFit 处的说明）
 const skipLeft = ref(0)
 const introSkipSec = ref(0)
 const outroSkipSec = ref(0)
@@ -742,6 +741,11 @@ function chooseLevel(cap: number) {
 }
 
 // 画面比例
+// 默认用「等比适应（留黑边）」而不是「拉伸铺满」：
+// fill 会把 16:9 的视频硬压进手机竖屏容器（390×844），画面严重变形；
+// 部分移动端 GPU 在这种拉伸 + 硬件解码的组合下还会出现色块/花屏，
+// 看起来就是「画面闪成一块块纯色」。等比留黑边是最不容易出问题的默认值。
+const scaleMode = ref(2)
 const scaleFit = computed(() => {
   if (scaleMode.value === 0) return 'fill'
   if (scaleMode.value === 1) return 'cover'
@@ -1046,7 +1050,7 @@ function togglePlaySpeed() {
 }
 
 // ===== 移动端手势（usePlayerGestures 组合式函数）=====
-const { gestureHint, brightness, onTouchStart, onTouchMove, onTouchEnd, disposeGestures } =
+const { gestureHint, brightness, resetBrightness, onTouchStart, onTouchMove, onTouchEnd, disposeGestures } =
   usePlayerGestures({
     videoEl,
     volume,
@@ -1056,6 +1060,7 @@ const { gestureHint, brightness, onTouchStart, onTouchMove, onTouchEnd, disposeG
     showOsd,
     isLive: () => isLive,
     seekBy,
+    applySeek,
     togglePlay,
     flashPlay,
     popOsd,
@@ -1160,6 +1165,9 @@ async function switchEpisode(delta: number) {
   remuxSeek.value = 0
   pendingResumeMs = 0
   lastSaveMs = 0
+  // 亮度遮罩也要复位：上一集被手势压暗后，下一集会带着同一层黑开场，
+  // 用户会以为新一集画面发灰/变色。
+  resetBrightness()
   introDone = false
   outroFired = false
   skipShow.value = ''
@@ -1204,6 +1212,9 @@ async function switchLine(url: string) {
   remuxSeek.value = 0
   pendingResumeMs = 0
   lastSaveMs = 0
+  // 亮度遮罩也要复位：上一集被手势压暗后，下一集会带着同一层黑开场，
+  // 用户会以为新一集画面发灰/变色。
+  resetBrightness()
   introDone = false
   outroFired = false
   skipShow.value = ''
