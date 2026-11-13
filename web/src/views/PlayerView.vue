@@ -91,7 +91,10 @@ const {
   applySubStyle,
   setSubFontSize,
   removeExternalSub,
+  detachExternalSub,
+  reattachExternalSub,
   setExternalSub,
+  setTimelineBase,
   onSubFile,
   promptSubUrl,
   setSubDelay,
@@ -102,7 +105,6 @@ const {
   tip: (m: string) => app.showTip(m),
   proxy: (u: string) => proxied(u)
 })
-void switchSubtitle // 内嵌字幕轨道切换，保留给将来 UI 使用
 
 // ===== 倍速播放 =====
 const playbackRate = ref(1.0)
@@ -550,6 +552,10 @@ async function initPlayer() {
     vid.src = src
   }
   bindVideoEvents(vid)
+  // 新流就绪后把之前用过的外挂字幕重新挂回来（切集时 detach 过）。
+  // 必须在这里做：<track> 要挂到 video 元素上，而 video 是同一个节点，
+  // 换源时其子节点会被清掉，所以每次 initPlayer 都要重新 append。
+  reattachExternalSub()
   // 应用倍速偏好（已从 prefs 读取）
   if (playbackRate.value !== 1) {
     vid.playbackRate = playbackRate.value
@@ -571,6 +577,10 @@ function bindVideoEvents(vid: HTMLVideoElement) {
     prepared.value = true
     buffering.value = false
     playing.value = true
+    // 转封装流的时间轴从 seek 点重新计数，而外挂字幕的 cue 是整片绝对时间。
+    // 不告诉字幕模块这个偏移，字幕会整体提前 remuxSeek 秒出现
+    // （从第 10 分钟续播，本该 10:30 的台词会在 0:30 就冒出来）。
+    setTimelineBase(remuxMode.value ? remuxSeek.value * 1000 : 0)
     popOsd()
     // 网盘续播。
     // 转封装模式：initPlayer 已经把起点塞给 remuxSeek，这条流本身就是
@@ -1203,6 +1213,11 @@ async function switchEpisode(delta: number) {
     return
   }
   destroyPlayer()
+  // 上一集的外挂 <track> 必须从 video 上摘掉：destroyPlayer 只是改了 src，
+  // <track> 是挂在 video 元素上的子节点，不会跟着换源消失。
+  // 不摘的话下一集会继续显示上一集的字幕（外挂字幕常见跨集通用，
+  // 所以内容要留着，等新流就绪后 reattachExternalSub 再挂回去）。
+  detachExternalSub()
   curMs.value = 0
   durMs.value = 0
   prepared.value = false
@@ -1249,6 +1264,11 @@ async function switchLine(url: string) {
     return
   }
   destroyPlayer()
+  // 上一集的外挂 <track> 必须从 video 上摘掉：destroyPlayer 只是改了 src，
+  // <track> 是挂在 video 元素上的子节点，不会跟着换源消失。
+  // 不摘的话下一集会继续显示上一集的字幕（外挂字幕常见跨集通用，
+  // 所以内容要留着，等新流就绪后 reattachExternalSub 再挂回去）。
+  detachExternalSub()
   curMs.value = 0
   durMs.value = 0
   prepared.value = false
@@ -1362,6 +1382,79 @@ function savePos() {
       time: Date.now()
     })
     .catch(() => {})
+}
+
+/**
+ * 页面就要被销毁时的应急保存（关标签页、切后台被回收、手机按 Home）。
+ *
+ * 这些场景下 Vue 的 onUnmounted 根本不会触发 —— 浏览器直接丢弃整个页面，
+ * 于是「看了半小时、直接关掉、下次打开又从头发」。
+ * 这时候普通 fetch 也可能被中断，所以用 sendBeacon：浏览器保证把它发出去
+ * 才会真正销毁页面。
+ */
+function savePosBeacon() {
+  if (isLive) return
+  const pos = realPosMs()
+  if (pos <= 0) return
+  const isWd = siteKey === 'webdav' && player.wdVod
+  let path = ''
+  let body: Record<string, unknown> = {}
+  const dur = durMs.value > 0 ? Math.floor(durMs.value) : 0
+  if (isWd) {
+    path = '/api/webdav/history/update'
+    body = {
+      srcId: player.wdSrcId,
+      srcName: player.wdSrcName,
+      vodName: player.wdVod,
+      dir: player.wdDir,
+      epIndex: player.idx,
+      epName: player.current?.name || '',
+      url: player.current?.url || '',
+      pos: Math.floor(pos),
+      dur,
+      time: Date.now()
+    }
+  } else {
+    if (!siteKey || !vodId) return
+    path = '/api/history/pos'
+    body = {
+      siteKey,
+      siteName: vodSiteName,
+      vodId,
+      name: vodName,
+      pic: vodPic,
+      epName: player.current?.name || '',
+      epIndex: player.idx,
+      from: '',
+      pos: Math.floor(pos),
+      dur,
+      time: Date.now()
+    }
+  }
+  try {
+    const blob = new Blob([JSON.stringify(body)], { type: 'application/json' })
+    navigator.sendBeacon(path, blob)
+  } catch {
+    // sendBeacon 不可用（极老浏览器/被策略禁用）就退回同步 XHR，
+    // 至少比什么都不做好 —— 这点数据量不至于卡住关页。
+    try {
+      const xhr = new XMLHttpRequest()
+      xhr.open('POST', path, false)
+      xhr.setRequestHeader('Content-Type', 'application/json')
+      xhr.send(JSON.stringify(body))
+    } catch {
+      /* 尽力而为 */
+    }
+  }
+}
+
+function onPageHide() {
+  savePosBeacon()
+}
+
+function onVisibilityChange() {
+  // 切到后台：移动端很可能不会再回来（被系统回收），先存一份。
+  if (document.visibilityState === 'hidden') savePosBeacon()
 }
 
 // ---------- 提示 ----------
@@ -1491,6 +1584,9 @@ onMounted(() => {
   document.addEventListener('MSFullscreenChange', onFullscreenChange)
   checkMobile()
   window.addEventListener('resize', checkMobile)
+  // 关标签页/切后台时兜底保存进度：这两种情况下 onUnmounted 不会执行
+  window.addEventListener('pagehide', onPageHide)
+  document.addEventListener('visibilitychange', onVisibilityChange)
 })
 onUnmounted(() => {
   window.removeEventListener('keydown', onKey)
@@ -1499,6 +1595,8 @@ onUnmounted(() => {
   document.removeEventListener('mozfullscreenchange', onFullscreenChange)
   document.removeEventListener('MSFullscreenChange', onFullscreenChange)
   window.removeEventListener('resize', checkMobile)
+  window.removeEventListener('pagehide', onPageHide)
+  document.removeEventListener('visibilitychange', onVisibilityChange)
 })
 </script>
 
@@ -1612,6 +1710,8 @@ onUnmounted(() => {
       :sub-font-size="subFontSize"
       :external-sub-active="externalSubActive"
       :sub-label="subLabel"
+      :sub-tracks="subtitles"
+      :sub-track-idx="currentSubIdx"
       :scale-names="scaleNames"
       :scale-mode="scaleMode"
       :intro-skip-sec="introSkipSec"
@@ -1621,6 +1721,7 @@ onUnmounted(() => {
       @sub-file="onSubFile"
       @sub-url="promptSubUrl"
       @remove-sub="removeExternalSub"
+      @choose-sub-track="switchSubtitle"
       @sub-delay="setSubDelay"
       @sub-size="setSubFontSize"
       @scale="setScale"
@@ -1825,6 +1926,8 @@ onUnmounted(() => {
       :sub-font-size="subFontSize"
       :external-sub-active="externalSubActive"
       :sub-label="subLabel"
+      :sub-tracks="subtitles"
+      :sub-track-idx="currentSubIdx"
       :scale-names="scaleNames"
       :scale-mode="scaleMode"
       :intro-skip-sec="introSkipSec"
@@ -1834,6 +1937,7 @@ onUnmounted(() => {
       @sub-file="onSubFile"
       @sub-url="promptSubUrl"
       @remove-sub="removeExternalSub"
+      @choose-sub-track="switchSubtitle"
       @sub-delay="setSubDelay"
       @sub-size="setSubFontSize"
       @scale="setScale"

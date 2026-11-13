@@ -4,8 +4,10 @@
 // 从 PlayerView.vue 抽出以消除模板里几乎完全重复的两段。
 import type { QLevel } from '@/utils/quality'
 import { AUTO, TOP, labelOfLevel } from '@/utils/quality'
+import { computed } from 'vue'
+import type { SubtitleTrack } from '@/composables/usePlayerSubtitles'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   modelValue: boolean
   variant: 'desktop' | 'mobile'
   isLive: boolean
@@ -19,11 +21,20 @@ const props = defineProps<{
   subFontSize: number
   externalSubActive: boolean
   subLabel: string
+  /** HLS 内嵌字幕轨道（多语言），只有 m3u8 源才可能有。
+   *  必须给默认值：模板里读的是 subTracks.length，一旦调用方漏传
+   *  就会在渲染期抛 TypeError 把整个面板打崩。 */
+  subTracks?: SubtitleTrack[]
+  /** 当前激活的内嵌轨道下标，-1 表示关闭 */
+  subTrackIdx?: number
   scaleNames: string[]
   scaleMode: number
   introSkipSec: number
   outroSkipSec: number
-}>()
+}>(), {
+  subTracks: () => [],
+  subTrackIdx: -1
+})
 
 const emit = defineEmits<{
   (e: 'update:modelValue', v: boolean): void
@@ -32,6 +43,7 @@ const emit = defineEmits<{
   (e: 'sub-file', ev: Event): void
   (e: 'sub-url'): void
   (e: 'remove-sub'): void
+  (e: 'choose-sub-track', idx: number): void
   (e: 'sub-delay', ms: number): void
   (e: 'sub-size', px: number): void
   (e: 'scale', i: number): void
@@ -43,6 +55,10 @@ const emit = defineEmits<{
 const SKIP_PRESETS = [0, 15, 30, 60, 90]
 const SUB_DELAYS = [-500, 0, 500]
 const SUB_SIZES = [16, 20, 26, 32]
+
+// 模板里所有内嵌轨道相关的地方都走这里，保证永远不会是 undefined。
+// withDefaults 已兜住「不传」，这里再兜住「显式传 null」。
+const subTrackList = computed<SubtitleTrack[]>(() => props.subTracks || [])
 
 function close() {
   emit('update:modelValue', false)
@@ -88,6 +104,28 @@ function delayLabel(d: number) {
             :class="{ active: u === props.rawUrl }"
             @click="emit('switch-line', u)"
           >线路 {{ i + 1 }}</span>
+        </div>
+      </template>
+
+      <!-- 内嵌字幕轨道：只有 m3u8 源可能带多语言字幕。
+           这段功能（usePlayerSubtitles 的 subtitles/switchSubtitle）之前
+           完全没有 UI，代码里留了句 `void switchSubtitle // 保留给将来 UI 使用`，
+           等于内嵌字幕永远用不上。 -->
+      <template v-if="subTrackList.length">
+        <div class="q-section">内嵌字幕</div>
+        <div class="q-chips">
+          <span
+            class="chip"
+            :class="{ active: props.subTrackIdx === -1 }"
+            @click="emit('choose-sub-track', -1)"
+          >关闭</span>
+          <span
+            v-for="(t, i) in subTrackList"
+            :key="'st' + i"
+            class="chip"
+            :class="{ active: props.subTrackIdx === i }"
+            @click="emit('choose-sub-track', i)"
+          >{{ t.label || t.lang || '字幕 ' + (i + 1) }}</span>
         </div>
       </template>
 
@@ -182,6 +220,24 @@ function delayLabel(d: number) {
             :class="{ active: u === props.rawUrl }"
             @click="emit('switch-line', u)"
           >线路 {{ i + 1 }}</span>
+        </div>
+      </template>
+
+      <template v-if="subTrackList.length">
+        <div class="m-q-section">内嵌字幕</div>
+        <div class="m-q-chips">
+          <span
+            class="chip"
+            :class="{ active: props.subTrackIdx === -1 }"
+            @click="emit('choose-sub-track', -1)"
+          >关闭</span>
+          <span
+            v-for="(t, i) in subTrackList"
+            :key="'mst' + i"
+            class="chip"
+            :class="{ active: props.subTrackIdx === i }"
+            @click="emit('choose-sub-track', i)"
+          >{{ t.label || t.lang || '字幕 ' + (i + 1) }}</span>
         </div>
       </template>
 

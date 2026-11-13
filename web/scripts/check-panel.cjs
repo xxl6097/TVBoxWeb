@@ -38,14 +38,18 @@ function loadSFC(file) {
   const src = compiled.content
     .replace(/^import .*$/gm, '') // 去掉 @/ 别名导入，下面用 prelude 顶替
     .replace(/export default/, 'module.exports =')
-  const names = [
+  // 模板编译产物用的是带下划线前缀的别名（_createElementBlock 等），
+  // 而要剥离的 import 里用的是原名（computed、ref…），所以两套都要注入。
+  const renderNames = [
     'defineComponent', 'createElementBlock', 'createElementVNode', 'createBlock', 'openBlock',
     'toDisplayString', 'renderList', 'createCommentVNode', 'normalizeClass', 'withModifiers',
     'createTextVNode', 'Fragment', 'resolveComponent', 'withCtx', 'createVNode', 'mergeProps',
     'toHandlers', 'normalizeStyle', 'withDirectives', 'unref', 'isRef', 'resolveDynamicComponent'
   ]
+  const apiNames = ['computed', 'ref', 'reactive', 'watch', 'onMounted', 'onUnmounted', 'nextTick']
   const prelude =
-    `const { ${names.map((n) => `${n}: _${n}`).join(', ')} } = __VUE__;\n` +
+    `const { ${renderNames.map((n) => `${n}: _${n}`).join(', ')} } = __VUE__;\n` +
+    `const { ${apiNames.join(', ')} } = __VUE__;\n` +
     // 被测组件从 @/utils/quality 引入的三个常量
     `const AUTO = 0, TOP = 100000, labelOfLevel = (lv) => (lv.height ? lv.height + 'P' : '原画');\n`
   const js = esbuild.transformSync(prelude + src, { loader: 'ts', format: 'cjs' }).code
@@ -155,9 +159,95 @@ async function runVariant(variant) {
   app.unmount()
 }
 
+// 内嵌字幕轨道是后加的 prop。模板里读的是 subTracks.length，
+// 一旦漏传就会在渲染期抛 TypeError 把整个面板打崩 ——
+// 所以必须有默认值，这里专门跑一遍「什么都不传」的场景。
+async function runNoSubTracks(variant) {
+  console.log(`\n[${variant} 不传 subTracks]`)
+  document.body.innerHTML = '<div id="app"></div>'
+  const Parent = V.defineComponent({
+    setup() {
+      const showQ = V.ref(true) // 直接打开
+      return () =>
+        V.h(Panel, {
+          modelValue: showQ.value,
+          'onUpdate:modelValue': (v) => (showQ.value = v),
+          variant,
+          isLive: false, levels: [], qCap: 0, levelIdx: -1, lines: [], rawUrl: '',
+          subDelay: 0, subFontSize: 20, externalSubActive: false, subLabel: '',
+          scaleNames: ['铺满'], scaleMode: 0, introSkipSec: 0, outroSkipSec: 0
+          // 故意不传 subTracks / subTrackIdx
+        })
+    }
+  })
+  let threw = null
+  const app = V.createApp(Parent)
+  app.component('el-button', StubButton)
+  try {
+    app.mount('#app')
+    await tick()
+  } catch (e) {
+    threw = e
+  }
+  const mask = variant === 'mobile' ? '.m-q-mask' : '.q-panel'
+  expect(!threw, '不传 subTracks 也不抛异常', threw && String(threw).slice(0, 120))
+  expect(!!document.querySelector(mask), '面板仍能正常渲染')
+  expect(!/内嵌字幕/.test(document.body.textContent || ''),
+    '没有轨道时不显示「内嵌字幕」空标题')
+  try { app.unmount() } catch { /* ignore */ }
+}
+
+async function runSubTracks() {
+  console.log('\n[有内嵌字幕轨道]')
+  document.body.innerHTML = '<div id="app"></div>'
+  const Parent = V.defineComponent({
+    setup() {
+      const showQ = V.ref(true)
+      const picked = V.ref(-1)
+      window.__picked = picked
+      return () =>
+        V.h(Panel, {
+          modelValue: showQ.value,
+          'onUpdate:modelValue': (v) => (showQ.value = v),
+          variant: 'desktop',
+          isLive: false, levels: [], qCap: 0, levelIdx: -1, lines: [], rawUrl: '',
+          subDelay: 0, subFontSize: 20, externalSubActive: false, subLabel: '',
+          subTracks: [
+            { lang: 'zh', label: '中文', url: '' },
+            { lang: 'en', label: 'English', url: '' }
+          ],
+          subTrackIdx: picked.value,
+          'onChoose-sub-track': (i) => (picked.value = i),
+          scaleNames: ['铺满'], scaleMode: 0, introSkipSec: 0, outroSkipSec: 0
+        })
+    }
+  })
+  const app = V.createApp(Parent)
+  app.component('el-button', StubButton)
+  app.mount('#app')
+  await tick()
+
+  const txt = document.body.textContent || ''
+  expect(/内嵌字幕/.test(txt), '显示「内嵌字幕」区域')
+  expect(/中文/.test(txt) && /English/.test(txt), '列出两条轨道')
+  const chips = [...document.querySelectorAll('.q-chips .chip')].filter((c) =>
+    ['关闭', '中文', 'English'].includes(c.textContent.trim()))
+  expect(chips.length >= 3, '有关闭 + 两个轨道三个选项', chips.map((c) => c.textContent.trim()))
+  const en = chips.find((c) => c.textContent.trim() === 'English')
+  if (en) {
+    click(en)
+    await tick()
+    expect(window.__picked.value === 1, '点 English 后回传下标 1', window.__picked.value)
+  }
+  app.unmount()
+}
+
 ;(async () => {
   await runVariant('desktop')
   await runVariant('mobile')
+  await runNoSubTracks('desktop')
+  await runNoSubTracks('mobile')
+  await runSubTracks()
   console.log(failed === 0 ? '\n全部通过' : `\n${failed} 项失败`)
   process.exit(failed === 0 ? 0 : 1)
 })().catch((e) => {

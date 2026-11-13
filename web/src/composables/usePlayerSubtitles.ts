@@ -35,6 +35,13 @@ export function usePlayerSubtitles(host: SubtitleHost) {
   let extTrackUrl = ''
   let subStyleEl: HTMLStyleElement | null = null
   const cueOrigins = new WeakMap<any, { s: number; e: number }>()
+  // 记住用户挂过的字幕原文，切集时可以原样重新挂上。
+  // 外挂字幕（尤其是同剧集的 srt）通常整季通用，切集就让人重选太折腾。
+  let extText = ''
+  let extLabel = ''
+  // 转封装模式下视频时间轴从 seek 点重算，外挂字幕的 cue 是整片绝对时间，
+  // 需要按这个偏移整体平移，否则字幕会提前 remuxSeek 秒出现。
+  let timelineBaseMs = 0
 
   /** 从 hls.js 实例读取内嵌字幕轨道列表 */
   function loadSubtitlesFromHls(hls: any) {
@@ -99,7 +106,8 @@ export function usePlayerSubtitles(host: SubtitleHost) {
     host.tip(`字幕字号 ${px}px`)
   }
 
-  function removeExternalSub() {
+  /** 把 <track> 从 video 上摘掉，但保留字幕内容（切集时用） */
+  function detachTrack() {
     if (extTrack) {
       extTrack.remove()
       extTrack = null
@@ -108,17 +116,42 @@ export function usePlayerSubtitles(host: SubtitleHost) {
       URL.revokeObjectURL(extTrackUrl)
       extTrackUrl = ''
     }
-    externalSubActive.value = false
-    subLabel.value = ''
   }
 
-  function setExternalSub(text: string, label: string) {
-    const vid = host.videoEl.value
-    if (!vid) {
-      host.tip('播放器尚未就绪')
+  /** 彻底移除外挂字幕（用户主动点「移除字幕」或离开页面时） */
+  function removeExternalSub() {
+    detachTrack()
+    externalSubActive.value = false
+    subLabel.value = ''
+    extText = ''
+    extLabel = ''
+  }
+
+  /**
+   * 切集时调用：摘掉当前 track 并清掉激活态，但记住字幕原文。
+   * 等新的 video 就绪后由 reattachExternalSub() 重新挂上。
+   */
+  function detachExternalSub() {
+    if (!extText) {
+      detachTrack()
+      externalSubActive.value = false
+      subLabel.value = ''
       return
     }
-    removeExternalSub()
+    detachTrack()
+    externalSubActive.value = false
+  }
+
+  /** 新视频就绪后重新挂上之前用过的外挂字幕 */
+  function reattachExternalSub() {
+    if (!extText) return
+    mountTrack(extText, extLabel)
+  }
+
+  function mountTrack(text: string, label: string) {
+    const vid = host.videoEl.value
+    if (!vid) return
+    detachTrack()
     const url = URL.createObjectURL(new Blob([toWebVtt(text)], { type: 'text/vtt' }))
     const track = document.createElement('track')
     track.kind = 'subtitles'
@@ -127,17 +160,57 @@ export function usePlayerSubtitles(host: SubtitleHost) {
     track.src = url
     track.default = true
     vid.appendChild(track)
-    track.addEventListener('load', () => {
-      if (track.track) track.track.mode = 'showing'
-    })
-    window.setTimeout(() => {
-      if (track.track) track.track.mode = 'showing'
-    }, 300)
+    const show = () => {
+      if (track.track) {
+        track.track.mode = 'showing'
+        // 重新挂载后 cue 的时间轴是全新的，需要按当前 base 再平移一次
+        applyCueShift(track)
+      }
+    }
+    track.addEventListener('load', show)
+    window.setTimeout(show, 300)
     extTrack = track
     extTrackUrl = url
     externalSubActive.value = true
     subLabel.value = label
     applySubStyle()
+  }
+
+  /**
+   * 按 timelineBaseMs 平移一条轨道里的 cue。
+   * 用 cueOrigins 记住原始时间，重复调用不会累积漂移。
+   */
+  function applyCueShift(track: any) {
+    const cues = track?.cues
+    if (!cues) return
+    const shift = -timelineBaseMs / 1000
+    for (let i = 0; i < cues.length; i++) {
+      const cue = cues[i]
+      if (!cueOrigins.has(cue)) cueOrigins.set(cue, { s: cue.startTime, e: cue.endTime })
+      const o = cueOrigins.get(cue)!
+      // 延迟（用户手调）和转封装偏移要叠加，两者都以原始时间为基准
+      const delta = shift + subDelay.value / 1000
+      cue.startTime = Math.max(0, o.s + delta)
+      cue.endTime = Math.max(0, o.e + delta)
+    }
+  }
+
+  /** 切集 / seek 后更新转封装偏移并重算所有 track 的 cue */
+  function setTimelineBase(ms: number) {
+    timelineBaseMs = Math.max(0, ms)
+    const tracks = host.videoEl.value?.textTracks
+    if (!tracks) return
+    for (let i = 0; i < tracks.length; i++) applyCueShift(tracks[i])
+  }
+
+  function setExternalSub(text: string, label: string) {
+    if (!host.videoEl.value) {
+      host.tip('播放器尚未就绪')
+      return
+    }
+    extText = text
+    extLabel = label
+    mountTrack(text, label)
   }
 
   async function onSubFile(e: Event) {
@@ -166,22 +239,13 @@ export function usePlayerSubtitles(host: SubtitleHost) {
     }
   }
 
-  // 调整字幕延迟：基于原始时间重算，避免多次调整累积漂移
+  // 调整字幕延迟：基于原始时间重算，避免多次调整累积漂移。
+  // 转封装模式下还要叠加 timelineBase 偏移，所以统一走 applyCueShift。
   function setSubDelay(ms: number) {
     subDelay.value = ms
     const tracks = host.videoEl.value?.textTracks
     if (tracks) {
-      for (let i = 0; i < tracks.length; i++) {
-        const cues = tracks[i].cues
-        if (!cues) continue
-        for (let j = 0; j < cues.length; j++) {
-          const cue: any = cues[j]
-          if (!cueOrigins.has(cue)) cueOrigins.set(cue, { s: cue.startTime, e: cue.endTime })
-          const o = cueOrigins.get(cue)!
-          cue.startTime = Math.max(0, o.s + ms / 1000)
-          cue.endTime = Math.max(0, o.e + ms / 1000)
-        }
-      }
+      for (let i = 0; i < tracks.length; i++) applyCueShift(tracks[i])
     }
     host.tip(`字幕延迟 ${ms > 0 ? '+' : ''}${(ms / 1000).toFixed(1)}s`)
   }
@@ -194,7 +258,6 @@ export function usePlayerSubtitles(host: SubtitleHost) {
       subStyleEl = null
     }
   }
-
   return {
     subtitles,
     currentSubIdx,
@@ -207,7 +270,10 @@ export function usePlayerSubtitles(host: SubtitleHost) {
     applySubStyle,
     setSubFontSize,
     removeExternalSub,
+    detachExternalSub,
+    reattachExternalSub,
     setExternalSub,
+    setTimelineBase,
     onSubFile,
     promptSubUrl,
     setSubDelay,

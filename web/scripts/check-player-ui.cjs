@@ -223,5 +223,76 @@ console.log('\n[23] 网盘历史保存兜底')
     '只有 wdVod 有值时才写网盘历史')
 }
 
+console.log('\n[24] 切集必须摘掉上一集的外挂字幕')
+{
+  // <track> 挂在 video 元素上，destroyPlayer 只改 src 不会清掉它。
+  // 不摘的话下一集会继续显示上一集的字幕。
+  const sw = code.slice(code.indexOf('async function switchEpisode'),
+    code.indexOf('async function switchEpisode') + 1400)
+  expect(/detachExternalSub\(\)/.test(sw), 'switchEpisode 里摘掉外挂字幕')
+  const line = code.slice(code.indexOf('async function switchLine'),
+    code.indexOf('async function switchLine') + 1200)
+  expect(/detachExternalSub\(\)/.test(line), 'switchLine 里也摘掉')
+  // 但内容要留着——外挂字幕常跨集通用，切集就让人重选太折腾
+  const init = code.slice(code.indexOf('async function initPlayer'),
+    code.indexOf('async function initPlayer') + 2200)
+  expect(/reattachExternalSub\(\)/.test(init), 'initPlayer 里把字幕重新挂回新流')
+}
+
+console.log('\n[25] 内嵌字幕轨道要有 UI')
+{
+  const panel = readFileSync(
+    path.join(ROOT, 'src/components/player/PlayerSettingsPanel.vue'), 'utf8')
+  expect(/:sub-tracks="subtitles"/.test(code), 'PlayerView 把轨道列表传给面板')
+  expect(/:sub-track-idx="currentSubIdx"/.test(code), 'PlayerView 传当前轨道下标')
+  expect((code.match(/@choose-sub-track="switchSubtitle"/g) || []).length === 2,
+    '桌面与移动端都绑定切换事件')
+  // 可选 + 默认值：漏传时模板读 subTracks.length 会抛 TypeError 把面板打崩
+  expect(/subTracks\?:\s*SubtitleTrack\[\]/.test(panel), '面板声明 subTracks prop（可选，带默认值）')
+  expect(/subTracks:\s*\(\)\s*=>\s*\[\]/.test(panel), 'subTracks 默认空数组')
+  expect(/subTrackList/.test(panel), '模板走 subTrackList 安全访问')
+  expect(/'choose-sub-track'/.test(panel), '面板声明 choose-sub-track emit')
+  expect(/q-section">内嵌字幕/.test(panel), '桌面端渲染内嵌字幕区')
+  expect(/m-q-section">内嵌字幕/.test(panel), '移动端渲染内嵌字幕区')
+  expect(!/void switchSubtitle/.test(code), 'switchSubtitle 不再是「保留给将来」的死代码')
+  expect(/v-if="subTrackList\.length"/.test(panel), '没有内嵌轨道时不显示空标题')
+}
+
+console.log('\n[26] 关页/切后台要兜底保存进度')
+{
+  // onUnmounted 在直接关标签页、切后台被回收时不会执行，
+  // 所以必须额外监听 pagehide / visibilitychange。
+  expect(/addEventListener\('pagehide'/.test(code), '监听 pagehide')
+  expect(/addEventListener\('visibilitychange'/.test(code), '监听 visibilitychange')
+  expect(/removeEventListener\('pagehide'/.test(code), '卸载时解绑 pagehide')
+  expect(/removeEventListener\('visibilitychange'/.test(code), '卸载时解绑 visibilitychange')
+  expect(/sendBeacon/.test(code), '用 sendBeacon 发请求（普通 fetch 会被卸载中断）')
+  const fn = code.slice(code.indexOf('function savePosBeacon'),
+    code.indexOf('function savePosBeacon') + 1800)
+  expect(/\/api\/history\/pos/.test(fn), '点播历史走 /api/history/pos')
+  expect(/\/api\/webdav\/history\/update/.test(fn), '网盘历史走 /api/webdav/history/update')
+  expect(/visibilityState === 'hidden'/.test(code), '只在切到后台时保存（回前台不重复）')
+}
+
+console.log('\n[27] 转封装模式下字幕时间轴要跟着平移')
+{
+  // 转封装流从 remuxSeek 起转，video.currentTime 从 0 算；
+  // 外挂字幕 cue 是整片绝对时间，不平移就会整体提前 remuxSeek 秒。
+  expect(/setTimelineBase\(/.test(code), 'PlayerView 调用 setTimelineBase')
+  const lmd = code.slice(code.indexOf('vid.onloadedmetadata'),
+    code.indexOf('vid.onloadedmetadata') + 1200)
+  expect(/setTimelineBase\(remuxMode\.value/.test(lmd),
+    'loadedmetadata 里按 remuxSeek 设置时间轴基准')
+  const subs = readFileSync(
+    path.join(ROOT, 'src/composables/usePlayerSubtitles.ts'), 'utf8')
+  expect(/function setTimelineBase/.test(subs), '字幕模块提供 setTimelineBase')
+  expect(/timelineBaseMs/.test(subs), '字幕模块记录 timelineBaseMs')
+  // 延迟与偏移必须叠加、且都以原始时间为基准，否则多次调整会累积漂移
+  const shift = subs.slice(subs.indexOf('function applyCueShift'),
+    subs.indexOf('function applyCueShift') + 900)
+  expect(/shift \+ subDelay\.value/.test(shift), '转封装偏移与用户延迟叠加')
+  expect(/cueOrigins/.test(shift), '以原始时间为基准重算，避免累积漂移')
+}
+
 console.log(failed === 0 ? '\n全部通过' : `\n${failed} 项失败`)
 process.exit(failed === 0 ? 0 : 1)
