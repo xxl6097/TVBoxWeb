@@ -17,23 +17,27 @@ import (
 
 // Data 是落盘结构，字段名与鸿蒙 preferences 键一一对应。
 type Data struct {
-	CfgText       string                       `json:"cfgText"`
-	CfgURL        string                       `json:"cfgUrl"`
-	CfgCustom     string                       `json:"cfgCustom"`
-	SubName       string                       `json:"subName"`
-	Enabled       []string                     `json:"enabled"`
-	Hist          []HistItem                   `json:"hist"`
-	Fav           []FavItem                    `json:"fav"`
-	KwHist        string                       `json:"kwHist"`
-	LiveURL       string                       `json:"liveUrl"`
-	EpgURL        string                       `json:"epgUrl"` // EPG 节目单地址（XMLTV）
-	SubLives      []model.RawLive              `json:"subLives"`
-	LiveFavs      []model.Channel              `json:"liveFavs"` // 直播频道收藏
-	QPref         int                          `json:"qPref"`
-	SpeedPref     float64                      `json:"speedPref"`  // 播放倍速偏好（0=未设置，用 1.0）
-	VolumePref    float64                      `json:"volumePref"` // 播放音量偏好（0=未设置，用 1.0）
-	IntroSkip     int                          `json:"introSkip"`
-	OutroSkip     int                          `json:"outroSkip"`
+	CfgText    string          `json:"cfgText"`
+	CfgURL     string          `json:"cfgUrl"`
+	CfgCustom  string          `json:"cfgCustom"`
+	SubName    string          `json:"subName"`
+	Enabled    []string        `json:"enabled"`
+	Hist       []HistItem      `json:"hist"`
+	Fav        []FavItem       `json:"fav"`
+	KwHist     string          `json:"kwHist"`
+	LiveURL    string          `json:"liveUrl"`
+	EpgURL     string          `json:"epgUrl"` // EPG 节目单地址（XMLTV）
+	SubLives   []model.RawLive `json:"subLives"`
+	LiveFavs   []model.Channel `json:"liveFavs"` // 直播频道收藏
+	QPref      int             `json:"qPref"`
+	SpeedPref  float64         `json:"speedPref"`  // 播放倍速偏好（0=未设置，用 1.0）
+	VolumePref float64         `json:"volumePref"` // 播放音量偏好（0=未设置，用 1.0）
+	IntroSkip  int             `json:"introSkip"`
+	OutroSkip  int             `json:"outroSkip"`
+	// 按剧集的片头片尾跳过设置，key 见 skipKey()。
+	// 全局 IntroSkip/OutroSkip 退化成「没有单独设置过的剧」的默认值 ——
+	// 不同剧的片头长度差很多，一套全局值套所有剧必然错位。
+	SkipCfgs      map[string]SkipCfg           `json:"skipCfgs"`
 	TapSound      int                          `json:"tapSound"`
 	TapVibrate    int                          `json:"tapVibrate"`
 	Feed          []model.Vod                  `json:"feed"`
@@ -72,6 +76,14 @@ type HistItem struct {
 	Dur        int64  `json:"dur"`
 	Time       int64  `json:"time"`
 	WatchedEps []int  `json:"watchedEps"` // 已看过的集数列表（分集管理）
+}
+
+// SkipCfg 是某一部剧的片头/片尾跳过设置（单位：秒）。
+// 片头 Intro 表示「起播后跳过多少秒」；片尾 Outro 表示「距结尾还剩多少秒时切下一集」。
+type SkipCfg struct {
+	Intro int   `json:"intro"`
+	Outro int   `json:"outro"`
+	At    int64 `json:"at"` // 最后修改时间，便于前端提示与后续清理
 }
 
 type FavItem struct {
@@ -131,11 +143,18 @@ func Init(p string) error {
 	b, err := os.ReadFile(p)
 	if err != nil {
 		if os.IsNotExist(err) {
+			// 文件不存在 = 全新数据目录。必须把内存里的旧数据清掉：
+			// 否则同一进程里换一个数据文件（或首次启动前已有默认值）时，
+			// 旧配置会残留下来，表现得像「删了数据还在」。
+			data = &Data{}
+			ensureMaps()
 			return nil
 		}
 		return err
 	}
 	if len(b) == 0 {
+		data = &Data{}
+		ensureMaps()
 		return nil
 	}
 	d := &Data{}
@@ -161,6 +180,9 @@ func ensureMaps() {
 	}
 	if data.SiteHealth == nil {
 		data.SiteHealth = map[string]SiteHealthStat{}
+	}
+	if data.SkipCfgs == nil {
+		data.SkipCfgs = map[string]SkipCfg{}
 	}
 	rebuildIndexes()
 }
@@ -921,6 +943,83 @@ func IntroSkipSec() int       { mu.RLock(); defer mu.RUnlock(); return data.Intr
 func SetIntroSkipSec(v int)   { mu.Lock(); data.IntroSkip = v; mu.Unlock(); flush() }
 func OutroSkipSec() int       { mu.RLock(); defer mu.RUnlock(); return data.OutroSkip }
 func SetOutroSkipSec(v int)   { mu.Lock(); data.OutroSkip = v; mu.Unlock(); flush() }
+
+// skipKey 用与历史记录一致的约定拼 key：
+// 点播是 siteKey|vodId，网盘是 srcId|vodName。
+func skipKey(a, b string) string {
+	if a == "" || b == "" {
+		return ""
+	}
+	return a + "|" + b
+}
+
+// FindSkipCfg 取某部剧的片头片尾设置。
+//
+// 第二个返回值表示「这部剧有单独设置过」。没有单独设置时返回全局默认值
+// 并给 false，调用方据此决定提示文案（是「本剧」还是「默认值」）。
+func FindSkipCfg(a, b string) (SkipCfg, bool) {
+	key := skipKey(a, b)
+	mu.RLock()
+	// key 不完整（缺 siteKey/vodId，比如直链播放）时只能给全局默认值。
+	// 不能返回零值 —— 那等于「跳过片头 0 秒」，会把用户设的全局默认吞掉。
+	gIntro, gOutro := data.IntroSkip, data.OutroSkip
+	var cfg SkipCfg
+	var has bool
+	if key != "" {
+		cfg, has = data.SkipCfgs[key]
+	}
+	mu.RUnlock()
+	if has {
+		return cfg, true
+	}
+	return SkipCfg{Intro: gIntro, Outro: gOutro}, false
+}
+
+// SetSkipCfg 保存某部剧的片头片尾设置。两个都为 0 时删掉这条记录，
+// 让它回落到全局默认值，避免 SkipCfgs 无限增长。
+func SetSkipCfg(a, b string, intro, outro int) {
+	key := skipKey(a, b)
+	if key == "" {
+		return
+	}
+	if intro < 0 {
+		intro = 0
+	}
+	if outro < 0 {
+		outro = 0
+	}
+	mu.Lock()
+	if intro == 0 && outro == 0 {
+		delete(data.SkipCfgs, key)
+	} else {
+		if data.SkipCfgs == nil {
+			data.SkipCfgs = map[string]SkipCfg{}
+		}
+		data.SkipCfgs[key] = SkipCfg{Intro: intro, Outro: outro, At: time.Now().UnixMilli()}
+	}
+	mu.Unlock()
+	flush()
+}
+
+// DeleteSkipCfg 清掉某部剧的单独设置（回落到全局默认）。
+func DeleteSkipCfg(a, b string) {
+	key := skipKey(a, b)
+	if key == "" {
+		return
+	}
+	mu.Lock()
+	delete(data.SkipCfgs, key)
+	mu.Unlock()
+	flush()
+}
+
+// SkipCfgCount 返回已单独设置过的剧数量（设置页展示/清理用）。
+func SkipCfgCount() int {
+	mu.RLock()
+	defer mu.RUnlock()
+	return len(data.SkipCfgs)
+}
+
 func TapSound() int {
 	if data.TapSound == 0 {
 		return 1

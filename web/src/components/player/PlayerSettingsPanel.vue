@@ -31,9 +31,17 @@ const props = withDefaults(defineProps<{
   scaleMode: number
   introSkipSec: number
   outroSkipSec: number
+  /** 当前这部剧是否有自己的片头片尾设置（false 表示在用全局默认） */
+  skipOwn?: boolean
+  /** 全局默认值，用于说明「当前用的是默认」 */
+  globalIntroSkip?: number
+  globalOutroSkip?: number
 }>(), {
   subTracks: () => [],
-  subTrackIdx: -1
+  subTrackIdx: -1,
+  skipOwn: false,
+  globalIntroSkip: 0,
+  globalOutroSkip: 0
 })
 
 const emit = defineEmits<{
@@ -50,6 +58,8 @@ const emit = defineEmits<{
   (e: 'intro-skip', sec: number): void
   (e: 'outro-skip', sec: number): void
   (e: 'mark-skip', kind: 'intro' | 'outro'): void
+  (e: 'skip-apply-all'): void
+  (e: 'skip-reset'): void
 }>()
 
 const SKIP_PRESETS = [0, 15, 30, 60, 90]
@@ -164,7 +174,10 @@ function delayLabel(d: number) {
         >{{ n }}</span>
       </div>
 
-      <div class="q-section">跳过片头</div>
+      <!-- 跳过片头片尾按「这部剧」保存：不同剧的片头长度差很多，
+           全局一套值套所有剧必然错位，所以这里明确标注作用范围，
+           并给出「应用到所有剧」「恢复默认」两个出口。 -->
+      <div class="q-section">跳过片头 · 本剧</div>
       <div class="q-chips">
         <span
           v-for="s in SKIP_PRESETS"
@@ -176,7 +189,7 @@ function delayLabel(d: number) {
         <span class="chip" @click="emit('mark-skip', 'intro')">标当前</span>
       </div>
 
-      <div class="q-section">跳过片尾</div>
+      <div class="q-section">跳过片尾 · 本剧</div>
       <div class="q-chips">
         <span
           v-for="s in SKIP_PRESETS"
@@ -186,6 +199,17 @@ function delayLabel(d: number) {
           @click="emit('outro-skip', s)"
         >{{ s === 0 ? '关' : s + ' 秒' }}</span>
         <span class="chip" @click="emit('mark-skip', 'outro')">标当前</span>
+      </div>
+      <div class="q-hint">
+        <template v-if="props.skipOwn">本剧已有单独设置，其他剧不受影响。</template>
+        <template v-else>
+          正在使用默认值（片头 {{ props.globalIntroSkip }}s / 片尾 {{ props.globalOutroSkip }}s），
+          改动后只对本剧生效。
+        </template>
+      </div>
+      <div class="q-chips">
+        <span class="chip" @click="emit('skip-apply-all')">应用到所有剧</span>
+        <span v-if="props.skipOwn" class="chip" @click="emit('skip-reset')">恢复默认</span>
       </div>
 
       <div class="q-footer"><el-button size="small" @click="close">关闭</el-button></div>
@@ -276,7 +300,7 @@ function delayLabel(d: number) {
         >{{ n }}</span>
       </div>
 
-      <div class="m-q-section">跳过片头</div>
+      <div class="m-q-section">跳过片头 · 本剧</div>
       <div class="m-q-chips">
         <span
           v-for="s in SKIP_PRESETS"
@@ -288,7 +312,7 @@ function delayLabel(d: number) {
         <span class="chip" @click="emit('mark-skip', 'intro')">标当前</span>
       </div>
 
-      <div class="m-q-section">跳过片尾</div>
+      <div class="m-q-section">跳过片尾 · 本剧</div>
       <div class="m-q-chips">
         <span
           v-for="s in SKIP_PRESETS"
@@ -298,6 +322,17 @@ function delayLabel(d: number) {
           @click="emit('outro-skip', s)"
         >{{ s === 0 ? '关' : s + ' 秒' }}</span>
         <span class="chip" @click="emit('mark-skip', 'outro')">标当前</span>
+      </div>
+      <div class="q-hint">
+        <template v-if="props.skipOwn">本剧已有单独设置，其他剧不受影响。</template>
+        <template v-else>
+          正在使用默认值（片头 {{ props.globalIntroSkip }}s / 片尾 {{ props.globalOutroSkip }}s），
+          改动后只对本剧生效。
+        </template>
+      </div>
+      <div class="m-q-chips">
+        <span class="chip" @click="emit('skip-apply-all')">应用到所有剧</span>
+        <span v-if="props.skipOwn" class="chip" @click="emit('skip-reset')">恢复默认</span>
       </div>
 
       <div class="m-q-close">

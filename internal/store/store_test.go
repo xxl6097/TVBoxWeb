@@ -242,3 +242,97 @@ func TestWdHistoryIndexStaysConsistent(t *testing.T) {
 	wg.Wait()
 	verifyIndexes(t)
 }
+
+// 片头片尾跳过必须按剧隔离：这是用户明确提的需求 ——
+// 不同剧的片头长度差很多，一套全局值套所有剧必然错位。
+func TestSkipCfgIsolatedPerVod(t *testing.T) {
+	initTemp(t)
+
+	// 全局默认设成 60/90，作为新剧的初始值
+	SetIntroSkipSec(60)
+	SetOutroSkipSec(90)
+
+	// 还没单独设置过：拿到全局默认，且 own=false
+	cfg, own := FindSkipCfg("siteA", "vod1")
+	if own || cfg.Intro != 60 || cfg.Outro != 90 {
+		t.Fatalf("未单独设置时应回落到全局默认，got %+v own=%v", cfg, own)
+	}
+
+	// 给剧 A 设成 15/30
+	SetSkipCfg("siteA", "vod1", 15, 30)
+	cfg, own = FindSkipCfg("siteA", "vod1")
+	if !own || cfg.Intro != 15 || cfg.Outro != 30 {
+		t.Fatalf("剧 A 应拿到自己的设置，got %+v own=%v", cfg, own)
+	}
+
+	// 剧 B 不受影响，仍是全局默认
+	cfgB, ownB := FindSkipCfg("siteA", "vod2")
+	if ownB || cfgB.Intro != 60 || cfgB.Outro != 90 {
+		t.Fatalf("剧 B 不该被剧 A 的设置影响，got %+v own=%v", cfgB, ownB)
+	}
+
+	// 全局值本身没被按剧写入改掉
+	if IntroSkipSec() != 60 || OutroSkipSec() != 90 {
+		t.Fatalf("按剧写入不应改全局值，got %d/%d", IntroSkipSec(), OutroSkipSec())
+	}
+
+	// 同 siteKey 不同 vodId、同 vodId 不同 siteKey 都算不同剧
+	SetSkipCfg("siteB", "vod1", 5, 8)
+	c1, _ := FindSkipCfg("siteA", "vod1")
+	c2, _ := FindSkipCfg("siteB", "vod1")
+	if c1.Intro != 15 || c2.Intro != 5 {
+		t.Fatalf("key 必须包含 siteKey 与 vodId，got A=%d B=%d", c1.Intro, c2.Intro)
+	}
+}
+
+func TestSkipCfgFallbackOnZero(t *testing.T) {
+	initTemp(t)
+	SetIntroSkipSec(40)
+	SetOutroSkipSec(70)
+	SetSkipCfg("s", "v", 20, 30)
+	if SkipCfgCount() != 1 {
+		t.Fatalf("应记录 1 部剧，got %d", SkipCfgCount())
+	}
+	// 两个都置 0：删记录、回落全局默认
+	SetSkipCfg("s", "v", 0, 0)
+	if SkipCfgCount() != 0 {
+		t.Fatalf("全 0 时应删掉记录，got %d", SkipCfgCount())
+	}
+	cfg, own := FindSkipCfg("s", "v")
+	if own || cfg.Intro != 40 || cfg.Outro != 70 {
+		t.Fatalf("应回落到全局默认 40/70，got %+v own=%v", cfg, own)
+	}
+}
+
+func TestSkipCfgEmptyKeyIgnored(t *testing.T) {
+	initTemp(t)
+	SetIntroSkipSec(10)
+	// 任一维为空都不该写入，避免产生 "|" 这种脏 key
+	SetSkipCfg("", "v", 5, 5)
+	SetSkipCfg("s", "", 5, 5)
+	SetSkipCfg("", "", 5, 5)
+	if SkipCfgCount() != 0 {
+		t.Fatalf("空 key 不应写入，got %d", SkipCfgCount())
+	}
+	cfg, own := FindSkipCfg("", "")
+	if own || cfg.Intro != 10 {
+		t.Fatalf("空 key 查询应回落到全局，got %+v own=%v", cfg, own)
+	}
+}
+
+func TestSkipCfgPersisted(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "store.json")
+	if err := Init(file); err != nil {
+		t.Fatal(err)
+	}
+	SetSkipCfg("s", "v", 12, 34)
+	// 重新 Init 模拟重启
+	if err := Init(file); err != nil {
+		t.Fatal(err)
+	}
+	cfg, own := FindSkipCfg("s", "v")
+	if !own || cfg.Intro != 12 || cfg.Outro != 34 {
+		t.Fatalf("重启后应仍在，got %+v own=%v", cfg, own)
+	}
+}

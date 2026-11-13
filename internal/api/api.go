@@ -35,7 +35,7 @@ import (
 
 // 版本信息（通过 ldflags -X 注入，默认值兜底）。
 var (
-	AppVersion = "v1.11.8"
+	AppVersion = "v1.11.9"
 	BuildTime  = "unknown"
 )
 
@@ -144,6 +144,7 @@ func Handler() *http.ServeMux {
 	mux.HandleFunc("/api/feed", hFeed)
 	mux.HandleFunc("/api/quality/master", hQualityMaster)
 	mux.HandleFunc("/api/prefs", hPrefs)
+	mux.HandleFunc("/api/prefs/skip", hPrefsSkip)
 
 	mux.HandleFunc("/api/webdav/sources", hWdSources)
 	mux.HandleFunc("/api/webdav/probe", hWdProbe)
@@ -1339,17 +1340,30 @@ func hQualityMaster(w http.ResponseWriter, r *http.Request) {
 }
 
 func hPrefs(w http.ResponseWriter, r *http.Request) {
+	// 片头片尾设置按剧生效。带 skipA/skipB（点播是 site+vodId，网盘是 srcId+vodName）
+	// 时读写的都是「这部剧」的设置，不带则退回全局默认值。
+	skipA, skipB := q(r, "skipA"), q(r, "skipB")
+	hasSkipScope := skipA != "" && skipB != ""
+
 	switch r.Method {
 	case http.MethodGet:
+		curSkip, ownSkip := store.FindSkipCfg(skipA, skipB)
 		ok(w, map[string]any{
 			"qPref":      store.QPref(),
 			"speedPref":  store.SpeedPref(),
 			"volumePref": store.VolumePref(),
 			"epgUrl":     store.EpgURL(),
-			"introSkip":  store.IntroSkipSec(),
-			"outroSkip":  store.OutroSkipSec(),
-			"tapSound":   store.TapSound(),
-			"tapVibrate": store.TapVibrate(),
+			// 全局默认值（没有单独设置过的剧用它）
+			"introSkip": store.IntroSkipSec(),
+			"outroSkip": store.OutroSkipSec(),
+			// 当前这部剧实际生效的值，以及它是否有单独设置
+			"curIntroSkip": curSkip.Intro,
+			"curOutroSkip": curSkip.Outro,
+			"skipOwn":      ownSkip,
+			"skipScoped":   hasSkipScope,
+			"tapSound":     store.TapSound(),
+			"tapVibrate":   store.TapVibrate(),
+			"skipCfgCount": store.SkipCfgCount(),
 		})
 	case http.MethodPost:
 		var req map[string]any
@@ -1371,11 +1385,34 @@ func hPrefs(w http.ResponseWriter, r *http.Request) {
 				store.SetEpgURL(strings.TrimSpace(s))
 			}
 		}
-		if v, ok := req["introSkip"]; ok {
-			store.SetIntroSkipSec(int(toFloat(v)))
+		// 只有不带 skipA/skipB（即「设置页里改全局默认」）时才写全局值。
+		// 否则播放页按剧保存片头片尾时会把全局默认一起改掉，
+		// 等于所有剧又被同一套值覆盖 —— 那正是这次要修的问题。
+		if !hasSkipScope {
+			if v, ok := req["introSkip"]; ok {
+				store.SetIntroSkipSec(int(toFloat(v)))
+			}
+			if v, ok := req["outroSkip"]; ok {
+				store.SetOutroSkipSec(int(toFloat(v)))
+			}
 		}
-		if v, ok := req["outroSkip"]; ok {
-			store.SetOutroSkipSec(int(toFloat(v)))
+		// 按剧保存片头片尾：带上 skipA/skipB 时只影响「这部剧」，
+		// 两个值都置 0 会删掉本剧记录、回落到全局默认。
+		// skipGlobal=1 表示额外把这对值设为所有剧的默认值。
+		if hasSkipScope {
+			prev, _ := store.FindSkipCfg(skipA, skipB)
+			intro, outro := prev.Intro, prev.Outro
+			if v, ok := req["introSkip"]; ok {
+				intro = int(toFloat(v))
+			}
+			if v, ok := req["outroSkip"]; ok {
+				outro = int(toFloat(v))
+			}
+			store.SetSkipCfg(skipA, skipB, intro, outro)
+			if g, ok := req["skipGlobal"]; ok && toFloat(g) != 0 {
+				store.SetIntroSkipSec(intro)
+				store.SetOutroSkipSec(outro)
+			}
 		}
 		if v, ok := req["tapSound"]; ok {
 			store.SetTapSound(int(toFloat(v)))
@@ -1386,6 +1423,28 @@ func hPrefs(w http.ResponseWriter, r *http.Request) {
 		// EPG 地址可能指向内网 NAS，变了就刷新可信域名
 		RefreshTrustedHosts()
 		ok(w, map[string]any{"ok": true})
+	}
+}
+
+// hPrefsSkip 管理「某一部剧」的片头片尾跳过设置。
+//
+//	DELETE /api/prefs/skip?skipA=<site>&skipB=<vodId>   清掉本剧单独设置，回落全局默认
+//	GET    /api/prefs/skip?skipA=&skipB=                查本剧当前生效值与来源
+func hPrefsSkip(w http.ResponseWriter, r *http.Request) {
+	a, b := q(r, "skipA"), q(r, "skipB")
+	if a == "" || b == "" {
+		fail(w, 400, "缺少 skipA / skipB")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		cfg, own := store.FindSkipCfg(a, b)
+		ok(w, map[string]any{"intro": cfg.Intro, "outro": cfg.Outro, "own": own})
+	case http.MethodDelete:
+		store.DeleteSkipCfg(a, b)
+		ok(w, map[string]any{"ok": true})
+	default:
+		fail(w, 405, "不支持的方法")
 	}
 }
 

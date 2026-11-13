@@ -349,8 +349,37 @@ export const api = {
   feed: () => get<{ feed: Vod[]; deadKeys: string[]; summary: string }>('/feed'),
   qualityMaster: (url: string) => post<QLevel[]>('/quality/master', { url }),
 
-  prefs: () => get<{ qPref: number; speedPref: number; volumePref: number; epgUrl: string; introSkip: number; outroSkip: number; tapSound: number; tapVibrate: number }>('/prefs'),
-  setPrefs: (p: Record<string, number | string>) => post('/prefs', p),
+  // skipA/skipB 用于按剧读写片头片尾设置（点播 site+vodId，网盘 srcId+vodName）。
+  // 不传则读写全局默认值。
+  prefs: (skipA?: string, skipB?: string) =>
+    get<{
+      qPref: number; speedPref: number; volumePref: number; epgUrl: string
+      /** 全局默认值（没单独设置过的剧用它） */
+      introSkip: number; outroSkip: number
+      /** 当前这部剧实际生效的值 */
+      curIntroSkip: number; curOutroSkip: number
+      /** 当前剧是否有单独设置 */
+      skipOwn: boolean
+      skipScoped: boolean
+      skipCfgCount: number
+      tapSound: number; tapVibrate: number
+    }>(
+      '/prefs' +
+        (skipA && skipB
+          ? `?skipA=${encodeURIComponent(skipA)}&skipB=${encodeURIComponent(skipB)}`
+          : '')
+    ),
+  setPrefs: (p: Record<string, number | string>, opts?: { skipA: string; skipB: string }) => {
+    // 带 skipA/skipB 时表示「只改这部剧的片头片尾」，不带则改全局默认值
+    const suffix =
+      opts && opts.skipA && opts.skipB
+        ? `?skipA=${encodeURIComponent(opts.skipA)}&skipB=${encodeURIComponent(opts.skipB)}`
+        : ''
+    return post(`/prefs${suffix}`, p)
+  },
+  // 清掉某部剧的片头片尾单独设置（回落到全局默认）
+  clearSkipCfg: (a: string, b: string) =>
+    del(`/prefs/skip?skipA=${encodeURIComponent(a)}&skipB=${encodeURIComponent(b)}`),
 
   webdavSources: () => get<WebdavSource[]>('/webdav/sources'),
   // 用源 id 换播放所需的 Basic Auth：列表接口的密码是掩码（******），

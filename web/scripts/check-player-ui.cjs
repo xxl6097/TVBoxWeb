@@ -368,5 +368,82 @@ console.log('\n[32] 手动档位摘要不能被单码率源吞掉')
   expect(/qCap >= TOP/.test(fn), 'TOP 哨兵单独判断为「原画」')
 }
 
+console.log('\n[33] 跳过片头片尾必须按剧生效，不能全局')
+{
+  // 用户明确要求：「播放的时候要支持跳过片头片尾设置，不要全局」。
+  // 原来 setIntroSkip 直接 api.setPrefs({introSkip}) 落到全局，
+  // 改一部剧等于改所有剧 —— 片头长度不同的剧会直接吞掉正片开头。
+  const save = code.slice(code.indexOf('function saveSkipCfg'),
+    code.indexOf('function saveSkipCfg') + 1800)
+  expect(/skipScopeA/.test(save) && /skipScopeB/.test(save), 'saveSkipCfg 用剧集 key 读写')
+  expect(/skipA: a, skipB: b/.test(save), '把剧集 key 传给 setPrefs')
+  expect(/skipGlobal/.test(save), '只有显式要求才同时改全局默认')
+
+  // 三个入口都必须走 saveSkipCfg，不能自己再写全局
+  for (const fn of ['function setIntroSkip', 'function setOutroSkip']) {
+    const body = code.slice(code.indexOf(fn), code.indexOf(fn) + 420)
+    expect(/saveSkipCfg\(/.test(body), fn + ' 走 saveSkipCfg')
+    expect(!/setPrefs\(\{\s*introSkip:/.test(body),
+      fn + ' 不直接写全局 introSkip')
+    expect(!/setPrefs\(\{\s*outroSkip:/.test(body),
+      fn + ' 不直接写全局 outroSkip')
+  }
+  const mark = code.slice(code.indexOf('function markSkip'),
+    code.indexOf('function markSkip') + 1400)
+  expect(!/setPrefs\(\{\s*introSkip: t/.test(mark), 'markSkip 标片头不写全局')
+  expect(!/setPrefs\(\{\s*outroSkip: remain/.test(mark), 'markSkip 标片尾不写全局')
+
+  // 初始化要优先读本剧的值
+  expect(/curIntroSkip/.test(code), '初始化读本剧生效值 curIntroSkip')
+  expect(/curOutroSkip/.test(code), '初始化读本剧生效值 curOutroSkip')
+  expect(/\.prefs\(skipScopeA\.value, skipScopeB\.value\)/.test(code),
+    '拉偏好时带上剧集 key')
+
+  // 剧集 key 的构成：点播 site+vodId、网盘 srcId+vodName
+  const a = code.slice(code.indexOf('const skipScopeA'), code.indexOf('const skipScopeA') + 300)
+  expect(/webdav/.test(a) && /wdSrcId/.test(a), '网盘用 srcId')
+  expect(/wdVod/.test(a), '网盘用 vodName')
+  expect(/siteKey/.test(a), '点播用 siteKey')
+}
+
+console.log('\n[34] 面板要说明作用范围并给出两个出口')
+{
+  const panel = readFileSync(
+    path.join(ROOT, 'src/components/player/PlayerSettingsPanel.vue'), 'utf8')
+  expect(/跳过片头 · 本剧/.test(panel), '桌面端标题标注「本剧」')
+  expect(/跳过片尾 · 本剧/.test(panel), '桌面端片尾标题标注「本剧」')
+  expect(/m-q-section">跳过片头 · 本剧/.test(panel), '移动端同样标注')
+  expect(/skip-apply-all/.test(panel), '提供「应用到所有剧」')
+  expect(/skip-reset/.test(panel), '提供「恢复默认」')
+  expect(/本剧已有单独设置/.test(panel), '已单独设置时有说明')
+  expect(/正在使用默认值/.test(panel), '用默认值时有说明')
+  expect(/:skip-own="skipOwn"/.test(code), 'PlayerView 传 skipOwn')
+}
+
+console.log('\n[35] 服务端按剧存储')
+{
+  const st = readFileSync(path.join(ROOT, '../internal/store/store.go'), 'utf8')
+  expect(/type SkipCfg struct/.test(st), 'store 定义 SkipCfg')
+  expect(/SkipCfgs\s+map\[string\]SkipCfg/.test(st), 'SkipCfgs 按 key 存储')
+  expect(/func FindSkipCfg\(/.test(st), '有 FindSkipCfg')
+  expect(/func SetSkipCfg\(/.test(st), '有 SetSkipCfg')
+  expect(/func DeleteSkipCfg\(/.test(st), '有 DeleteSkipCfg')
+  // 两个都 0 时删记录，避免 skipCfgs 无限增长
+  const set = st.slice(st.indexOf('func SetSkipCfg'),
+    st.indexOf('func SetSkipCfg') + 900)
+  expect(/delete\(data\.SkipCfgs, key\)/.test(set), '全 0 时删除记录回落默认')
+  expect(/data\.SkipCfgs == nil/.test(set), 'nil map 时先初始化')
+
+  const api = readFileSync(path.join(ROOT, '../internal/api/api.go'), 'utf8')
+  expect(/hPrefsSkip/.test(api), '注册 /api/prefs/skip')
+  // 关键：带 skipA/skipB 时不能写全局，否则等于换个方式全局
+  const fnStart = api.indexOf('func hPrefs(')
+  const post = api.slice(fnStart, fnStart + 4000)
+  expect(/if !hasSkipScope \{/.test(post),
+    '只有不带剧集 key 时才写全局片头片尾')
+  expect(/skipA, skipB := q\(r, "skipA"\), q\(r, "skipB"\)/.test(api),
+    '从 query 取剧集 key')
+}
+
 console.log(failed === 0 ? '\n全部通过' : `\n${failed} 项失败`)
 process.exit(failed === 0 ? 0 : 1)

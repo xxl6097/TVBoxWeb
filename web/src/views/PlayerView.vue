@@ -86,6 +86,16 @@ const skipShow = ref('')
 const skipLeft = ref(0)
 const introSkipSec = ref(0)
 const outroSkipSec = ref(0)
+// 片头片尾跳过按「剧」分别记：不同剧的片头长度差很多，
+// 一套全局值套所有剧必然错位（A 剧跳过 90 秒，套到片头只有 30 秒的 B 剧
+// 会直接吞掉正片开头）。
+// skipOwn 表示当前这部剧是否有自己的设置；没有时用全局默认值。
+const skipOwn = ref(false)
+const globalIntroSkip = ref(0)
+const globalOutroSkip = ref(0)
+// 按剧读写用的 key 两段（点播 site+vodId，网盘 srcId+vodName）
+const skipScopeA = computed(() => (siteKey === 'webdav' ? player.wdSrcId : siteKey))
+const skipScopeB = computed(() => (siteKey === 'webdav' ? player.wdVod : vodId))
 // ===== 连续播放 =====
 const autoPlayNext = ref(true)  // 自动连播开关，默认开启
 // ===== 字幕支持（usePlayerSubtitles 组合式函数，见 composables/usePlayerSubtitles.ts）=====
@@ -275,10 +285,24 @@ function syncEpLabel() {
 }
 
 onMounted(async () => {
-  const prefs = await api.prefs().catch(() => ({ qPref: 0, speedPref: 1, volumePref: 1, introSkip: 0, outroSkip: 0, tapSound: 1, tapVibrate: 1 }))
+  // 片头片尾按剧读写：点播用 site+vodId，网盘用 srcId+vodName，
+  // 与服务端 skipKey() 的约定一致。取不到就不带，读写全局默认值。
+  const prefs = await api
+    .prefs(skipScopeA.value, skipScopeB.value)
+    .catch(() => ({
+      qPref: 0, speedPref: 1, volumePref: 1,
+      introSkip: 0, outroSkip: 0,
+      curIntroSkip: 0, curOutroSkip: 0,
+      skipOwn: false, skipScoped: false, skipCfgCount: 0,
+      tapSound: 1, tapVibrate: 1
+    }))
   qCap = prefs.qPref || 0
-  introSkipSec.value = prefs.introSkip || 0
-  outroSkipSec.value = prefs.outroSkip || 0
+  // 优先用「本剧」的值；没单独设置过时服务端已经把全局默认填进 cur* 了
+  introSkipSec.value = prefs.curIntroSkip ?? prefs.introSkip ?? 0
+  outroSkipSec.value = prefs.curOutroSkip ?? prefs.outroSkip ?? 0
+  skipOwn.value = !!prefs.skipOwn
+  globalIntroSkip.value = prefs.introSkip || 0
+  globalOutroSkip.value = prefs.outroSkip || 0
   // 应用倍速偏好（持久化）
   const sp = prefs.speedPref || 1
   if (PLAYBACK_RATES.includes(sp)) {
@@ -903,18 +927,75 @@ function setScale(mode: number) {
 // 跳过片头/片尾档位设置
 const SKIP_PRESETS = [0, 15, 30, 60, 90]
 
+/**
+ * 保存当前这部剧的片头片尾设置。
+ *
+ * 只写本剧，不动全局默认值 —— 这正是这次要修的核心：
+ * 原来写 api.setPrefs({introSkip}) 会落到全局，等于改一部剧影响所有剧。
+ * skipGlobal=true 时才额外把这套值设为全局默认（「应用到所有剧」）。
+ */
+function saveSkipCfg(opts: { intro?: number; outro?: number; global?: boolean } = {}) {
+  const intro = opts.intro ?? introSkipSec.value
+  const outro = opts.outro ?? outroSkipSec.value
+  introSkipSec.value = intro
+  outroSkipSec.value = outro
+  const a = skipScopeA.value
+  const b = skipScopeB.value
+  if (!a || !b) {
+    // 没有剧标识（直链播放）：只能落到全局默认
+    api.setPrefs({ introSkip: intro, outroSkip: outro }).catch(() => {})
+    return
+  }
+  const payload: Record<string, number | string> = { introSkip: intro, outroSkip: outro }
+  if (opts.global) payload.skipGlobal = 1
+  api
+    .setPrefs(payload, { skipA: a, skipB: b })
+    .then(() => {
+      // 两个都归零时服务端会删掉本剧记录、回落到全局默认
+      skipOwn.value = !(intro === 0 && outro === 0)
+      if (opts.global) {
+        globalIntroSkip.value = intro
+        globalOutroSkip.value = outro
+      }
+    })
+    .catch(() => {})
+}
+
 function setIntroSkip(sec: number) {
-  introSkipSec.value = sec
-  api.setPrefs({ introSkip: sec }).catch(() => {})
-  if (sec > 0) app.showTip(`已设片头跳过 ${fmtSec(sec)}，起播自动生效`)
-  else app.showTip('已关闭片头跳过')
+  saveSkipCfg({ intro: sec })
+  if (sec > 0) app.showTip(`本剧片头跳过 ${fmtSec(sec)}（只对这部剧生效）`)
+  else app.showTip('已关闭本剧的片头跳过')
 }
 
 function setOutroSkip(sec: number) {
-  outroSkipSec.value = sec
-  api.setPrefs({ outroSkip: sec }).catch(() => {})
-  if (sec > 0) app.showTip(`已设片尾跳过 ${fmtSec(sec)}，播到片尾自动切`)
-  else app.showTip('已关闭片尾跳过')
+  saveSkipCfg({ outro: sec })
+  if (sec > 0) app.showTip(`本剧片尾跳过 ${fmtSec(sec)}（只对这部剧生效）`)
+  else app.showTip('已关闭本剧的片尾跳过')
+}
+
+/** 把当前这部剧的设置设为「所有剧的默认值」 */
+function applySkipToAll() {
+  if (introSkipSec.value <= 0 && outroSkipSec.value <= 0) {
+    app.showTip('本剧还没设置片头片尾，先标记或选一个时长')
+    return
+  }
+  saveSkipCfg({ global: true })
+  app.showTip('已设为所有剧的默认值（已单独设置过的剧不受影响）')
+}
+
+/** 清掉本剧的单独设置，回落到全局默认 */
+function resetSkipCfg() {
+  const a = skipScopeA.value
+  const b = skipScopeB.value
+  if (a && b) api.clearSkipCfg(a, b).catch(() => {})
+  introSkipSec.value = globalIntroSkip.value
+  outroSkipSec.value = globalOutroSkip.value
+  skipOwn.value = false
+  app.showTip(
+    globalIntroSkip.value > 0 || globalOutroSkip.value > 0
+      ? `已恢复默认（片头 ${fmtSec(globalIntroSkip.value)} / 片尾 ${fmtSec(globalOutroSkip.value)}）`
+      : '已恢复默认（不跳过）'
+  )
 }
 
 // 标当前：片头=当前播放位置，片尾=距结尾距离
@@ -927,9 +1008,8 @@ function markSkip(kind: 'intro' | 'outro') {
       app.showTip('当前位置是片头起点，无法标记')
       return
     }
-    introSkipSec.value = t
-    api.setPrefs({ introSkip: t }).catch(() => {})
-    app.showTip(`已标记片头结束点 ${fmtSec(t)}，下次起播跳到这里`)
+    saveSkipCfg({ intro: t })
+    app.showTip(`已标记本剧片头结束点 ${fmtSec(t)}，下次起播跳到这里`)
   } else {
     if (durMs.value <= 0) return
     const remain = Math.floor((durMs.value - vid.currentTime * 1000) / 1000)
@@ -937,9 +1017,8 @@ function markSkip(kind: 'intro' | 'outro') {
       app.showTip('已到片尾，无法标记')
       return
     }
-    outroSkipSec.value = remain
-    api.setPrefs({ outroSkip: remain }).catch(() => {})
-    app.showTip(`已标记片尾起点（距结尾 ${fmtSec(remain)}），播到这里自动切`)
+    saveSkipCfg({ outro: remain })
+    app.showTip(`已标记本剧片尾起点（距结尾 ${fmtSec(remain)}），播到这里自动切`)
   }
 }
 
@@ -1821,6 +1900,9 @@ onUnmounted(() => {
       :scale-mode="scaleMode"
       :intro-skip-sec="introSkipSec"
       :outro-skip-sec="outroSkipSec"
+      :skip-own="skipOwn"
+      :global-intro-skip="globalIntroSkip"
+      :global-outro-skip="globalOutroSkip"
       @choose-level="chooseLevel"
       @switch-line="switchLine"
       @sub-file="onSubFile"
@@ -1833,6 +1915,8 @@ onUnmounted(() => {
       @intro-skip="setIntroSkip"
       @outro-skip="setOutroSkip"
       @mark-skip="markSkip"
+      @skip-apply-all="applySkipToAll"
+      @skip-reset="resetSkipCfg"
     />
 
     <!-- 选集抽屉：桌面端也要挂。
@@ -2037,6 +2121,9 @@ onUnmounted(() => {
       :scale-mode="scaleMode"
       :intro-skip-sec="introSkipSec"
       :outro-skip-sec="outroSkipSec"
+      :skip-own="skipOwn"
+      :global-intro-skip="globalIntroSkip"
+      :global-outro-skip="globalOutroSkip"
       @choose-level="chooseLevel"
       @switch-line="switchLine"
       @sub-file="onSubFile"
@@ -2049,6 +2136,8 @@ onUnmounted(() => {
       @intro-skip="setIntroSkip"
       @outro-skip="setOutroSkip"
       @mark-skip="markSkip"
+      @skip-apply-all="applySkipToAll"
+      @skip-reset="resetSkipCfg"
     />
 
     <!-- 选集抽屉 -->
