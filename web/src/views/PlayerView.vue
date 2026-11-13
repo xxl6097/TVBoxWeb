@@ -39,6 +39,9 @@ const vodSiteName = (route.query.siteName as string) || ''
 // 这种流不支持 Range，所以拖进度条要带 seek 重新起转。
 const remuxMode = ref(false)
 const remuxSeek = ref(0)
+// 无扩展名/判不出容器的文件播失败后，是否已经试过转封装兜底。
+// 只试一次：转封装也失败就直接报错，否则会在两个分支之间来回弹。
+let remuxFallbackTried = false
 
 let rawUrl = rawUrl0
 let finalUrl = ''
@@ -46,6 +49,10 @@ let isLive = player.isLive
 let directMode = player.directMode || route.query.direct === '1'
 let qCap = 0
 let levelIdx = -1
+// 自动模式下 hls.js 实际正在播放的档位（LEVEL_SWITCHED 回写）。
+// 与 levelIdx 分开：levelIdx 表示「用户手动选的那一档」，
+// 自动模式下它是 -1，但实际档位需要另外记。
+let liveLevelIdx = -1
 const levels = ref<QLevel[]>([])
 let liveFail = 0
 
@@ -67,6 +74,9 @@ const showVol = ref(false)
 const volume = ref(1)
 const muted = ref(false)
 const qLabel = ref('自动')
+// 画质按钮的 title：把「自动/手动」「正在播哪一档」这层语义放这里，
+// 按钮本体只留档位，避免移动端被长文案挤变形。
+const qTitle = ref('当前画质：自动')
 const via = ref('')
 const errMsg = ref('')
 const hint = ref('')
@@ -344,6 +354,10 @@ async function resolveUrl() {
   hint.value = ''
   levels.value = []
   levelIdx = -1
+  // 换源/切集后上一路的实际档位不再有效，等新的 LEVEL_SWITCHED 回写
+  liveLevelIdx = -1
+  // 新的源可以重新享受一次转封装兜底
+  remuxFallbackTried = false
   errMsg.value = ''
 
   if (isLive) {
@@ -471,18 +485,19 @@ function containerExt(u: string): string {
   return dot >= 0 ? clean.slice(dot) : ''
 }
 
-function needsRemux(u: string): boolean {
+function needsRemux(u: string, force = false): boolean {
+  if (force) return true
   const ext = containerExt(u)
   // 无扩展名（网盘常见，如「异星战境 Atlas」）无法从名字判断，先交给浏览器试；
-  // 真失败时 onPlayError 会走「尝试转封装」的兜底。
+  // 真失败时 onPlayError 会带 force 再走一次转封装兜底。
   return ext !== '' && REMUX_EXTS.includes(ext)
 }
 
-function proxiedFinal(): string {
+function proxiedFinal(forceRemux = false): string {
   const auth = player.header?.auth || undefined
   // MKV 之类：服务端转封装。输出是分片 fMP4 流、不支持 Range，
   // 拖进度条时会用 seek 参数重新起转（见 reloadAt）。
-  if (needsRemux(finalUrl) && app.status?.remux) {
+  if (needsRemux(finalUrl, forceRemux) && app.status?.remux) {
     remuxMode.value = true
     return remuxed(finalUrl, auth, remuxSeek.value)
   }
@@ -506,7 +521,8 @@ async function initPlayer() {
     player.seek = 0
     remuxSeek.value = Math.max(0, Math.floor(pendingResumeMs / 1000))
   }
-  const src = proxiedFinal()
+  // 兜底状态下（无扩展名文件靠强制转封装在播）重新 init 也要保持强制
+  const src = proxiedFinal(remuxFallbackTried)
   if (src.includes('.m3u8') || via.value === '直播直连' || via.value === '补全 m3u8') {
     const HlsCls = await loadHls()
     if (HlsCls.isSupported()) {
@@ -527,6 +543,23 @@ async function initPlayer() {
         }
         // 尝试从 m3u8 中加载字幕轨道
         loadSubtitlesFromHls(h)
+      })
+      // 自动模式下 hls.js 会按带宽自己升降档。
+      // 不监听这个事件的话 levelIdx 永远是 -1，按钮一直显示「自动」，
+      // 用户不知道现在实际跑的是 720P 还是 1080P。
+      h.on(HlsCls.Events.LEVEL_SWITCHED, (_e: any, data: any) => {
+        const i = typeof data?.level === 'number' ? data.level : h.currentLevel
+        liveLevelIdx = i >= 0 ? i : -1
+        syncQLabel()
+      })
+      // 自动模式下也把 ABR 起始档位记下来，避免首个分片前一片空白
+      h.on(HlsCls.Events.LEVEL_LOADED, (_e: any, data: any) => {
+        if (liveLevelIdx >= 0) return
+        const i = typeof data?.level === 'number' ? data.level : -1
+        if (i >= 0) {
+          liveLevelIdx = i
+          syncQLabel()
+        }
       })
       h.on(HlsCls.Events.ERROR, (_e: any, data: any) => {
         if (!data.fatal) return
@@ -687,6 +720,31 @@ function onPlayError(errKind?: string) {
     switchEpisode(1)
     return
   }
+  // 转封装兜底：网盘里很多文件没有扩展名（如「异星战境 Atlas」），
+  // needsRemux() 只能判「有扩展名且在不支持列表里」，无扩展名时一律交给
+  // 浏览器先试。试了播不了如果再直接报错，就等于把服务端 ffmpeg 白放着 ——
+  // 这类文件多半是 MKV/AVI，转封装就能播。
+  // 注意只兜底一次（remuxFallbackTried），避免「转封装也失败 → 再兜底」死循环。
+  // 网络/认证类错误不兜底：那不是容器问题，转封装也救不回来。
+  const isContainerish = errKind === 'srcNotSupported' || errKind === 'mediaError' || errKind === undefined
+  if (!remuxMode.value && !remuxFallbackTried && app.status?.remux && isContainerish && finalUrl) {
+    remuxFallbackTried = true
+    app.showTip('尝试转封装后播放…')
+    // 走一次真正的转封装加载：remuxSeek 归零，从 0 起转
+    remuxSeek.value = 0
+    errMsg.value = ''
+    prepared.value = false
+    buffering.value = true
+    const vid = videoEl.value
+    if (vid) {
+      // 关键：传 true。无扩展名文件 needsRemux() 本来就返回 false，
+      // 不强制的话这里又会拿回原来的直连地址，等于原地重试一遍同样的失败。
+      const src = proxiedFinal(true)
+      vid.src = src
+      vid.play().catch(() => {})
+    }
+    return
+  }
   // 按错误类型给出友好提示
   // 容器不支持（MKV 等）且服务端没有 ffmpeg：给出可操作的指引，
   // 而不是让人以为文件坏了。这是网盘播放最常见的失败原因。
@@ -707,11 +765,19 @@ function onPlayError(errKind?: string) {
     fragLoadError: '视频分片加载中断，可能是网络波动',
     manifestIncompatibleCodecsError: '编码格式不支持当前浏览器',
     authError: '资源需要认证或没有访问权限，请检查网盘账号密码',
-    srcNotSupported: needsRemux(finalUrl)
+    srcNotSupported: needsRemux(finalUrl) || remuxMode.value
       ? '该容器转换失败。可能是源不是 H.264/AAC（如 HEVC/AC3），无法无损转封装'
       : '这个文件无法直接播放。可能是编码格式浏览器不支持，或地址已失效',
   }
   errMsg.value = tips[errKind || ''] || '播放失败，可能是链接失效或编码不支持'
+  // 已经走过转封装兜底还失败：说明问题不在容器，而在编码本身。
+  // 这时候再说「无法直接播放」会误导 —— 用户会以为文件坏了或者播放器没试，
+  // 实际是 HEVC/AC3 这类转封装救不了的编码。
+  if (remuxFallbackTried && remuxMode.value) {
+    errMsg.value =
+      '这个文件的编码浏览器不支持（常见于 HEVC/H.265、AC3 音轨）。' +
+      '转封装只换容器不转码，救不了这种情况。换一个 H.264/AAC 的片源试试。'
+  }
   showOsd.value = true
 }
 
@@ -720,17 +786,21 @@ function applyInitialLevel() {
   if (qCap > 0) {
     const i = pickByCap(qCap, levels.value)
     levelIdx = i
+    // 用户明确指定了档位：用 currentLevel 锁定，从第一个分片就按它加载
     hls.currentLevel = i
   } else {
-    // 自动：起播取 720P 附近
+    // 自动：只设置「起始档位」，不能写 currentLevel ——
+    // currentLevel >= 0 等于手动锁档，hls.js 的 ABR 会彻底停摆，
+    // 网速再好也不会自动升到 1080P，用户选了「自动」却永远停在 720P。
+    // startLevel 只在起播时用一次，之后由 ABR 按带宽自由升降。
     let best = -1
     levels.value.forEach((l, i) => {
       if (l.height > 0 && l.height <= 720) best = i
     })
-    if (best >= 0) {
-      levelIdx = best
-      hls.currentLevel = best
-    }
+    if (best >= 0) hls.startLevel = best
+    else hls.startLevel = -1
+    // 实际档位交给 LEVEL_SWITCHED 回写，这里先按起始档位显示
+    liveLevelIdx = best
   }
   syncQLabel()
 }
@@ -745,22 +815,49 @@ function pickByCap(cap: number, lv: QLevel[]): number {
   return best < 0 ? 0 : best
 }
 
+/**
+ * 画质按钮文案。
+ *
+ * 手动选了档位 → 直接显示那一档（原画 / 1080P / 720P…）。
+ * 自动模式 → 显示 hls.js 此刻实际在播的档位（来自 LEVEL_SWITCHED），
+ *   因为自动档位会随带宽上下浮动，用户想知道「我现在到底在看几 P」。
+ *   一个档位都没有（单码率源/非 HLS）时才退回「自动」。
+ * 不拼「自动 1080P」这种长串 —— 移动端按钮宽度有限会被挤变形，
+ * 「自动」这层语义放到 title 里。
+ */
 function syncQLabel() {
-  // 只给按钮显示「当前档位」，不要「自动 1080P」这种长字符串 ——
-  // 移动端按钮宽度有限，长文案会把整行挤变形。
-  // 是否自动跟随由面板里的「自动」选项表达，title 里补全语义。
-  if (levelIdx >= 0 && levelIdx < levels.value.length) {
-    const name = labelOfLevel(levels.value[levelIdx])
-    if (levels.value.length <= 1) {
-      qLabel.value = '自动'
-      return
-    }
-    qLabel.value = qCap > 0 ? name : '自动'
+  // 手动选了档位：优先按真实档位表取名，取不到（单码率源/非 HLS）
+  // 就按用户选的分辨率直接显示。这条要在「只有一个档位」判断之前 ——
+  // 否则单码率源上用户选了「原画」，按钮还固执地显示「自动」。
+  if (qCap > 0) {
+    const i = levelIdx >= 0 && levelIdx < levels.value.length
+      ? levelIdx
+      : pickByCap(qCap, levels.value)
+    // TOP 是个哨兵值（代表「原画/最高」），不能直接喂给 labelOf ——
+    // labelOf(100000) 会命中「高度 >= 2160 → 4K」，显示成错误的 4K。
+    let name: string
+    if (i >= 0 && i < levels.value.length) name = labelOfLevel(levels.value[i])
+    else if (qCap >= TOP) name = '原画'
+    else name = labelOf(qCap, 0)
+    qLabel.value = name
+    qTitle.value = `当前画质：${name}（手动）`
     return
   }
-  if (qCap >= TOP) qLabel.value = '原画'
-  else if (qCap > 0) qLabel.value = labelOf(qCap, 0)
-  else qLabel.value = '自动'
+  if (levels.value.length <= 1) {
+    qLabel.value = '自动'
+    qTitle.value = '当前画质：自动'
+    return
+  }
+  // 自动：显示 hls.js 此刻实际在播的档位（LEVEL_SWITCHED 回写），
+  // 因为自动档位会随带宽上下浮动，用户想知道「我现在到底在看几 P」。
+  if (liveLevelIdx >= 0 && liveLevelIdx < levels.value.length) {
+    const name = labelOfLevel(levels.value[liveLevelIdx])
+    qLabel.value = name
+    qTitle.value = `当前画质：自动 · 正在播 ${name}`
+    return
+  }
+  qLabel.value = '自动'
+  qTitle.value = '当前画质：自动'
 }
 
 function chooseLevel(cap: number) {
@@ -768,13 +865,17 @@ function chooseLevel(cap: number) {
   api.setPrefs({ qPref: cap }).catch(() => {})
   showQ.value = false
   if (hls && levels.value.length > 1) {
-    const next = cap > 0 ? pickByCap(cap, levels.value) : -1
     if (cap === 0) {
+      // 回到自动跟随
       hls.currentLevel = -1
       levelIdx = -1
     } else {
+      const next = pickByCap(cap, levels.value)
       levelIdx = next
-      hls.currentLevel = next
+      // 用 nextLevel 而不是 currentLevel：后者会立即丢弃当前缓冲区、
+      // 从头重新加载，画面会黑一下并停顿好几秒；前者在下一个分片边界
+      // 平滑切换，观看几乎无感。已经在目标档位就不用动。
+      if (next !== hls.currentLevel) hls.nextLevel = next
     }
   }
   syncQLabel()
@@ -1070,7 +1171,9 @@ function applySeek(t: number) {
     window.setTimeout(() => (seekingRemux = false), 1500)
     remuxSeek.value = Math.max(0, Math.floor(t))
     const wasPlaying = playing.value
-    const src = proxiedFinal()
+    // 把兜底状态带上：无扩展名文件已经靠强制转封装在播了，
+    // 这里如果不传就会拿回直连地址，一拖进度条又变回「播不了」。
+    const src = proxiedFinal(remuxFallbackTried)
     vid.src = src
     curMs.value = t * 1000
     vid.addEventListener('loadedmetadata', () => {
@@ -1296,6 +1399,8 @@ async function switchLine(url: string) {
 function retry() {
   destroyPlayer()
   liveFail = 0
+  // 用户主动重试 = 重新给一次机会，把兜底标记也清掉
+  remuxFallbackTried = false
   prepared.value = false
   playing.value = false
   curMs.value = 0
@@ -1675,7 +1780,7 @@ onUnmounted(() => {
             <div class="vol-track"><div class="vol-fill" :style="{ width: (muted ? 0 : volume * 100) + '%' }"></div></div>
           </div>
           <button class="ctl" @click="togglePlaySpeed" :title="`当前 ${rateLabel}x，点击切换倍速`">{{ rateLabel }}x</button>
-          <button class="ctl" @click="showQ = !showQ" :title="`当前画质：${qLabel}`">{{ qLabel }}</button>
+          <button class="ctl" @click="showQ = !showQ" :title="qTitle">{{ qLabel }}</button>
           <button v-if="!isLive && player.count > 1" class="ctl" @click="showEps = true">选集</button>
           <!-- 自动连播开关：原来只有移动端有，桌面端播完只好被动连播，
                想逐集看完再停下也没法设置。 -->
@@ -1889,7 +1994,7 @@ onUnmounted(() => {
           <span class="m-aux-icon">{{ rateLabel }}x</span>
           <span>倍速</span>
         </button>
-        <button class="m-aux-btn" @click="showQ = !showQ">
+        <button class="m-aux-btn" @click="showQ = !showQ" :title="qTitle">
           <span class="m-aux-icon">⚙</span>
           <span>{{ qLabel }}</span>
         </button>

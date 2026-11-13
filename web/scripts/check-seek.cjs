@@ -71,7 +71,7 @@ check(
 )
 const resumeAtMeta = /pendingResumeMs\s*>?\s*0[\s\S]{0,400}?vid\.currentTime\s*=/.test(code)
 check(resumeAtMeta, '续播定位在 loadedmetadata 内一次性完成（不重复走 applySeek）')
-check(/player\.seek\s*>\s*0[\s\S]{0,300}?remuxSeek\.value\s*=[\s\S]{0,200}?const\s+src\s*=\s*proxiedFinal\(\)/.test(code),
+check(/player\.seek\s*>\s*0[\s\S]{0,300}?remuxSeek\.value\s*=[\s\S]{0,200}?const\s+src\s*=\s*proxiedFinal\(/.test(code),
   '续播起点在第一次请求前写入 remuxSeek（转封装一次起转到位）')
 check(/Math\.abs\(\s*curMs\.value\s*-\s*lastSaveMs\s*\)/.test(code),
   '保存节流用绝对差值（往回拖也能落盘）')

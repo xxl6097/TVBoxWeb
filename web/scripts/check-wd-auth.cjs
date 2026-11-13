@@ -37,7 +37,7 @@ console.log('[PlayerView] 代理 URL 必须透传认证')
 const player = read('src/views/PlayerView.vue')
 
 // 取出 proxiedFinal 函数体
-const fn = player.match(/function proxiedFinal\(\)[^{]*\{([\s\S]*?)\n\}/)
+const fn = player.match(/function proxiedFinal\([^)]*\)[^{]*\{([\s\S]*?)\n\}/)
 if (!fn) {
   check(false, '找到 proxiedFinal 函数', '函数结构变了？请同步更新本脚本')
 } else {

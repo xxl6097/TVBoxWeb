@@ -294,5 +294,79 @@ console.log('\n[27] 转封装模式下字幕时间轴要跟着平移')
   expect(/cueOrigins/.test(shift), '以原始时间为基准重算，避免累积漂移')
 }
 
+console.log('\n[28] 自动画质不能被锁死在固定档位')
+{
+  // 自动模式下如果写 hls.currentLevel = i，等于手动锁档，ABR 彻底停摆，
+  // 网速再好也不会升到 1080P —— 用户选了「自动」却永远停在 720P。
+  const fn = code.slice(code.indexOf('function applyInitialLevel'),
+    code.indexOf('function applyInitialLevel') + 1400)
+  const autoBranch = fn.slice(fn.indexOf('} else {'), fn.indexOf('syncQLabel()'))
+  expect(/startLevel/.test(autoBranch), '自动分支用 startLevel（只定起始档位）')
+  expect(!/currentLevel/.test(autoBranch),
+    '自动分支不再写 currentLevel（否则 ABR 被关闭）')
+  const manualBranch = fn.slice(0, fn.indexOf('} else {'))
+  expect(/currentLevel/.test(manualBranch), '手动分支仍用 currentLevel 锁定')
+}
+
+console.log('\n[29] 自动模式要显示实际档位')
+{
+  expect(/LEVEL_SWITCHED/.test(code), '监听 LEVEL_SWITCHED')
+  expect(/liveLevelIdx/.test(code), '记录自动模式的实际档位')
+  const sw = code.slice(code.indexOf('LEVEL_SWITCHED'), code.indexOf('LEVEL_SWITCHED') + 500)
+  expect(/syncQLabel\(\)/.test(sw), '档位变化后刷新按钮文案')
+  const sync = code.slice(code.indexOf('function syncQLabel'),
+    code.indexOf('function syncQLabel') + 1600)
+  expect(/liveLevelIdx/.test(sync), 'syncQLabel 使用实际档位')
+  expect(/qTitle/.test(sync), 'syncQLabel 同时维护 title 文案')
+  expect(/手动/.test(sync), 'title 里区分手动/自动')
+  expect(/正在播/.test(sync), 'title 里说明自动档位正在播哪一档')
+}
+
+console.log('\n[30] 切画质要平滑，不能从头重缓冲')
+{
+  const fn = code.slice(code.indexOf('function chooseLevel'),
+    code.indexOf('function chooseLevel') + 1200)
+  expect(/nextLevel/.test(fn), '用 nextLevel 在分片边界平滑切换')
+  expect(/next !== hls\.currentLevel/.test(fn), '已在目标档位时不重复设置')
+}
+
+console.log('\n[31] 无扩展名文件失败后要尝试转封装')
+{
+  // needsRemux 的注释一直写着「真失败时会走转封装兜底」，
+  // 但 onPlayError 里其实从来没做过，等于注释骗人。
+  expect(/function needsRemux\(u: string, force = false\)/.test(code),
+    'needsRemux 支持 force 强制转封装')
+  expect(/function proxiedFinal\(forceRemux = false\)/.test(code),
+    'proxiedFinal 支持强制参数')
+  const err = code.slice(code.indexOf('function onPlayError'),
+    code.indexOf('function onPlayError') + 1800)
+  expect(/remuxFallbackTried/.test(err), 'onPlayError 有兜底标记')
+  expect(/proxiedFinal\(true\)/.test(err), '兜底时强制走转封装')
+  expect(/app\.status\?\.remux/.test(err), '只在服务端支持 ffmpeg 时才兜底')
+  // 网络/认证错误不该兜底：那不是容器问题
+  expect(/isContainerish/.test(err), '区分容器类错误与网络/认证错误')
+  expect(!/errKind === 'networkError'[\s\S]{0,40}isContainerish/.test(err),
+    '网络错误不触发转封装兜底')
+  // 兜底一次就够，避免来回弹
+  expect(/!remuxFallbackTried/.test(err), '兜底只做一次')
+  // 兜底还失败时文案要说清是编码问题，不能笼统说「无法直接播放」
+  expect(/HEVC|H\.265/.test(err), '兜底失败后提示指向 HEVC/H.265 编码')
+  expect(/只换容器不转码/.test(err), '说明转封装的能力边界')
+}
+
+console.log('\n[32] 手动档位摘要不能被单码率源吞掉')
+{
+  // 曾经把「只有一个档位就显示自动」放在最前面，
+  // 结果单码率源（普通 mp4）上用户选了「原画」，按钮仍显示「自动」。
+  const fn = code.slice(code.indexOf('function syncQLabel'),
+    code.indexOf('function syncQLabel') + 1800)
+  const manualPos = fn.indexOf('if (qCap > 0)')
+  const singlePos = fn.indexOf('levels.value.length <= 1')
+  expect(manualPos >= 0 && singlePos > manualPos,
+    '手动档位分支在「只有一个档位」判断之前')
+  // TOP 是哨兵值，不能直接喂 labelOf(100000)，否则会显示成 4K
+  expect(/qCap >= TOP/.test(fn), 'TOP 哨兵单独判断为「原画」')
+}
+
 console.log(failed === 0 ? '\n全部通过' : `\n${failed} 项失败`)
 process.exit(failed === 0 ? 0 : 1)
