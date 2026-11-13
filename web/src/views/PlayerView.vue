@@ -294,13 +294,19 @@ onMounted(async () => {
 
 onUnmounted(() => {
   leave = true
-  // 清理所有 timers
+  // 清理所有 timers。原来只清了 4 个，漏掉 osdTimer / skipTimer /
+  // flashTimer / volTimer —— 离开页面后 skipTimer 仍在跑，几秒后会调
+  // doSkip()，对一个已卸载的组件调 switchEpisode，发出无意义的解析请求。
   if (saveTimer) clearTimeout(saveTimer)
   if (seekPendingTimer) clearTimeout(seekPendingTimer)
   if (volSaveTimer) clearTimeout(volSaveTimer)
+  if (osdTimer) { clearTimeout(osdTimer); osdTimer = 0 }
+  if (skipTimer) { clearInterval(skipTimer); skipTimer = 0 }
+  if (flashTimer) { clearTimeout(flashTimer); flashTimer = 0 }
+  if (volTimer) { clearTimeout(volTimer); volTimer = 0 }
+  cancelAutoplay()
   removeExternalSub()
   disposeSubtitles()
-  if (autoplayTimer) { clearInterval(autoplayTimer); autoplayTimer = 0 }
   if (castHandlers) {
     const remote = remoteApi()
     remote?.removeEventListener?.('connect', castHandlers.onConnect)
@@ -602,7 +608,6 @@ function bindVideoEvents(vid: HTMLVideoElement) {
         if (countdown > 0) {
           hint.value = `即将播放下一集（${countdown}s）`
         } else {
-          clearInterval(autoplayTimer)
           autoplayTimer = 0
           hint.value = ''
           switchEpisode(1)
@@ -702,13 +707,16 @@ function pickByCap(cap: number, lv: QLevel[]): number {
 }
 
 function syncQLabel() {
+  // 只给按钮显示「当前档位」，不要「自动 1080P」这种长字符串 ——
+  // 移动端按钮宽度有限，长文案会把整行挤变形。
+  // 是否自动跟随由面板里的「自动」选项表达，title 里补全语义。
   if (levelIdx >= 0 && levelIdx < levels.value.length) {
     const name = labelOfLevel(levels.value[levelIdx])
     if (levels.value.length <= 1) {
       qLabel.value = '自动'
       return
     }
-    qLabel.value = qCap > 0 ? name : '自动 ' + name
+    qLabel.value = qCap > 0 ? name : '自动'
     return
   }
   if (qCap >= TOP) qLabel.value = '原画'
@@ -795,6 +803,8 @@ function markSkip(kind: 'intro' | 'outro') {
 function togglePlay() {
   const vid = videoEl.value
   if (!vid || !prepared.value) return
+  // 用户主动操作播放，先把连播倒计时撤掉
+  cancelAutoplay()
   if (vid.paused) {
     vid.play()
     flashPlay('play')
@@ -1085,6 +1095,36 @@ const showEps = ref(false)
 let autoplayTimer = 0
 let castHandlers: { onConnect: () => void; onDisconnect: () => void } | null = null
 
+/**
+ * 取消「即将播放下一集」的倒计时。
+ *
+ * 播完后会起一个 3 秒倒计时，但原来没有任何地方能取消它：
+ * 用户在倒计时期间点了暂停、切了别的集、或关掉自动连播，
+ * 3 秒到了照样会被切走。所有「用户主动干预播放」的入口都要调这个。
+ */
+function cancelAutoplay() {
+  if (autoplayTimer) {
+    clearInterval(autoplayTimer)
+    autoplayTimer = 0
+  }
+  // 提示也要一起清，否则倒计时残留的「（1s）」会跟着切集留到下一集
+  if (hint.value.includes('即将播放下一集')) hint.value = ''
+}
+
+/**
+ * 切换自动连播。关掉的时候要把正在跑的倒计时立刻撤掉 ——
+ * 否则用户点了「手动切集」，3 秒后还是被切走，等于开关没生效。
+ */
+function toggleAutoPlayNext() {
+  autoPlayNext.value = !autoPlayNext.value
+  if (!autoPlayNext.value) {
+    cancelAutoplay()
+    app.showTip('已改为手动切集')
+  } else {
+    app.showTip('播完自动播放下一集')
+  }
+}
+
 async function jumpToEpisode(i: number) {
   // 先关抽屉再切集：switchEpisode 里要解析地址、重新建流，可能卡几秒。
   // 原来放在 await 之后，抽屉会一直开着，用户以为没点中，容易连点好几下。
@@ -1099,6 +1139,8 @@ async function switchEpisode(delta: number) {
     return
   }
   savePos()
+  // 清掉连播倒计时与它的提示，避免切集后还残留「即将播放下一集（1s）」
+  cancelAutoplay()
   // 清除进度条拖动状态，避免切集/切台后进度条显示混乱
   dragging.value = false
   previewMs.value = -1
@@ -1199,9 +1241,11 @@ function destroyPlayer() {
     videoEl.value.removeAttribute('src')
     videoEl.value.load()
   }
-  if (skipTimer) clearInterval(skipTimer)
-  if (flashTimer) clearTimeout(flashTimer)
-  if (autoplayTimer) { clearInterval(autoplayTimer); autoplayTimer = 0 }
+  if (skipTimer) { clearInterval(skipTimer); skipTimer = 0 }
+  if (flashTimer) { clearTimeout(flashTimer); flashTimer = 0 }
+  if (osdTimer) { clearTimeout(osdTimer); osdTimer = 0 }
+  if (volTimer) { clearTimeout(volTimer); volTimer = 0 }
+  cancelAutoplay()
   playFlash.value = ''
 }
 
@@ -1396,6 +1440,11 @@ onUnmounted(() => {
       <div v-if="playFlash" class="play-flash">{{ playFlash === 'play' ? '▶' : '❚❚' }}</div>
     </transition>
 
+    <!-- 常驻提示（连播倒计时、解析降级说明）。
+         这个 ref 原来只有赋值没有渲染，「即将播放下一集（3s）」用户根本看不到，
+         3 秒后画面突然就跳了，像是播放器自己乱跑。 -->
+    <div v-if="hint" class="player-hint">{{ hint }}</div>
+
     <!-- 加载/缓冲 -->
     <div v-if="resolving" class="center-tip">正在解析播放地址…</div>
     <div v-else-if="buffering" class="center-tip">缓冲中…</div>
@@ -1413,13 +1462,15 @@ onUnmounted(() => {
       {{ skipShow === 'intro' ? '跳过片头' : player.hasNext ? '下一集' : '跳过片尾' }}
     </div>
 
-    <!-- 桌面端右上角画中画按钮 -->
-  <button
-    v-if="prepared && supportsPip()"
-    class="pip-btn"
-    :title="isPip ? '退出画中画 (P)' : '画中画 (P)'"
-    @click="togglePip"
-  >
+    <!-- 桌面端右上角画中画按钮。
+         必须跟 OSD 一起显隐：原来只判 prepared，控制条 12 秒自动隐藏后
+         它还常驻在右上角，看片时一直挡着一块画面。鼠标移上去会唤出 OSD。 -->
+    <button
+      v-if="prepared && showOsd && supportsPip()"
+      class="pip-btn"
+      :title="isPip ? '退出画中画 (P)' : '画中画 (P)'"
+      @click="togglePip"
+    >
     <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
       <rect x="2" y="3" width="20" height="14" rx="2"/>
       <rect x="12" y="10" width="9" height="7" rx="1"/>
@@ -1454,7 +1505,7 @@ onUnmounted(() => {
             <div class="vol-track"><div class="vol-fill" :style="{ width: (muted ? 0 : volume * 100) + '%' }"></div></div>
           </div>
           <button class="ctl" @click="togglePlaySpeed" :title="`当前 ${rateLabel}x，点击切换倍速`">{{ rateLabel }}x</button>
-          <button class="ctl" @click="showQ = !showQ">画质</button>
+          <button class="ctl" @click="showQ = !showQ" :title="`当前画质：${qLabel}`">{{ qLabel }}</button>
           <button v-if="!isLive && player.count > 1" class="ctl" @click="showEps = true">选集</button>
           <!-- 自动连播开关：原来只有移动端有，桌面端播完只好被动连播，
                想逐集看完再停下也没法设置。 -->
@@ -1462,7 +1513,7 @@ onUnmounted(() => {
             v-if="!isLive && player.hasNext"
             class="ctl"
             :title="autoPlayNext ? '播完自动下一集，点击改为手动' : '播完停在当集，点击改为自动'"
-            @click="autoPlayNext = !autoPlayNext"
+            @click="toggleAutoPlayNext"
           >{{ autoPlayNext ? '自动连播' : '手动切集' }}</button>
           <button v-if="supportsCast()" class="ctl" :class="{ primary: castConnected }" @click="toggleCast">{{ castConnected ? '断开投屏' : '投屏' }}</button>
           <button class="ctl" @click="switchEpisode(1)">{{ isLive ? '下一台' : '下一集' }}</button>
@@ -1550,6 +1601,9 @@ onUnmounted(() => {
       <transition name="flash">
         <div v-if="playFlash" class="play-flash" style="font-size:56px">{{ playFlash === 'play' ? '▶' : '❚❚' }}</div>
       </transition>
+
+      <!-- 常驻提示（连播倒计时等），与桌面端同一个 hint -->
+      <div v-if="hint" class="player-hint m-player-hint">{{ hint }}</div>
 
       <!-- 跳过按钮 -->
       <div v-if="skipShow" class="skip-btn" @click.stop="doSkip(skipShow)">
@@ -1654,7 +1708,7 @@ onUnmounted(() => {
           <span class="m-aux-icon">{{ muted ? '🔇' : '🔊' }}</span>
           <span>{{ muted ? '已静音' : Math.round(volume * 100) + '%' }}</span>
         </button>
-        <button v-if="!isLive && player.hasNext" class="m-aux-btn" @click="autoPlayNext = !autoPlayNext">
+        <button v-if="!isLive && player.hasNext" class="m-aux-btn" @click="toggleAutoPlayNext">
           <span class="m-aux-icon">{{ autoPlayNext ? '▶' : '⏸' }}</span>
           <span>{{ autoPlayNext ? '自动连播' : '手动切集' }}</span>
         </button>
@@ -1664,7 +1718,7 @@ onUnmounted(() => {
         </button>
         <button class="m-aux-btn" @click="showQ = !showQ">
           <span class="m-aux-icon">⚙</span>
-          <span>画质</span>
+          <span>{{ qLabel }}</span>
         </button>
         <button v-if="!isLive && player.count > 1" class="m-aux-btn" @click="showEps = true">
           <span class="m-aux-icon">☷</span>
@@ -1764,6 +1818,25 @@ onUnmounted(() => {
 }
 .center-tip.err p { margin-bottom: 12px; }
 .err-actions { display: flex; justify-content: center; gap: 12px; }
+
+/* 常驻提示：连播倒计时 / 解析降级说明。
+   放底部靠上一点，避开控制条与进度条，不挡字幕。 */
+.player-hint {
+  position: absolute;
+  left: 50%;
+  bottom: 22%;
+  transform: translateX(-50%);
+  max-width: min(76%, 640px);
+  padding: 8px 16px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  font-size: 14px;
+  line-height: 1.4;
+  text-align: center;
+  pointer-events: none;
+  z-index: 6;
+}
 
 .skip-btn {
   position: absolute;
@@ -1979,6 +2052,18 @@ onUnmounted(() => {
   z-index: 10;
 }
 .m-center-tip.m-err p { margin-bottom: 10px; font-size: 14px; }
+
+/* 移动端提示：竖屏时视频区只有 16:9 高，b 22% 会压到画面中下部，
+   改成贴着视频区底部；全屏时再往上抬一点避开控制条。 */
+.m-player-hint {
+  position: absolute;
+  bottom: 12px;
+  font-size: 13px;
+  max-width: 88%;
+}
+.m-player.m-fullscreen .m-player-hint {
+  bottom: 96px;
+}
 
 .m-panel {
   flex: 1;

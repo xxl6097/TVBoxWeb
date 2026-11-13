@@ -88,9 +88,17 @@ expect(/@click="togglePlaySpeed"/.test(deskTpl), '桌面控制条有倍速按钮
 expect(/@click="togglePlaySpeed"/.test(mvTpl), '移动端辅助按钮行有倍速按钮')
 expect(/rateLabel/.test(code), '倍速显示走 rateLabel（不显示 1.0x）')
 
-console.log('\n[9] 自动连播开关两端都有')
-expect(/autoPlayNext = !autoPlayNext/.test(deskTpl), '桌面端可切换自动连播')
-expect(/autoPlayNext = !autoPlayNext/.test(mvTpl), '移动端可切换自动连播')
+console.log('\n[9] 自动连播开关两端都有，且能取消倒计时')
+expect(/@click="toggleAutoPlayNext"/.test(deskTpl), '桌面端可切换自动连播')
+expect(/@click="toggleAutoPlayNext"/.test(mvTpl), '移动端可切换自动连播')
+expect(!/autoPlayNext = !autoPlayNext/.test(code),
+  '不再直接取反（需走函数以便取消正在跑的倒计时）')
+{
+  const fn = code.slice(code.indexOf('function toggleAutoPlayNext'),
+                        code.indexOf('function toggleAutoPlayNext') + 400)
+  expect(/if \(!autoPlayNext\.value\)[\s\S]{0,80}?cancelAutoplay\(\)/.test(fn),
+    '关掉自动连播时立即取消倒计时（否则 3 秒后照样被切走）')
+}
 
 console.log('\n[10] 移动端图标不重复')
 const auxIcons = [...mvTpl.matchAll(/class="m-aux-icon">([^<]*)</g)].map((m) => m[1])
@@ -107,6 +115,44 @@ console.log('\n[12] 选集点击后立即关闭抽屉')
 const jump = code.slice(code.indexOf('async function jumpToEpisode'), code.indexOf('async function switchEpisode'))
 expect(/showEps\.value = false[\s\S]{0,120}?await switchEpisode/.test(jump),
   '先关抽屉再 await 切集（避免卡住时用户以为没点中）')
+
+console.log('\n[13] 画中画按钮跟 OSD 一起显隐')
+expect(/v-if="prepared && showOsd && supportsPip\(\)"/.test(deskTpl),
+  '桌面 pip 按钮带 showOsd 条件（OSD 隐藏后不再常驻遮挡画面）')
+
+console.log('\n[14] 当前画质档位可见')
+expect(/qLabel/.test(deskTpl), '桌面画质按钮显示 qLabel')
+expect(/qLabel/.test(mvTpl), '移动端画质按钮显示 qLabel')
+{
+  const sync = code.slice(code.indexOf('function syncQLabel'), code.indexOf('function syncQLabel') + 600)
+  expect(!/'自动 ' \+ name/.test(sync),
+    'qLabel 不再拼「自动 1080P」这种长串（移动端按钮会被挤变形）')
+}
+
+console.log('\n[15] 离开播放页清理全部定时器')
+{
+  const un = code.slice(code.indexOf('onUnmounted('), code.indexOf('onUnmounted(') + 1200)
+  for (const t of ['saveTimer', 'seekPendingTimer', 'volSaveTimer', 'osdTimer', 'skipTimer', 'flashTimer', 'volTimer']) {
+    expect(new RegExp('clear(Timeout|Interval)\\(' + t + '\\)').test(un), `onUnmounted 清理了 ${t}`)
+  }
+  expect(/cancelAutoplay\(\)/.test(un), 'onUnmounted 取消了连播倒计时')
+}
+
+console.log('\n[16] 连播倒计时的提示不会残留到下一集')
+{
+  const fn = code.slice(code.indexOf('function cancelAutoplay'), code.indexOf('function cancelAutoplay') + 500)
+  expect(/hint\.value\s*=\s*''/.test(fn), 'cancelAutoplay 会清掉「即将播放下一集」提示')
+  const sw = code.slice(code.indexOf('async function switchEpisode'), code.indexOf('async function switchEpisode') + 700)
+  expect(/cancelAutoplay\(\)/.test(sw), 'switchEpisode 里取消倒计时')
+  const tp = code.slice(code.indexOf('function togglePlay'), code.indexOf('function togglePlay') + 400)
+  expect(/cancelAutoplay\(\)/.test(tp), 'togglePlay 里取消倒计时（用户按暂停就别切了）')
+}
+
+console.log('\n[17] hint 必须真的渲染出来')
+expect(/v-if="hint"/.test(deskTpl), '桌面端渲染 hint')
+expect(/v-if="hint"/.test(mvTpl), '移动端渲染 hint')
+expect(/\.player-hint\s*\{/.test(code), '有 .player-hint 样式')
+expect(/hint\.value\s*=/.test(code), 'hint 仍被赋值（不是死变量）')
 
 console.log(failed === 0 ? '\n全部通过' : `\n${failed} 项失败`)
 process.exit(failed === 0 ? 0 : 1)
