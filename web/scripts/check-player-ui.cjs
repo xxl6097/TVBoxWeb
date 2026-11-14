@@ -410,9 +410,9 @@ console.log('\n[34] 面板要说明作用范围并给出两个出口')
 {
   const panel = readFileSync(
     path.join(ROOT, 'src/components/player/PlayerSettingsPanel.vue'), 'utf8')
-  expect(/跳过片头 · 本剧/.test(panel), '桌面端标题标注「本剧」')
-  expect(/跳过片尾 · 本剧/.test(panel), '桌面端片尾标题标注「本剧」')
-  expect(/m-q-section">跳过片头 · 本剧/.test(panel), '移动端同样标注')
+  // 两个 section 已合并为一个，标题里同时带「片头 / 片尾」与「本剧」
+  expect(/q-section">跳过片头 \/ 片尾 · 本剧/.test(panel), '桌面端标题标注「片头/片尾 · 本剧」')
+  expect(/m-q-section">跳过片头 \/ 片尾 · 本剧/.test(panel), '移动端同样标注')
   expect(/skip-apply-all/.test(panel), '提供「应用到所有剧」')
   expect(/skip-reset/.test(panel), '提供「恢复默认」')
   expect(/本剧已有单独设置/.test(panel), '已单独设置时有说明')
@@ -443,6 +443,40 @@ console.log('\n[35] 服务端按剧存储')
     '只有不带剧集 key 时才写全局片头片尾')
   expect(/skipA, skipB := q\(r, "skipA"\), q\(r, "skipB"\)/.test(api),
     '从 query 取剧集 key')
+}
+
+console.log('\n[36] 跳过片头片尾不能被排到面板底部')
+{
+  // 用户反馈「播放界面可以设置跳过片头片尾」—— 其实功能早就有，
+  // 只是它排在面板第 6、7 项，实测手机 360x640 下内容高 857px、
+  // 可视仅 512px，片头「标当前」超出底部 77px、片尾超出 203px，
+  // 用户不主动滚动就以为没这个功能。
+  const panel = readFileSync(
+    path.join(ROOT, 'src/components/player/PlayerSettingsPanel.vue'), 'utf8')
+
+  // 顺序：跳过区必须排在外挂字幕之前（仅次于画质）。
+  // 用带 class 的精确串定位，别用裸中文 —— 文件头注释里就写着
+  // 「画质 / 直播线路 / 外挂字幕 / 画面比例 / 跳过片头片尾」，会误匹配。
+  const skipAt = panel.indexOf('q-section">跳过片头 / 片尾')
+  const subAt = panel.indexOf('q-section">外挂字幕')
+  const scaleAt = panel.indexOf('q-section">画面比例')
+  expect(skipAt > 0 && subAt > skipAt, '跳过区排在外挂字幕之前', { skipAt, subAt })
+  expect(skipAt > 0 && scaleAt > skipAt, '跳过区排在画面比例之前', { skipAt, scaleAt })
+
+  // 两行紧凑排布：一个 section 标题带两行 .skip-row
+  expect((panel.match(/class="skip-row"/g) || []).length === 4,
+    '桌面+移动各两行 .skip-row（片头行、片尾行）')
+  expect(/只对本剧生效|本剧已有单独设置/.test(panel), '保留作用范围说明')
+  expect(/chip-sm/.test(panel), '同行 chip 用小号样式（否则挤到第二行）')
+  expect(!/跳过片头 · 本剧/.test(panel) && !/跳过片尾 · 本剧/.test(panel),
+    '不再拆成两个独立 section（原来那样太占高度）')
+
+  // 说明文字与两个操作按钮要能同排，别各占一行
+  expect(/q-hint-skip/.test(panel), '跳过区 hint 用 flex 容纳操作按钮')
+  // 只看样式规则本身，忽略注释里提到 :has() 的那句
+  const styleOnly = panel.slice(panel.indexOf('<style'))
+  const styleNoComment = styleOnly.replace(/\/\*[\s\S]*?\*\//g, '')
+  expect(!/:has\(/.test(styleNoComment), '样式里不依赖 :has()（旧 WebView 不支持）')
 }
 
 console.log(failed === 0 ? '\n全部通过' : `\n${failed} 项失败`)
