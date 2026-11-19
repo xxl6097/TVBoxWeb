@@ -460,23 +460,57 @@ console.log('\n[36] 跳过片头片尾不能被排到面板底部')
   const skipAt = panel.indexOf('q-section">跳过片头 / 片尾')
   const subAt = panel.indexOf('q-section">外挂字幕')
   const scaleAt = panel.indexOf('q-section">画面比例')
-  expect(skipAt > 0 && subAt > skipAt, '跳过区排在外挂字幕之前', { skipAt, subAt })
-  expect(skipAt > 0 && scaleAt > skipAt, '跳过区排在画面比例之前', { skipAt, scaleAt })
+  expect(skipAt > 0 && subAt > skipAt, '跳过区排在外挂字幕之前')
+  expect(skipAt > 0 && scaleAt > skipAt, '跳过区排在画面比例之前')
 
-  // 两行紧凑排布：一个 section 标题带两行 .skip-row
   expect((panel.match(/class="skip-row"/g) || []).length === 4,
     '桌面+移动各两行 .skip-row（片头行、片尾行）')
   expect(/只对本剧生效|本剧已有单独设置/.test(panel), '保留作用范围说明')
-  expect(/chip-sm/.test(panel), '同行 chip 用小号样式（否则挤到第二行）')
   expect(!/跳过片头 · 本剧/.test(panel) && !/跳过片尾 · 本剧/.test(panel),
     '不再拆成两个独立 section（原来那样太占高度）')
-
-  // 说明文字与两个操作按钮要能同排，别各占一行
   expect(/q-hint-skip/.test(panel), '跳过区 hint 用 flex 容纳操作按钮')
-  // 只看样式规则本身，忽略注释里提到 :has() 的那句
   const styleOnly = panel.slice(panel.indexOf('<style'))
   const styleNoComment = styleOnly.replace(/\/\*[\s\S]*?\*\//g, '')
   expect(!/:has\(/.test(styleNoComment), '样式里不依赖 :has()（旧 WebView 不支持）')
+}
+
+console.log('\n[37] 跳过按钮必须够大够好点')
+{
+  // 上一版为了塞进可视区把按钮压到 25px 高、12px 字号，
+  // 用户实测反馈「偏小、不太好点」—— 手指约 45px 宽，25px 连一半都不到。
+  // 现在改成分段控件，尺寸必须守住。
+  const panel = readFileSync(
+    path.join(ROOT, 'src/components/player/PlayerSettingsPanel.vue'), 'utf8')
+
+  // 用分段控件而不是散落的小 chip
+  expect(/\.seg-item/.test(panel), '选项用 .seg-item 分段控件')
+  expect(/\.seg-mark/.test(panel), '「标当前」是独立的 .seg-mark 按钮')
+  expect(!/chip-sm/.test(panel), '不再使用 chip-sm 这种压缩样式')
+
+  // 高度：外径 46 = 内容 44 + 上下边框，段内可点 44（iOS HIG 最小值）
+  expect(/\.seg \{[\s\S]{0,400}?height: 46px/.test(panel),
+    '.seg 外径 46px（内容 44 + 边框）')
+  expect(/\.seg-item \{[\s\S]{0,400}?height: 100%/.test(panel),
+    '.seg-item 撑满容器得 44px 可点高度')
+  expect(/\.seg-mark \{[\s\S]{0,300}?height: 46px/.test(panel),
+    '「标当前」与分段条同高，视觉齐平')
+  expect(/box-sizing: border-box/.test(panel), '用 border-box 避免边框叠加错位')
+
+  // 字号：主选项 14px，不能回退到 12
+  expect(/\.seg-item \{[\s\S]{0,500}?font-size: 14px/.test(panel),
+    '主选项字号 14px')
+  expect(/\.m-q-sheet \.seg-item \{[\s\S]{0,120}?font-size: 14px/.test(panel),
+    '移动端也是 14px（实测不裁切）')
+
+  // 次要按钮也不能太小
+  expect(/\.chip-xs \{[\s\S]{0,400}?min-height: 40px/.test(panel),
+    '次要按钮至少 40px 高')
+
+  // 选中态要清晰
+  expect(/\.seg-item\.active \{[\s\S]{0,160}?background: var\(--live\)/.test(panel),
+    '选中态用主题红色填充')
+  expect(/\.seg-item\.active \{[\s\S]{0,200}?font-weight: 600/.test(panel),
+    '选中态加粗')
 }
 
 console.log(failed === 0 ? '\n全部通过' : `\n${failed} 项失败`)

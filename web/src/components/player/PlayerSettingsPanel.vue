@@ -129,25 +129,31 @@ function delayLabel(d: number) {
       <div class="q-section">跳过片头 / 片尾 · 本剧</div>
       <div class="skip-row">
         <span class="skip-label">片头</span>
-        <span
-          v-for="s in SKIP_PRESETS"
-          :key="'i' + s"
-          class="chip chip-sm"
-          :class="{ active: props.introSkipSec === s }"
-          @click="emit('intro-skip', s)"
-        >{{ s === 0 ? '关' : s + '秒' }}</span>
-        <span class="chip chip-sm" @click="emit('mark-skip', 'intro')">标当前</span>
+        <div class="seg">
+          <button
+            v-for="s in SKIP_PRESETS"
+            :key="'i' + s"
+            type="button"
+            class="seg-item"
+            :class="{ active: props.introSkipSec === s }"
+            @click="emit('intro-skip', s)"
+          >{{ s === 0 ? '关' : s + '秒' }}</button>
+        </div>
+        <button type="button" class="seg-mark" @click="emit('mark-skip', 'intro')">标当前</button>
       </div>
       <div class="skip-row">
         <span class="skip-label">片尾</span>
-        <span
-          v-for="s in SKIP_PRESETS"
-          :key="'o' + s"
-          class="chip chip-sm"
-          :class="{ active: props.outroSkipSec === s }"
-          @click="emit('outro-skip', s)"
-        >{{ s === 0 ? '关' : s + '秒' }}</span>
-        <span class="chip chip-sm" @click="emit('mark-skip', 'outro')">标当前</span>
+        <div class="seg">
+          <button
+            v-for="s in SKIP_PRESETS"
+            :key="'o' + s"
+            type="button"
+            class="seg-item"
+            :class="{ active: props.outroSkipSec === s }"
+            @click="emit('outro-skip', s)"
+          >{{ s === 0 ? '关' : s + '秒' }}</button>
+        </div>
+        <button type="button" class="seg-mark" @click="emit('mark-skip', 'outro')">标当前</button>
       </div>
       <div class="q-hint q-hint-skip">
         <template v-if="props.skipOwn">本剧已有单独设置，其他剧不受影响。</template>
@@ -252,25 +258,31 @@ function delayLabel(d: number) {
       <div class="m-q-section">跳过片头 / 片尾 · 本剧</div>
       <div class="skip-row">
         <span class="skip-label">片头</span>
-        <span
-          v-for="s in SKIP_PRESETS"
-          :key="'mi' + s"
-          class="chip chip-sm"
-          :class="{ active: props.introSkipSec === s }"
-          @click="emit('intro-skip', s)"
-        >{{ s === 0 ? '关' : s + '秒' }}</span>
-        <span class="chip chip-sm" @click="emit('mark-skip', 'intro')">标当前</span>
+        <div class="seg">
+          <button
+            v-for="s in SKIP_PRESETS"
+            :key="'mi' + s"
+            type="button"
+            class="seg-item"
+            :class="{ active: props.introSkipSec === s }"
+            @click="emit('intro-skip', s)"
+          >{{ s === 0 ? '关' : s + '秒' }}</button>
+        </div>
+        <button type="button" class="seg-mark" @click="emit('mark-skip', 'intro')">标当前</button>
       </div>
       <div class="skip-row">
         <span class="skip-label">片尾</span>
-        <span
-          v-for="s in SKIP_PRESETS"
-          :key="'mo' + s"
-          class="chip chip-sm"
-          :class="{ active: props.outroSkipSec === s }"
-          @click="emit('outro-skip', s)"
-        >{{ s === 0 ? '关' : s + '秒' }}</span>
-        <span class="chip chip-sm" @click="emit('mark-skip', 'outro')">标当前</span>
+        <div class="seg">
+          <button
+            v-for="s in SKIP_PRESETS"
+            :key="'mo' + s"
+            type="button"
+            class="seg-item"
+            :class="{ active: props.outroSkipSec === s }"
+            @click="emit('outro-skip', s)"
+          >{{ s === 0 ? '关' : s + '秒' }}</button>
+        </div>
+        <button type="button" class="seg-mark" @click="emit('mark-skip', 'outro')">标当前</button>
       </div>
       <div class="q-hint q-hint-skip">
         <template v-if="props.skipOwn">本剧已有单独设置，其他剧不受影响。</template>
@@ -394,41 +406,112 @@ function delayLabel(d: number) {
   font-weight: 600;
 }
 
-/* ===== 跳过片头/片尾：两行紧凑排布 ===== */
-/* 原来是两个独立 section，各占一行标题+一行 chips，
-   手机上 7 段叠起来高 850px+，跳过区整块落在折叠线以下。
-   合并成一段两行后省下约 60px，配合上移就能在 360x640 直接看到。 */
+/* ===== 跳过片头/片尾：分段控件 =====
+   早先用「一堆小 chip 横排」的写法：6 个选项 + 标签在 390 宽的面板里
+   需要 365px，而可用宽度只有 358px —— 一行本来就不够，只能把按钮压到
+   25px 高才塞得下，结果又小又难点（手指约 45px 宽，25px 连一半都不到）。
+   改成连体分段控件后，宽度由容器均分决定，高度可以放心做到 44px。 */
 .skip-row {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
-  gap: 6px;
-  margin-top: 6px;
+  gap: 8px;
+  margin-top: 8px;
 }
 .skip-label {
   flex: 0 0 auto;
-  min-width: 30px;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--dim);
 }
-/* 同一条选项行里 chip 要更小，否则 6 个选项放不下会被挤到第二行 */
-.chip-sm {
-  padding: 4px 10px;
-  font-size: 13px;
-  border-radius: 14px;
+/* 5 段均分：关 / 15 / 30 / 60 / 90 */
+.seg {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  /* 外径 46 = 内容 44 + 上下各 1px 边框。
+     这样段内可点高度正好 44（iOS HIG 最小值），而且与「标当前」外径齐平。
+     若把外径写成 44，扣掉边框后段内只剩 42，点起来会略窄。 */
+  box-sizing: border-box;
+  height: 46px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
 }
-.chip-xs {
-  padding: 3px 9px;
-  font-size: 12px;
-  border-radius: 12px;
+.seg-item {
+  flex: 1 1 0;
+  min-width: 0;
+  box-sizing: border-box;
+  /* 撑满 .seg 的内容区 = 44px 可点高度。
+     注意不能写 min-height: 44px —— 会撑破 box-sizing 的父容器。 */
+  height: 100%;
+  padding: 0 4px;
+  border: 0;
+  background: transparent;
+  color: var(--sub);
+  font-size: 14px;
+  font-family: inherit;
+  cursor: pointer;
+  /* 相邻段之间加细分隔线，替代 chip 之间的空隙 */
+  border-left: 1px solid var(--border);
+  transition: background 0.15s, color 0.15s;
+  -webkit-tap-highlight-color: transparent;
 }
+.seg-item:first-child { border-left: 0; }
+.seg-item:hover { background: var(--card-hi); }
+.seg-item:active { background: var(--card-hi); }
+.seg-item.active {
+  background: var(--live);
+  color: #fff;
+  font-weight: 600;
+}
+/* 「标当前」独立成一个按钮，高度与分段条齐平，便于单点 */
+.seg-mark {
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  /* 与 .seg 外径一致，视觉上齐平 */
+  height: 46px;
+  padding: 0 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--txt);
+  font-size: 14px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s;
+  -webkit-tap-highlight-color: transparent;
+}
+.seg-mark:hover { background: var(--card-hi); }
+.seg-mark:active { background: var(--card-hi); }
+
 /* 「应用到所有剧 / 恢复默认」跟在说明文字后面，不单独占一行 */
 .skip-actions {
   display: inline-flex;
-  gap: 6px;
+  gap: 8px;
   margin-left: 8px;
   vertical-align: middle;
 }
+/* 「应用到所有剧 / 恢复默认」：低频但有破坏性（恢复默认会清掉本剧设置），
+   点击区同样不能太小 —— 定 40px 高，比主选项 44px 略收但仍在可点范围。
+   原来是 25px，误触概率高。 */
+.chip-xs {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 40px;
+  padding: 0 14px;
+  font-size: 13px;
+  border-radius: 20px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--sub);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  -webkit-tap-highlight-color: transparent;
+}
+.chip-xs:hover { background: var(--card-hi); color: var(--txt); }
+.chip-xs:active { background: var(--card-hi); }
 
 /* ===== 移动端 sheet ===== */
 .m-q-mask {
@@ -472,5 +555,35 @@ function delayLabel(d: number) {
 }
 .m-q-close {
   margin-top: 16px;
+}
+
+/* ===== 移动端分段控件微调 ===== */
+/* 360 宽的手机面板内宽 328，5 段均分后每段约 43px。
+   实测 14px 字号下「15秒」仍不裁切（scrollWidth 未超 clientWidth），
+   所以字号统一保持 14px，只收横向留白和「标当前」的宽度，
+   把省下的空间让给点击区域 —— 宁可少留边，也不要小字小按钮。 */
+.m-q-sheet .skip-row {
+  gap: 6px;
+  margin-top: 6px;
+}
+.m-q-sheet .skip-label {
+  font-size: 12px;
+}
+.m-q-sheet .seg-item {
+  font-size: 14px;
+  padding: 0 2px;
+}
+.m-q-sheet .seg-mark {
+  padding: 0 10px;
+  font-size: 14px;
+}
+.m-q-sheet .skip-actions {
+  gap: 6px;
+  margin-left: 4px;
+}
+.m-q-sheet .chip-xs {
+  min-height: 38px;
+  padding: 0 12px;
+  font-size: 13px;
 }
 </style>
