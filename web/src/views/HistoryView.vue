@@ -5,6 +5,7 @@ import { api } from '@/api'
 import { useAppStore } from '@/stores/app'
 import type { HistItem } from '@/types'
 import TopBar from '@/components/TopBar.vue'
+import { autoSwitchAndPlay } from '@/utils/autoSwitchFlow'
 
 const router = useRouter()
 const app = useAppStore()
@@ -91,17 +92,19 @@ function isDead(h: HistItem): boolean {
   return !liveSiteKeys.value.has(h.siteKey)
 }
 
+/** 正在换源的那条记录 key，用于连点保护 */
+const switchingKey = ref('')
+
 function open(h: HistItem) {
   // 网盘记录没有详情页，交给网盘页续播
   if (h.siteKey === 'webdav') {
     router.push({ name: 'webdav', query: { continue: h.vodId } })
     return
   }
-  // 源站已失效：跳详情页只会看到错误页，没有任何可操作出口。
-  // 直接按片名搜索，让用户从现存源里重新选一个。
+  // 源站已失效：自动按片名换源，定位同一集并把进度带过去；
+  // 找不到才降级到搜索页（由 autoSwitchAndPlay 内部处理）。
   if (isDead(h)) {
-    router.push({ name: 'search', query: { kw: h.name } })
-    app.showTip(`「${h.siteName || h.siteKey}」已失效，改用片名搜索`)
+    autoSwitchAndPlay(h, { push: router.push, tip: app.showTip, switchingKey })
     return
   }
   // 带上片名：跳过去若发现源已失效，详情页能直接用它去别的源里搜

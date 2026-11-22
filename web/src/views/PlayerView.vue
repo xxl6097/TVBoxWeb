@@ -34,6 +34,15 @@ const vodId = (route.query.id as string) || ''
 const vodName = (route.query.name as string) || (route.query.vodTitle as string) || ''
 const vodPic = (route.query.pic as string) || ''
 const vodSiteName = (route.query.siteName as string) || ''
+/**
+ * 起播位置（毫秒），由 ?pos= 传入。
+ * 自动换源时用它把「原来看到哪」带到新源 —— 新源 vodId 是新的，
+ * 本地还没有它的播放历史，查不到进度，只能显式传。
+ */
+const urlResumeMs = (() => {
+  const v = Number(route.query.pos || 0)
+  return Number.isFinite(v) && v > 0 ? v : 0
+})()
 
 // 转封装模式：MKV 等容器由服务端实时转成 fMP4。
 // 这种流不支持 Range，所以拖进度条要带 seek 重新起转。
@@ -540,8 +549,14 @@ async function initPlayer() {
   // 这样转封装那条流一次就从目标位置起转，不用「先拉 0 秒再跳」。
   // 之前是等 loadedmetadata 之后再 applySeek，等于白白多请求一次，
   // 而且那次跳转常常被 seekingRemux 的防重入窗口吃掉 → 续播失效。
-  if (player.seek > 0 && !isLive) {
-    pendingResumeMs = player.seek
+  //
+  // 起点有两个来源：内存里的 player.seek（同一次会话内跳转），
+  // 以及 URL 的 ?pos=（自动换源时跨页传过来）。
+  // 换源后新源的 vodId 是新的，本地还没有这条播放历史，
+  // 光靠 player.seek 无从得知进度，只能靠 ?pos= 带过来。
+  const startMs = player.seek > 0 ? player.seek : urlResumeMs
+  if (startMs > 0 && !isLive) {
+    pendingResumeMs = startMs
     player.seek = 0
     remuxSeek.value = Math.max(0, Math.floor(pendingResumeMs / 1000))
   }
@@ -647,10 +662,28 @@ function bindVideoEvents(vid: HTMLVideoElement) {
     if (pendingResumeMs > 0 && !isLive) {
       const ms = pendingResumeMs
       pendingResumeMs = 0
-      curMs.value = ms
-      lastSaveMs = ms
-      app.showTip('已从上次位置继续播放')
-      if (!remuxMode.value) vid.currentTime = ms / 1000
+      // 进度可能超出这一集的真实时长：换源时尤其常见 ——
+      // 原源这一集 40 分钟，新源剪成 30 分钟，旧进度 35:00 落到了片尾之外，
+      // 直接跳过去会立刻触发「播完→连播下一集」，用户莫名其妙跳到后几集。
+      // 这种情况应该从这一集开头播，而不是扔到片尾。
+      if (durMs.value > 0 && ms >= durMs.value - 1000) {
+        app.showTip('上次的位置超出这一集的时长，已从头播放')
+        if (remuxMode.value) {
+          // 转封装流的起点在请求发出时就定了，改 remuxSeek 不会重发请求，
+          // 必须重新 init 一次才能从 0 起转。
+          remuxSeek.value = 0
+          initPlayer()
+        } else {
+          curMs.value = 0
+          lastSaveMs = 0
+          vid.currentTime = 0
+        }
+      } else {
+        curMs.value = ms
+        lastSaveMs = ms
+        app.showTip('已从上次位置继续播放')
+        if (!remuxMode.value) vid.currentTime = ms / 1000
+      }
     }
     if (introSkipSec.value > 0 && !introDone && !isLive) {
       const skipMs = introSkipSec.value * 1000

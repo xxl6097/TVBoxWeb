@@ -233,9 +233,12 @@ console.log('\n[24] 切集必须摘掉上一集的外挂字幕')
   const line = code.slice(code.indexOf('async function switchLine'),
     code.indexOf('async function switchLine') + 1200)
   expect(/detachExternalSub\(\)/.test(line), 'switchLine 里也摘掉')
-  // 但内容要留着——外挂字幕常跨集通用，切集就让人重选太折腾
-  const init = code.slice(code.indexOf('async function initPlayer'),
-    code.indexOf('async function initPlayer') + 2200)
+  // 但内容要留着——外挂字幕常跨集通用，切集就让人重选太折腾。
+  // 按「函数体范围」取而不是写死字符数：initPlayer 里加了注释/逻辑后
+  // 固定窗口会把后面的代码截掉，造成误报。
+  const initStart = code.indexOf('async function initPlayer')
+  const nextFn = code.indexOf('\nasync function ', initStart + 20)
+  const init = code.slice(initStart, nextFn > 0 ? nextFn : initStart + 30000)
   expect(/reattachExternalSub\(\)/.test(init), 'initPlayer 里把字幕重新挂回新流')
 }
 
@@ -540,10 +543,11 @@ console.log('\n[38] 失效源站不能变成死路')
     '站点请求失败时传 null（空数组是「真没配站源」的合法值）')
 
   // 点击失效记录不要跳详情错误页，直接转搜索
-  expect(/isDeadHist\(h\)[\s\S]{0,220}name: 'search'/.test(home),
-    '首页点失效记录改走搜索')
-  expect(/isDead\(h\)[\s\S]{0,220}name: 'search'/.test(hist),
-    '历史页点失效记录改走搜索')
+  // 最新：点失效记录直接自动换源并续播（找不到才由 autoSwitchAndPlay 降级到搜索）
+  expect(/isDeadHist\(h\)[\s\S]{0,220}autoSwitchAndPlay\(/.test(home),
+    '首页点失效记录走自动换源')
+  expect(/isDead\(h\)[\s\S]{0,220}autoSwitchAndPlay\(/.test(hist),
+    '历史页点失效记录走自动换源')
 
   // 详情页要识别 ERR_SITE 并换成可操作出口
   expect(/siteMissing/.test(detail), '详情页识别源站失效')

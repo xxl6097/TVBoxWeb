@@ -3,6 +3,7 @@ import { ref, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { api } from '@/api'
 import { useAppStore } from '@/stores/app'
+import { autoSwitchAndPlay } from '@/utils/autoSwitchFlow'
 import { fmtMs } from '@/utils/format'
 import type { Vod, HistItem, Category } from '@/types'
 import TopBar from '@/components/TopBar.vue'
@@ -166,6 +167,9 @@ function continueVods(): Vod[] {
     }))
 }
 
+/** 正在换源的那条记录 key，用于连点保护 */
+const switchingKey = ref('')
+
 function openHistory(h: HistItem) {
   // 网盘记录没有点播详情页，直接交给网盘页的续播流程：
   // WebdavView 支持 ?continue=<srcId>:<vodName> 自动续播。
@@ -173,12 +177,10 @@ function openHistory(h: HistItem) {
     router.push({ name: 'webdav', query: { continue: h.vodId } })
     return
   }
-  // 源站已经不在了：跳详情页只会得到「站源不存在」死路，
-  // 直接改用片名去搜索，让用户从现存的源里重新挑一个。
-  // 这比让用户进去看一眼错误、再自己退出来找要少两步。
+  // 源站已经不在了：直接自动换源 —— 按片名在现存源里找同一部、定位同一集，
+  // 并把原来的进度带过去。找不到才降级到搜索页（由 autoSwitchAndPlay 处理）。
   if (isDeadHist(h)) {
-    router.push({ name: 'search', query: { kw: h.name } })
-    app.showTip(`「${h.siteName || h.siteKey}」已失效，改用片名搜索`)
+    autoSwitchAndPlay(h, { push: router.push, tip: app.showTip, switchingKey })
     return
   }
   // 带上片名：万一跳过去才发现源已失效，详情页能直接用它在别的源里搜

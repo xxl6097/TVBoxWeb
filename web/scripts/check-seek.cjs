@@ -55,19 +55,27 @@ check(downs >= 3, `找到 ${downs} 处 @pointerdown（桌面 1 + 移动端 2）`
 
 console.log('\n[静态] 跳转走统一入口')
 check(/applySeek\(t\)/.test(code), '松手后调用 applySeek')
-// currentTime 赋值只允许出现在两个地方，二者都有明确理由：
+// currentTime 赋值只允许出现在这几个地方，每个都有明确理由：
 //  ① applySeek 内部 —— 普通流的跳转本体；
 //  ② onloadedmetadata 的续播分支 —— 流已就绪后一次性定位，此时不能再走
 //     applySeek（转封装流已在 initPlayer 里带 seek 起转，再跳会重载一遍）。
-// 除这两处以外任何 currentTime 赋值都算绕过统一入口，会导致转封装模式跳转失效。
+//  ③ 同一分支里的「进度超出本集时长」保护 —— 此时要回到 0，
+//     同样不能走 applySeek。
+// 除这些以外任何 currentTime 赋值都算绕过统一入口，会导致转封装模式跳转失效。
 const ctLines = code
   .split('\n')
   .map((l, i) => ({ l, n: i + 1 }))
   .filter((x) => /currentTime\s*=/.test(x.l))
 check(
-  ctLines.length === 2,
-  `直接改 currentTime 的位置只剩 ${ctLines.length} 处（applySeek + 续播）`,
+  ctLines.length === 3,
+  `直接改 currentTime 的位置 ${ctLines.length} 处（applySeek + 续播 + 超时长回零）`,
   ctLines.map((x) => `第 ${x.n} 行: ${x.l.trim()}`).join('\n      ')
+)
+// 多出来的那处必须是「回零」而不是任意跳转
+check(
+  /上次的位置超出这一集的时长/.test(code) &&
+    /curMs\.value = 0[\s\S]{0,120}?vid\.currentTime = 0/.test(code),
+  '第三处是超时长保护，把位置回零而不是随便跳'
 )
 const resumeAtMeta = /pendingResumeMs\s*>?\s*0[\s\S]{0,400}?vid\.currentTime\s*=/.test(code)
 check(resumeAtMeta, '续播定位在 loadedmetadata 内一次性完成（不重复走 applySeek）')

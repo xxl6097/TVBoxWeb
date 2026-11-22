@@ -113,10 +113,14 @@ console.log('\n[3] 保存节流用绝对差值（往回拖也能落盘）')
 }
 
 console.log('\n[4] 转封装续播：一次起转到位，不再二次跳转')
-expect(/if \(player\.seek > 0 && !isLive\) \{[\s\S]{0,200}?remuxSeek\.value\s*=/.test(code),
+// 起点来源有两处：内存态 player.seek（同会话跳转）、URL 的 ?pos=（换源跨页）。
+// 断言只看「有没有在请求前把起点定下来并写进 remuxSeek」，不绑具体变量名。
+expect(/const startMs = player\.seek > 0 \? player\.seek : urlResumeMs/.test(code),
+  '起点 = player.seek 优先，?pos= 兜底')
+expect(/if \(startMs > 0 && !isLive\) \{[\s\S]{0,260}?remuxSeek\.value\s*=/.test(code),
   'initPlayer 在 proxiedFinal() 之前把起点写进 remuxSeek')
 const initIdx = code.indexOf('const src = proxiedFinal(')
-const seekIdx = code.indexOf('pendingResumeMs = player.seek')
+const seekIdx = code.search(/pendingResumeMs = startMs|pendingResumeMs = player\.seek/)
 expect(initIdx > 0 && seekIdx > 0 && seekIdx < initIdx,
   `赋值发生在第一次请求之前（${seekIdx} < ${initIdx}）`)
 expect(/player\.seek = 0/.test(code), '消费后清零 player.seek，避免重载循环')
