@@ -41,16 +41,40 @@ function goCat(tid: string) {
   router.push({ name: 'vod', query: { site: catSiteKey.value, tid } })
 }
 
+// 当前配置里存在的站源 key 集合。
+// 继续观看里存的 siteKey 可能已经不在配置里了（订阅换了、站源被下线），
+// 这类记录点进去只会得到「站源不存在」。这里先算出来，卡片上打标记，
+// 免得用户一条条点、一条条失败。
+//
+// null = 还没拉到站点列表，此时不做任何判定（否则首页刚进来会全标失效）。
+// 注意不能拿「空集合」当未加载：用户真的一个站都没配时集合本来就空，
+// 那时所有历史都该算失效 —— 这两个状态必须分开。
+const liveSiteKeys = ref<Set<string> | null>(null)
+/** 该条历史是否还能播（源站仍在配置里）。网盘记录永远算有效。 */
+function isDeadHist(h: HistItem): boolean {
+  if (h.siteKey === 'webdav') return false
+  if (!liveSiteKeys.value) return false // 还没拿到站点列表，先不误判
+  return !liveSiteKeys.value.has(h.siteKey)
+}
+
 async function loadFeed() {
   try {
     // 网盘历史和点播历史是两套存储（/api/webdav/history vs /api/history）。
     // 首页「继续观看」原来只读后者，所以在网盘里看过的片子在这里永远看不到，
     // 用户会以为「网盘没记录播放历史」。这里把两边合并，按时间倒序。
-    const [h, f, wd] = await Promise.all([
+    const [h, f, wd, sites] = await Promise.all([
       api.history(),
       api.feed(),
-      api.webdavHistory().catch(() => [])
+      api.webdavHistory().catch(() => []),
+      // 失败时给 null（而不是 []）：空数组是「一个站都没配」的合法结果，
+      // 两者语义不同 —— 前者不该判定，后者所有历史都算失效。
+      api.sites().catch(() => null)
     ])
+    // 站源校验：usable 与否不影响「能打开详情」，只看 key 还在不在配置里。
+    // 只有真的拿到了列表才赋值 —— 请求失败时保持 null，避免把所有记录误标失效。
+    if (Array.isArray(sites)) {
+      liveSiteKeys.value = new Set(sites.map((s: any) => s.key))
+    }
     // 过滤掉影片名为空的记录（来自旧格式或测试遗留）
     const normal = h.filter((x: HistItem) => x.name && x.name.trim())
     // 网盘记录转成首页卡片能用的形状。用 siteKey='webdav' 做标记，
@@ -149,7 +173,19 @@ function openHistory(h: HistItem) {
     router.push({ name: 'webdav', query: { continue: h.vodId } })
     return
   }
-  router.push({ name: 'detail', query: { site: h.siteKey, siteName: h.siteName, id: h.vodId } })
+  // 源站已经不在了：跳详情页只会得到「站源不存在」死路，
+  // 直接改用片名去搜索，让用户从现存的源里重新挑一个。
+  // 这比让用户进去看一眼错误、再自己退出来找要少两步。
+  if (isDeadHist(h)) {
+    router.push({ name: 'search', query: { kw: h.name } })
+    app.showTip(`「${h.siteName || h.siteKey}」已失效，改用片名搜索`)
+    return
+  }
+  // 带上片名：万一跳过去才发现源已失效，详情页能直接用它在别的源里搜
+  router.push({
+    name: 'detail',
+    query: { site: h.siteKey, siteName: h.siteName, id: h.vodId, name: h.name }
+  })
 }
 
 async function removeHist(h: HistItem) {
@@ -251,6 +287,8 @@ function refresh() {
           v-for="h in history.slice(0, 20)"
           :key="h.siteKey + h.vodId"
           class="continue-item"
+          :class="{ dead: isDeadHist(h) }"
+          :title="isDeadHist(h) ? `源站「${h.siteName || h.siteKey}」已失效，点击按片名重新搜索` : ''"
           @click="openHistory(h)"
         >
           <div class="poster">
@@ -261,12 +299,15 @@ function refresh() {
             </div>
             <div v-if="histRatio(h) > 0" class="progress"><div class="bar" :style="{ width: histRatio(h) * 100 + '%' }"></div></div>
             <div class="ep">{{ h.epName || '继续观看' }}</div>
+            <!-- 源站已不在配置里：直接标出来，并提示点了会改走搜索 -->
+            <div v-if="isDeadHist(h)" class="dead-badge">源已失效</div>
             <div class="del" @click.stop="removeHist(h)">✕</div>
           </div>
           <div class="name">{{ h.name }}</div>
           <div class="c-meta">
             <span v-if="h.epName">{{ h.epName }} · </span>
-            <span v-if="histRatio(h) > 0">已看 {{ Math.round(histRatio(h) * 100) }}%</span>
+            <span v-if="isDeadHist(h)" class="dead-hint">换源可继续</span>
+            <span v-else-if="histRatio(h) > 0">已看 {{ Math.round(histRatio(h) * 100) }}%</span>
             <span v-if="ago(h.time)"> · {{ ago(h.time) }}</span>
           </div>
         </div>
@@ -329,6 +370,32 @@ function refresh() {
 }
 .continue-item {
   cursor: pointer;
+}
+/* 源站已失效的记录：整体压低存在感，但不隐藏 ——
+   用户还可能想按片名去别的源里找。 */
+.continue-item.dead .poster {
+  filter: grayscale(0.85);
+  opacity: 0.72;
+}
+.continue-item.dead .name {
+  color: var(--dim);
+}
+.dead-badge {
+  position: absolute;
+  left: 6px;
+  top: 6px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.72);
+  color: var(--warn);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.5;
+  backdrop-filter: blur(4px);
+  pointer-events: none;
+}
+.dead-hint {
+  color: var(--warn);
 }
 .continue-item .poster {
   position: relative;

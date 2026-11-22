@@ -513,5 +513,55 @@ console.log('\n[37] 跳过按钮必须够大够好点')
     '选中态加粗')
 }
 
+console.log('\n[38] 失效源站不能变成死路')
+{
+  // 用户实际遇到：点「继续观看」里一条旧记录，得到
+  // 「加载失败 / 站源不存在 · 该站源可能已失效」，页面上只有「重新加载」，
+  // 点了必然再失败 —— 没有任何出口。
+  const home = readFileSync(path.join(ROOT, 'src/views/HomeView.vue'), 'utf8')
+  const hist = readFileSync(path.join(ROOT, 'src/views/HistoryView.vue'), 'utf8')
+  const detail = readFileSync(path.join(ROOT, 'src/views/DetailView.vue'), 'utf8')
+  const search = readFileSync(path.join(ROOT, 'src/views/SearchView.vue'), 'utf8')
+  const err = readFileSync(path.join(ROOT, 'src/components/ErrorState.vue'), 'utf8')
+
+  // 列表要标出失效记录
+  expect(/liveSiteKeys/.test(home) && /isDeadHist/.test(home),
+    '首页能判定历史对应的源站是否还在')
+  expect(/dead-badge/.test(home), '首页卡片有「源已失效」角标')
+  expect(/liveSiteKeys/.test(hist) && /isDead\(/.test(hist),
+    '历史页同样判定源站有效性')
+
+  // 关键：未加载 vs 已加载但为空，必须区分
+  expect(/ref<Set<string> \| null>\(null\)/.test(home),
+    '首页用 null 表示「未加载」，与「空集合」区分开')
+  expect(/ref<Set<string> \| null>\(null\)/.test(hist),
+    '历史页同样区分未加载与空集合')
+  expect(/\.catch\(\(\) => null\)/.test(home),
+    '站点请求失败时传 null（空数组是「真没配站源」的合法值）')
+
+  // 点击失效记录不要跳详情错误页，直接转搜索
+  expect(/isDeadHist\(h\)[\s\S]{0,220}name: 'search'/.test(home),
+    '首页点失效记录改走搜索')
+  expect(/isDead\(h\)[\s\S]{0,220}name: 'search'/.test(hist),
+    '历史页点失效记录改走搜索')
+
+  // 详情页要识别 ERR_SITE 并换成可操作出口
+  expect(/siteMissing/.test(detail), '详情页识别源站失效')
+  expect(/ERR_SITE/.test(detail), '按错误码识别 ERR_SITE')
+  expect(/按片名搜索其他源/.test(detail), '详情页给「按片名搜索其他源」')
+  expect(/移除这条记录/.test(detail), '详情页给「移除这条记录」')
+  expect(/retry-hidden/.test(detail), '源站失效时不显示无意义的重试')
+
+  // ErrorState 要能隐藏重试、并能插入别的按钮
+  expect(/retryHidden/.test(err), 'ErrorState 支持隐藏重试')
+  expect(/<slot name="actions" \/>/.test(err), 'ErrorState 提供 actions 插槽')
+
+  // 跳过去要自动搜，不能是空搜索页
+  expect(/route\.query\.kw/.test(search), '搜索页读取 ?kw=')
+  expect(/doSearch\(fromQuery\)/.test(search), '带 kw 进入时自动发起搜索')
+  expect(/watch\(\s*\n?\s*\(\) => route\.query\.kw/.test(search),
+    '同页内 kw 变化也会重新搜（组件复用场景）')
+}
+
 console.log(failed === 0 ? '\n全部通过' : `\n${failed} 项失败`)
 process.exit(failed === 0 ? 0 : 1)

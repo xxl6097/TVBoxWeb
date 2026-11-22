@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, computed, onMounted, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { api, humanizeApiError } from '@/api'
 import { useAppStore } from '@/stores/app'
 import type { Vod } from '@/types'
@@ -8,6 +8,7 @@ import TopBar from '@/components/TopBar.vue'
 import VodGrid from '@/components/VodGrid.vue'
 import SkeletonList from '@/components/SkeletonList.vue'
 
+const route = useRoute()
 const router = useRouter()
 const app = useAppStore()
 
@@ -20,12 +21,35 @@ const hotKeywords = ref<string[]>([])
 const siteInfo = ref('')
 const sugg = ref<string[]>([])
 const suggLoading = ref(false)
+// 最近一次真正发起搜索的词，避免 route.query 变化时重复搜同一个词
+let lastSearched = ''
 
 onMounted(async () => {
   keywords.value = await api.keywords()
   // 热门词（feed 提取），失败静默
   api.hotKeywords().then(h => { hotKeywords.value = h }).catch(() => {})
+  // 支持 ?kw=片子名 直接开搜。
+  // 「继续观看」里源站已失效的记录会跳到这里（见 HomeView.openHistory），
+  // 原先本页不读 query，跳过来是个空搜索页，用户还得自己再输一遍片名。
+  const fromQuery = String(route.query.kw || '').trim()
+  if (fromQuery) {
+    kw.value = fromQuery
+    await doSearch(fromQuery)
+  }
 })
+
+// 已经打开搜索页时，再次带 kw 跳进来（比如又点了一条失效记录）也要生效。
+// 只靠 onMounted 的话组件被复用，query 变了却不会重新搜。
+watch(
+  () => route.query.kw,
+  (v) => {
+    const w = String(v || '').trim()
+    if (w && w !== lastSearched) {
+      kw.value = w
+      doSearch(w)
+    }
+  }
+)
 
 // 判断关键词是否为纯 ASCII（可能是拼音缩写）
 const isPinyin = computed(() => {
@@ -69,6 +93,7 @@ async function doSearch(k?: string) {
     return
   }
   kw.value = word
+  lastSearched = word
   sugg.value = []
   searching.value = true
   searched.value = true

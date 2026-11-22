@@ -1,8 +1,18 @@
 <script setup lang="ts">
-/** 统一的「加载失败」占位：给出可操作的说明与重试入口，替代一闪而过的 toast。 */
+/**
+ * 统一的「加载失败」占位：给出可操作的说明与重试入口，替代一闪而过的 toast。
+ *
+ * 有些错误「重试」必然再失败（比如源站已被下线），这时光给重试就是死路。
+ * 调用方通过 #actions 插槽补充别的出口（换源搜索、清理记录等），
+ * 并可传 retryHidden 把无意义的重试按钮收起来。
+ */
 defineProps<{
   message?: string
   title?: string
+  /** 隐藏「重新加载」——错误不可恢复时用，避免用户反复点同一个死路 */
+  retryHidden?: boolean
+  /** 重试按钮文案 */
+  retryText?: string
 }>()
 const emit = defineEmits<{ (e: 'retry'): void }>()
 </script>
@@ -12,7 +22,12 @@ const emit = defineEmits<{ (e: 'retry'): void }>()
     <div class="es-icon">!</div>
     <p class="es-title">{{ title || '加载失败' }}</p>
     <p class="es-sub">{{ message || '可以检查网络或站源后重试' }}</p>
-    <el-button size="small" type="primary" @click="emit('retry')">重新加载</el-button>
+    <div class="es-actions">
+      <el-button v-if="!retryHidden" size="small" type="primary" @click="emit('retry')">
+        {{ retryText || '重新加载' }}
+      </el-button>
+      <slot name="actions" />
+    </div>
   </div>
 </template>
 
@@ -41,4 +56,12 @@ const emit = defineEmits<{ (e: 'retry'): void }>()
 }
 .es-title { font-size: 15px; color: var(--txt); margin: 0; }
 .es-sub { font-size: 13px; color: var(--dim); margin: 0 0 6px; max-width: 420px; }
+/* 主/次操作横排，窄屏自动换行 */
+.es-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: center;
+}
 </style>

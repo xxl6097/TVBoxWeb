@@ -18,6 +18,11 @@ const player = usePlayerStore()
 const siteKey = route.query.site as string
 const siteName = (route.query.siteName as string) || ''
 const vodId = route.query.id as string
+// 片名：源站失效后用它在现存源里重新搜。从首页「继续观看」跳过来时会带上，
+// 直接输地址进来时没有，此时只能让用户自己搜。
+const vodName = (route.query.name as string) || ''
+// 源站已不在配置里（不可恢复错误），用于换成「搜索/清理」出口
+const siteMissing = ref(false)
 
 const vod = ref<Vod | null>(null)
 const lines = ref<Line[]>([])
@@ -39,6 +44,7 @@ const posterFailed = ref(false)
 async function loadDetail() {
   loading.value = true
   loadError.value = ''
+  siteMissing.value = false
   try {
     const detail = await api.vodDetail(siteKey, vodId)
     vod.value = detail
@@ -49,10 +55,34 @@ async function loadDetail() {
       curLine.value = dIdx >= 0 ? dIdx : 0
     }
   } catch (e: any) {
+    // 源站不存在是「不可恢复」错误：重试多少次都是同一个结果。
+    // 单独识别出来，换成可操作的出口（按片名去现存源里重新找）。
+    if (e?.code === 'ERR_SITE' || /站源不存在/.test(String(e?.message || ''))) {
+      siteMissing.value = true
+      loadError.value = `源站「${siteName || siteKey}」已不在当前配置里。可能是订阅换了、或该源已被下线。`
+      return
+    }
     loadError.value = humanizeApiError(e)
     app.showTip('详情加载失败：' + humanizeApiError(e))
   } finally {
     loading.value = false
+  }
+}
+
+/** 按片名去搜索，让用户从现存的源里重新挑一个 */
+function searchByTitle() {
+  const kw = vodName || ''
+  router.push({ name: 'search', query: kw ? { kw } : {} })
+}
+
+/** 顺手把这条已失效的历史记录清掉，避免下次再点进来 */
+async function dropHistory() {
+  try {
+    await api.removeHistory({ siteKey, vodId } as any)
+    app.showTip('已从观看记录中移除')
+    router.back()
+  } catch {
+    app.showTip('移除失败，可在「观看记录」里手动删除')
   }
 }
 
@@ -185,6 +215,18 @@ function resumePlay() {
     </div>
 
     <!-- 详情内容 -->
+    <!-- 源站已失效：重试必然再失败，所以不给「重新加载」，改成两个能真解决问题的出口 -->
+    <ErrorState
+      v-else-if="loadError && siteMissing"
+      title="源站已失效"
+      :message="loadError"
+      retry-hidden
+    >
+      <template #actions>
+        <el-button size="small" type="primary" @click="searchByTitle">按片名搜索其他源</el-button>
+        <el-button size="small" @click="dropHistory">移除这条记录</el-button>
+      </template>
+    </ErrorState>
     <ErrorState v-else-if="loadError" :message="loadError" @retry="loadDetail" />
 
     <div v-else-if="vod" class="detail">

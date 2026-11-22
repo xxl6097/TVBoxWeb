@@ -19,10 +19,17 @@ onMounted(load)
 async function load() {
   // 网盘历史和点播历史分开存，这里合并展示（与首页「继续观看」一致），
   // 否则在网盘看过的片子在这儿也找不到。
-  const [all, wd] = await Promise.all([
+  const [all, wd, sites] = await Promise.all([
     api.history(),
-    api.webdavHistory().catch(() => [])
+    api.webdavHistory().catch(() => []),
+    // 失败给 null 而非 []：空数组是「一个站都没配」的合法结果
+    api.sites().catch(() => null)
   ])
+  // 站源可能已被下线/换订阅，历史里的 siteKey 就不存在了。
+  // 先记下现存 key，列表上标出来，别让用户点进去才看到「站源不存在」。
+  if (Array.isArray(sites)) {
+    liveSiteKeys.value = new Set(sites.map((s: any) => s.key))
+  }
   const normal = all.filter((h: HistItem) => h.name && h.name.trim())
   const wdItems: HistItem[] = (wd || [])
     .filter((x: any) => x.vodName && x.pos > 0)
@@ -74,13 +81,34 @@ function progressOf(h: HistItem): number {
   return r > 0.99 ? 0 : r < 0.02 ? 0.02 : r
 }
 
+// 当前配置里现存的站源 key。
+// null = 还没拉到，「空集合」= 真的一个站都没配。两者语义不同：
+// 前者不做判定，后者所有点播历史都算失效。混用会导致「没有站源时全都不标记」。
+const liveSiteKeys = ref<Set<string> | null>(null)
+function isDead(h: HistItem): boolean {
+  if (h.siteKey === 'webdav') return false
+  if (!liveSiteKeys.value) return false
+  return !liveSiteKeys.value.has(h.siteKey)
+}
+
 function open(h: HistItem) {
   // 网盘记录没有详情页，交给网盘页续播
   if (h.siteKey === 'webdav') {
     router.push({ name: 'webdav', query: { continue: h.vodId } })
     return
   }
-  router.push({ name: 'detail', query: { site: h.siteKey, siteName: h.siteName, id: h.vodId } })
+  // 源站已失效：跳详情页只会看到错误页，没有任何可操作出口。
+  // 直接按片名搜索，让用户从现存源里重新选一个。
+  if (isDead(h)) {
+    router.push({ name: 'search', query: { kw: h.name } })
+    app.showTip(`「${h.siteName || h.siteKey}」已失效，改用片名搜索`)
+    return
+  }
+  // 带上片名：跳过去若发现源已失效，详情页能直接用它去别的源里搜
+  router.push({
+    name: 'detail',
+    query: { site: h.siteKey, siteName: h.siteName, id: h.vodId, name: h.name }
+  })
 }
 
 // 相对时间
@@ -155,9 +183,17 @@ function clearAll() {
     <div v-if="hist.length" class="list">
       <template v-for="g in groups" :key="g.label">
         <div class="group-title">{{ g.label }} <span class="group-count">{{ g.items.length }} 条</span></div>
-        <div v-for="h in g.items" :key="h.siteKey + h.vodId" class="row" @click="open(h)">
+        <div
+          v-for="h in g.items"
+          :key="h.siteKey + h.vodId"
+          class="row"
+          :class="{ dead: isDead(h) }"
+          :title="isDead(h) ? `源站「${h.siteName || h.siteKey}」已失效，点击按片名重新搜索` : ''"
+          @click="open(h)"
+        >
           <div class="thumb">
             <img :src="h.pic" :alt="h.name" loading="lazy" />
+            <div v-if="isDead(h)" class="dead-badge">源已失效</div>
           </div>
           <div class="info">
             <div class="name">{{ h.name }}</div>
@@ -165,6 +201,7 @@ function clearAll() {
               {{ h.epName || '未开始' }}<span v-if="h.siteName"> · {{ h.siteName }}</span>
               <span v-if="h.watchedEps && h.watchedEps.length > 1"> · 已看 {{ h.watchedEps.length }} 集</span>
               <span v-if="ago(h.time)"> · {{ ago(h.time) }}</span>
+              <span v-if="isDead(h)" class="dead-hint"> · 点击换源</span>
             </div>
             <div v-if="progressOf(h) > 0" class="progress">
               <div class="bar" :style="{ width: progressOf(h) * 100 + '%' }"></div>
@@ -213,6 +250,31 @@ function clearAll() {
   overflow: hidden;
   background: var(--card);
   flex-shrink: 0;
+  /* 角标 .dead-badge 绝对定位到缩略图上 */
+  position: relative;
+}
+/* 源站已失效：缩略图压灰，仍可点（点进去改走搜索换源） */
+.row.dead .thumb img {
+  filter: grayscale(0.85);
+  opacity: 0.7;
+}
+.row.dead .name {
+  color: var(--dim);
+}
+.dead-badge {
+  position: absolute;
+  left: 4px;
+  top: 4px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.72);
+  color: var(--warn);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.6;
+}
+.dead-hint {
+  color: var(--warn);
 }
 .thumb img {
   width: 100%;
